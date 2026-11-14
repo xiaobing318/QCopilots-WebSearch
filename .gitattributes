@@ -6,11 +6,11 @@
 *.msi binary
 *.deb binary
 *.rtf binary
-tests/fuzz/corpus/** -text
-scripts/vendor/perl/JSON/*.pm -text
-scripts/vendor/perl/JSON/PP/*.pm -text
-scripts/vendor/perl/README.upstream -text
-scripts/vendor/perl/LICENSE-Artistic -text
+tests/fuzz/corpus/** -text -whitespace
+scripts/vendor/perl/JSON/*.pm -text -whitespace
+scripts/vendor/perl/JSON/PP/*.pm -text -whitespace
+scripts/vendor/perl/README.upstream -text -whitespace
+scripts/vendor/perl/LICENSE-Artistic -text -whitespace
 tests/fixtures/** -text
 tests/corpus/** binary
 *.bat text eol=crlf
