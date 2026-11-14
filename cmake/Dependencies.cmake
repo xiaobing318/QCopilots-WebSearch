@@ -15,7 +15,21 @@ set(QCWS_DEPENDENCY_PREFIX "" CACHE PATH "Private prefix prepared by the pipelin
 find_package(ZLIB 1.4 EXACT CONFIG REQUIRED COMPONENTS static
   PATHS "${QCWS_DEPENDENCY_PREFIX}/lib/cmake/zlib" NO_DEFAULT_PATH)
 if(NOT TARGET ZLIB::ZLIB)
-  add_library(ZLIB::ZLIB ALIAS ZLIB::ZLIBSTATIC)
+  # A real imported target survives CMake's OpenSSL try_compile export.
+  # An alias leaves a dangling ZLIB::ZLIB link interface in CMake 4.4.
+  add_library(ZLIB::ZLIB STATIC IMPORTED GLOBAL)
+  get_target_property(_zlib_configs ZLIB::ZLIBSTATIC IMPORTED_CONFIGURATIONS)
+  set_property(TARGET ZLIB::ZLIB PROPERTY IMPORTED_CONFIGURATIONS "${_zlib_configs}")
+  foreach(_configuration IN LISTS _zlib_configs)
+    get_target_property(_location ZLIB::ZLIBSTATIC "IMPORTED_LOCATION_${_configuration}")
+    set_property(TARGET ZLIB::ZLIB PROPERTY "IMPORTED_LOCATION_${_configuration}" "${_location}")
+  endforeach()
+  foreach(_property INTERFACE_INCLUDE_DIRECTORIES INTERFACE_COMPILE_DEFINITIONS)
+    get_target_property(_value ZLIB::ZLIBSTATIC ${_property})
+    if(_value)
+      set_property(TARGET ZLIB::ZLIB PROPERTY ${_property} "${_value}")
+    endif()
+  endforeach()
 endif()
 file(WRITE "${CMAKE_FIND_PACKAGE_REDIRECTS_DIR}/zlib-config.cmake"
   "set(ZLIB_FOUND TRUE)\nset(ZLIB_VERSION 1.4)\nset(ZLIB_VERSION_STRING 1.4)\nset(ZLIB_INCLUDE_DIR \"${QCWS_DEPENDENCY_PREFIX}/include\")\nset(ZLIB_INCLUDE_DIRS \"${QCWS_DEPENDENCY_PREFIX}/include\")\nset(ZLIB_LIBRARY ZLIB::ZLIB)\nset(ZLIB_LIBRARIES ZLIB::ZLIB)\n")
