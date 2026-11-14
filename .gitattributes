@@ -5,3 +5,7 @@
 *.zip binary
 *.msi binary
 *.deb binary
+tests/fixtures/** -text
+tests/corpus/** binary
+*.bat text eol=crlf
+*.cmd text eol=crlf
