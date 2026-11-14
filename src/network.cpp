@@ -132,7 +132,15 @@ int progress(void *p,curl_off_t,curl_off_t downloaded,curl_off_t,curl_off_t) noe
 curl_socket_t openSocket(void *p,curlsocktype purpose,curl_sockaddr *address) noexcept {
   auto &t = *static_cast<Transfer *>(p);
   try {
-    if (purpose != CURLSOCKTYPE_IPCXN || !address || address->socktype != SOCK_STREAM) return CURL_SOCKET_BAD;
+    if (purpose != CURLSOCKTYPE_IPCXN || !address) return CURL_SOCKET_BAD;
+    int socketType=address->socktype;
+#ifdef SOCK_CLOEXEC
+    socketType&=~SOCK_CLOEXEC;
+#endif
+#ifdef SOCK_NONBLOCK
+    socketType&=~SOCK_NONBLOCK;
+#endif
+    if(socketType!=SOCK_STREAM) return CURL_SOCKET_BAD;
     QHostAddress ip; bool scoped=false;
     if (address->family == AF_INET && address->addrlen >= sizeof(sockaddr_in)) {
       auto *a=reinterpret_cast<const sockaddr_in *>(&address->addr); ip=QHostAddress(ntohl(a->sin_addr.s_addr));
@@ -193,7 +201,7 @@ HttpResponse perform(const QUrl &url,const std::string &body,const std::string &
   while(auto *m=curl_multi_info_read(h.multi,&messages))if(m->msg==CURLMSG_DONE && m->easy_handle==h.easy)result=m->data.result;
   curl_off_t wire=0;check(curl_easy_getinfo(h.easy,CURLINFO_SIZE_DOWNLOAD_T,&wire));
   if(wire<0 || wire>curl_off_t(BodyLimit)-budget.wire)t.tooLarge=true;else budget.wire+=wire;
-  if(t.tooLarge || result==CURLE_FILESIZE_EXCEEDED)throw Error("response_too_large","Response exceeds its size limit.",413);
+  if(t.tooLarge || result==CURLE_FILESIZE_EXCEEDED)throw Error("response_too_large","Response exceeds its size limit.",502);
   if(t.callbackFailed)throw Error("internal_error","HTTP callback failed.",500);
   if(t.badHeader)throw Error("provider_unavailable","Invalid upstream headers.",502);
   if(result==CURLE_OPERATION_TIMEDOUT)throw Error("timeout","Request timed out.",504,true);
