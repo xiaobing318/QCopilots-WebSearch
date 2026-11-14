@@ -59,6 +59,9 @@ def apt(*args, check=True):
 
 
 def install(package, check=True):
+    # This accelerated sequence deliberately exceeds normal upgrade frequency.
+    # Reset the fixture's restart counter without weakening the shipped unit.
+    run("systemctl", "reset-failed", UNIT, check=False)
     result = apt("install", "--no-install-recommends", "--allow-downgrades", package, check=check)
     if check:
         require(package_state() == ["install ok installed", metadata(package, "Version")],

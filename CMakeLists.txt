@@ -66,4 +66,13 @@ if(QCWS_BUILD_TESTING)
   add_test(NAME stdio-process COMMAND qcws_process_tests "$<TARGET_FILE:qcopilots-websearch>"
     "${PROJECT_SOURCE_DIR}/config/runtime.json")
   set_tests_properties(stdio-process PROPERTIES TIMEOUT 90)
+  if(WIN32)
+    add_executable(qcws_windows_security_tests tests/test_windows_security.cpp)
+    target_link_libraries(qcws_windows_security_tests PRIVATE qcws_core advapi32)
+    target_compile_options(qcws_windows_security_tests PRIVATE /W4 /utf-8 /permissive-)
+    add_test(NAME windows-security COMMAND qcws_windows_security_tests)
+    set_tests_properties(windows-security PROPERTIES TIMEOUT 45)
+    set_property(TEST windows-security APPEND PROPERTY ENVIRONMENT_MODIFICATION
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+  endif()
 endif()

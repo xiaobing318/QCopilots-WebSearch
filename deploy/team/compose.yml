@@ -1,0 +1,75 @@
+name: qcopilots-websearch
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+services:
+  caddy:
+    image: docker.io/library/caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+    platform: linux/amd64
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      QCWS_HOST: ${QCWS_HOST:?Set the public DNS hostname}
+      QCWS_ACME_EMAIL: ${QCWS_ACME_EMAIL:?Set the ACME contact email}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    healthcheck:
+      test: [CMD, wget, -q, -T, "3", -O, /dev/null, "http://127.0.0.1:8090/health/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging: *logging
+  searxng:
+    image: docker.io/searxng/searxng:2026.11.14-a7128d5d1@sha256:eb8b09ffa83aebbe8b8d3ded23cfd224b2d3b01db4f3af9eb03876ef6def6dda
+    platform: linux/amd64
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${QCWS_SEARXNG_PORT:-8888}:8080"
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?Generate a private random secret}
+      SEARXNG_BASE_URL: http://127.0.0.1:${QCWS_SEARXNG_PORT:-8888}/
+      SEARXNG_VALKEY_URL: valkey://valkey:6379/0
+      GRANIAN_HOST: "0.0.0.0"
+      GRANIAN_PORT: "8080"
+    volumes:
+      - ./searxng:/etc/searxng
+      - searxng-data:/var/cache/searxng
+    networks: [egress, backend]
+    depends_on:
+      valkey:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, /usr/local/searxng/.venv/bin/python, -c, "import urllib.request; r = urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3); assert r.status == 200"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging: *logging
+  valkey:
+    image: docker.io/valkey/valkey:9.0.7-alpine@sha256:2d04268dfa26ab31cfa3fdc538866e76438b2d00e41db41b8cb86d780ac5a416
+    platform: linux/amd64
+    restart: unless-stopped
+    command: [valkey-server, --appendonly, "yes", --appendfsync, everysec, --save, "300", "1", --maxmemory, 256mb, --maxmemory-policy, allkeys-lru, --loglevel, warning]
+    volumes: [valkey-data:/data]
+    networks: [backend]
+    healthcheck:
+      test: [CMD, valkey-cli, ping]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    logging: *logging
+networks:
+  egress:
+  backend:
+    internal: true
+volumes:
+  caddy-data:
+  caddy-config:
+  searxng-data:
+  valkey-data:

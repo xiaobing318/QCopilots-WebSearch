@@ -1,0 +1,25 @@
+set(QCWS_QT_SOURCE_DIR "" CACHE PATH "Verified matching Qt source tree")
+set(QCWS_ZLIB_SOURCE_DIR "" CACHE PATH "Verified zlib source tree")
+if(NOT EXISTS "${QCWS_QT_SOURCE_DIR}/LICENSES/LGPL-3.0-only.txt")
+  message(FATAL_ERROR "Matching Qt source/licenses are required. Use the build pipeline to prepare them.")
+endif()
+install(DIRECTORY "${QCWS_QT_SOURCE_DIR}/LICENSES/" DESTINATION "${_app_share}/licenses/qt")
+install(DIRECTORY "${QCWS_QT_SOURCE_DIR}/src/3rdparty/" DESTINATION "${_app_share}/licenses/qt/thirdparty"
+  FILES_MATCHING PATTERN "*LICENSE*" PATTERN "*COPYING*" PATTERN "qt_attribution.json"
+  PATTERN "*.c" EXCLUDE PATTERN "*.h" EXCLUDE)
+foreach(dep cares curl httplib lexbor nlohmann_json json_schema_validator)
+  file(GLOB _licenses LIST_DIRECTORIES FALSE
+    "${${dep}_SOURCE_DIR}/LICENSE*" "${${dep}_SOURCE_DIR}/COPYING*")
+  if(NOT _licenses)
+    message(FATAL_ERROR "Missing license for ${dep}")
+  endif()
+  install(FILES ${_licenses} DESTINATION "${_app_share}/licenses/${dep}")
+endforeach()
+install(FILES "${QCWS_ZLIB_SOURCE_DIR}/LICENSE" DESTINATION "${_app_share}/licenses/zlib")
+get_target_property(_qt_core_location Qt6::Core IMPORTED_LOCATION_RELEASE)
+get_filename_component(_qt_library_dir "${_qt_core_location}" DIRECTORY)
+get_filename_component(_qt_prefix "${_qt_library_dir}" DIRECTORY)
+install(DIRECTORY "${_qt_prefix}/sbom/" DESTINATION "${_app_share}/sbom/qt" OPTIONAL)
+install(FILES "${_qt_prefix}/config_qtbase.opt" "${_qt_prefix}/config_qtbase.summary"
+  DESTINATION "${_app_share}/qt-build" OPTIONAL)
+install(FILES "${PROJECT_SOURCE_DIR}/NOTICE" DESTINATION "${_app_share}")

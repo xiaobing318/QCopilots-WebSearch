@@ -1,0 +1,23 @@
+QCopilots-WebSearch
+Copyright 2026 QCopilots-WebSearch contributors
+
+Project-owned native code is licensed under Apache-2.0. This does not replace
+the licenses of Qt or other dependencies. The licenses directory contains
+the upstream license texts for statically linked libraries and Qt components.
+
+Qt 6.12.0 is dynamically linked. The release includes the matching unmodified
+qtbase source archive, its build configuration, license texts and upstream SBOM.
+Users may replace the Qt shared libraries and plugins with ABI-compatible
+modified builds. Reverse engineering for debugging modifications to LGPL
+components is permitted. See docs/licensing.md for replacement instructions.
+
+Windows packages include Microsoft Visual C++ runtime redistributable files.
+Those Microsoft files are proprietary redistributable components, not licensed
+under Apache-2.0. The applicable Visual Studio license and redistributable list
+govern redistribution. Windows system libraries are not included.
+
+Linux system libraries remain managed by the operating system package manager.
+The DEB dependency metadata identifies required runtime packages.
+
+The separate QGIS adapter resides in the QGIS repository and is GPL-2.0-or-later.
+SearXNG, Caddy and Valkey remain separate deployed services with their own licenses.

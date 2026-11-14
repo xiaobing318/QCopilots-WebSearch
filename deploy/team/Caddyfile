@@ -1,0 +1,30 @@
+{
+	admin off
+	email {$QCWS_ACME_EMAIL}
+}
+
+{$QCWS_HOST} {
+	@api path /mcp /v1/status /v1/search /v1/open /v1/find
+	handle @api {
+		reverse_proxy 127.0.0.1:8088 {
+			transport http {
+				dial_timeout 3s
+				response_header_timeout 65s
+				compression off
+			}
+		}
+	}
+	handle {
+		respond "Not Found" 404
+	}
+}
+
+http://127.0.0.1:8090 {
+	bind 127.0.0.1
+	handle /health/live {
+		respond "ok" 200
+	}
+	handle {
+		respond "Not Found" 404
+	}
+}

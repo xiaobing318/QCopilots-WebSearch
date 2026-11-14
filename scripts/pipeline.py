@@ -278,6 +278,7 @@ class Pipeline:
 
     def configure(self):
         self.verify_qt()
+        qt_source = self.source(self.lock["qt_source"])
         source = self.source(self.lock["zlib"])
         dep_build, prefix = self.build / "dependencies/zlib-build", self.build / "dependencies/prefix"
         common = [f"-DCMAKE_BUILD_TYPE={self.kind}", "-DCMAKE_POSITION_INDEPENDENT_CODE=ON"]
@@ -291,6 +292,8 @@ class Pipeline:
         self.run(["cmake", "-S", ROOT, "-B", self.build, "-G", "Ninja", *common, f"-DCMAKE_PREFIX_PATH={self.qt_prefix}",
                   f"-DCMAKE_INSTALL_PREFIX={self.install}", f"-DQCWS_DEPENDENCY_PREFIX={prefix}", "-DQCWS_BUILD_TESTING=ON",
                   f"-DPython3_EXECUTABLE={sys.executable}",
+                  f"-DQCWS_QT_SOURCE_DIR={qt_source}",
+                  f"-DQCWS_ZLIB_SOURCE_DIR={source}",
                   *sources, *self.profile.get("cmakeArgs", [])])
 
     def build_stage(self):
