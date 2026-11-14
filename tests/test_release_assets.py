@@ -5,12 +5,15 @@ import stat
 import sys
 import tarfile
 import types
+import tempfile
 import unittest
 from unittest.mock import patch
 import warnings
 import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import package_inventory as assets
+import promote_release
+import verify_release
 REAL_ZIP = zipfile.ZipFile
 REG = stat.S_IFREG | 0o644
 LINK = stat.S_IFLNK | 0o777
@@ -113,6 +116,51 @@ class PackageInventoryTests(unittest.TestCase):
                 self.deb_inventory(members)
         with self.assertRaises(RuntimeError):
             self.deb_inventory([('safe', tarfile.REGTYPE, b'x')], exit_code=2)
+
+    def test_checksum_gate_detects_tampering_and_unlisted_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = root/'candidate.zip'
+            package.write_bytes(b'accepted bytes')
+            (root/'SHA256SUMS').write_text(verify_release.sha(package)+'  candidate.zip\n',encoding='utf-8')
+            self.assertEqual(set(verify_release.sums(root)),{'candidate.zip'})
+            package.write_bytes(b'changed bytes')
+            with self.assertRaisesRegex(RuntimeError,'hash mismatch'):
+                verify_release.sums(root)
+            package.write_bytes(b'accepted bytes')
+            (root/'unexpected.msi').write_bytes(b'incomplete package set')
+            with self.assertRaisesRegex(RuntimeError,'Unlisted'):
+                verify_release.sums(root)
+
+    def test_artifact_extraction_rejects_paths_and_links(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for number,(name,mode) in enumerate((('../escape',REG),('/absolute',REG),('link',LINK))):
+                archive = root/(str(number)+'.zip')
+                with REAL_ZIP(archive,'w') as output:
+                    entry = zipfile.ZipInfo(name)
+                    entry.external_attr = mode << 16
+                    output.writestr(entry,b'content')
+                with self.assertRaises(RuntimeError):
+                    promote_release.extract(archive,root/('output-'+str(number)))
+            self.assertFalse((root/'escape').exists())
+
+    def test_runtime_evidence_rejects_modified_library_hash(self):
+        import json
+        files = [{'path':'bin/library.dll','sha256':'a'*64}]
+        runtime = {'files':files,'sha256':hashlib.sha256(json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest()}
+        self.assertEqual(verify_release.checked_runtime(runtime),runtime)
+        files[0]['sha256'] = 'b'*64
+        with self.assertRaisesRegex(RuntimeError,'fingerprint mismatch'):
+            verify_release.checked_runtime(runtime)
+
+    def test_windows11_gate_rejects_server_and_missing_host(self):
+        for host in ({}, {'system':'Windows','windows':{'product_type':3,'build':26100}},
+                     {'system':'Windows','windows':{'product_type':1,'build':19045}}):
+            with self.assertRaisesRegex(RuntimeError,'Windows 11'):
+                verify_release.require_windows11({'host':host})
+        verify_release.require_windows11({'host':{'system':'Windows',
+            'windows':{'product_type':1,'build':26100}}})
 
 
 if __name__ == '__main__':

@@ -1,0 +1,63 @@
+name: Promote verified release
+on:
+  workflow_dispatch:
+    inputs:
+      Tag:
+        description: Existing vMAJOR.MINOR.PATCH tag whose CI candidate passed acceptance
+        required: true
+        type: string
+      CandidateRunId:
+        description: Successful CI run containing the exact accepted packages
+        required: true
+        type: string
+      EvidenceCommit:
+        description: Full commit containing external Windows 11 and delivery evidence
+        required: true
+        type: string
+      EvidencePath:
+        description: Evidence JSON path within release-evidence in this repository
+        required: true
+        default: release-evidence/windows11.json
+        type: string
+      EvidenceSHA256:
+        description: SHA256 of the exact external evidence JSON
+        required: true
+        type: string
+permissions:
+  actions: read
+  contents: write
+concurrency:
+  group: release-${{ inputs.Tag }}
+  cancel-in-progress: false
+jobs:
+  promote:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PYTHONUTF8: '1'
+      QCWS_TAG: ${{ inputs.Tag }}
+      QCWS_RUN: ${{ inputs.CandidateRunId }}
+      QCWS_EVIDENCE_COMMIT: ${{ inputs.EvidenceCommit }}
+      QCWS_EVIDENCE_PATH: ${{ inputs.EvidencePath }}
+      QCWS_EVIDENCE_SHA: ${{ inputs.EvidenceSHA256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.Tag }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13.17'
+          architecture: x64
+          check-latest: false
+      - name: Verify original artifacts and promote only the complete release
+        shell: python
+        run: |
+          import os,subprocess,sys
+          subprocess.run([sys.executable,'scripts/promote_release.py',
+            '--Tag',os.environ['QCWS_TAG'],'--CandidateRunId',os.environ['QCWS_RUN'],
+            '--EvidenceCommit',os.environ['QCWS_EVIDENCE_COMMIT'],
+            '--EvidencePath',os.environ['QCWS_EVIDENCE_PATH'],
+            '--EvidenceSHA256',os.environ['QCWS_EVIDENCE_SHA'],
+            '--Output','dist/release','--Publish'],check=True)

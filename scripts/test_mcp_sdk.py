@@ -24,7 +24,7 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError
 from soak import ROOT, Fault, digest, environment, start_process, stop_process
-from runtime_evidence import fingerprint
+from runtime_evidence import fingerprint, host_info
 
 EXPECTED = {"web_search", "web_open", "web_find", "web_search_status"}
 
@@ -75,7 +75,11 @@ class Handler(BaseHTTPRequestHandler):
                 deadline = time.monotonic() + 10
                 while not self.server.release.wait(0.025):
                     if select.select([self.connection], [], [], 0)[0]:
-                        if self.connection.recv(1, socket.MSG_PEEK) == b"":
+                        try:
+                            disconnected = self.connection.recv(1, socket.MSG_PEEK) == b""
+                        except ConnectionResetError:
+                            disconnected = True
+                        if disconnected:
                             self.server.disconnected.set()
                             return
                     if time.monotonic() >= deadline:
@@ -311,7 +315,7 @@ def main():
     require(output not in (args.Executable, Path(__file__).resolve()), "invalid_output")
     logging.disable(logging.CRITICAL)
     report = {"report_version": 1, "executable_sha256": digest(args.Executable),
-              "runtime": fingerprint(args.Executable),
+              "runtime": fingerprint(args.Executable), "host": host_info(),
               "sdk_version": importlib.metadata.version("mcp"),
               "httpx2_version": importlib.metadata.version("httpx2"), "transports": [], "passed": False}
     code = 1

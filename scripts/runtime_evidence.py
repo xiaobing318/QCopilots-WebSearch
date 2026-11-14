@@ -3,6 +3,21 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import platform
+import sys
+
+
+def host_info():
+    """Record the actual kernel/platform, without a hostname or user identity."""
+    result = {"system": platform.system(), "architecture": platform.machine()}
+    if sys.platform == "win32":
+        version = sys.getwindowsversion()
+        result["windows"] = {"major": version.major, "minor": version.minor,
+                             "build": version.build, "product_type": version.product_type}
+    elif sys.platform == "linux":
+        release = platform.freedesktop_os_release()
+        result["linux"] = {key: release.get(key, "") for key in ("ID", "VERSION_ID")}
+    return result
 
 
 def fingerprint(executable):

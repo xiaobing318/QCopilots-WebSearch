@@ -51,4 +51,4 @@ REST 提供 `POST /v1/search`、`/v1/open`、`/v1/find` 和 `GET /v1/status`，�
 
 进一步阅读[开源调研](docs/research.md)、[运行架构](docs/architecture.md)、
 [构建说明](docs/build.md)、[团队部署](docs/deployment.md)、
-[运维指南](docs/operations.md)及[许可说明](docs/licensing.md)。
+[运维指南](docs/operations.md)、[发布门禁](docs/release.md)及[许可说明](docs/licensing.md)。

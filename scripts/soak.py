@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import psutil
-from runtime_evidence import fingerprint
+from runtime_evidence import fingerprint, host_info
 
 ROOT = Path(__file__).resolve().parents[1]
 MIB = 1024 * 1024
@@ -411,7 +411,7 @@ def main():
     report = {"report_version": 1, "started_at": datetime.now(timezone.utc).isoformat(),
               "run_kind": "acceptance" if args.Seconds >= 1800 else "smoke",
               "executable": str(executable), "executable_sha256": digest(executable),
-              "runtime": fingerprint(executable),
+              "runtime": fingerprint(executable), "host": host_info(),
               "template_sha256": digest(template_path), "os": platform.platform(),
               "architecture": platform.machine(), "resources": resources(), "psutil": psutil.__version__,
               "seconds_per_phase": args.Seconds, "clients": 5, "requests_per_second": 2,

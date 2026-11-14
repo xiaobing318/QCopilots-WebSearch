@@ -62,4 +62,4 @@ See [the design and acceptance contract](docs/design.md). Native source uses Apa
 
 Read the [research](docs/research.md), [runtime architecture](docs/architecture.md),
 [build instructions](docs/build.md), [team deployment](docs/deployment.md),
-[operations guide](docs/operations.md) and [license details](docs/licensing.md).
+[operations guide](docs/operations.md), [release gates](docs/release.md) and [license details](docs/licensing.md).

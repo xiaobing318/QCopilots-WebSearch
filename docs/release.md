@@ -1,0 +1,62 @@
+# Release gates
+
+`publish` in the build pipeline creates local packages. It does not upload a
+release. A `vMAJOR.MINOR.PATCH` tag triggers CI on that exact commit, including
+full stability and live public-search acceptance. Ordinary push/PR builds use
+short deterministic checks. Manual CI dispatch can enable the same long checks.
+
+Windows Server CI does not prove Windows 11 installation behavior. Download the
+candidate ZIP and MSI from the successful CI run. Keep their exact bytes. On a
+clean Windows 11 desktop, validate the portable ZIP in a fresh path containing
+spaces using `scripts/acceptance_windows_zip.py --Package <ZIP> --PackageSHA256
+<SHA256> --Output <report.json>`. This runs the official SDK from the moved tree
+with only Windows system directories on PATH. Run the full stability command
+on the same candidate runtime, and execute
+`AcceptWindowsMsi.ps1` from an elevated 64-bit PowerShell session. Supply a lower
+version baseline MSI using the same product upgrade identity. The script refuses
+pre-existing products, services, installation/data directories or occupied ports.
+It exercises installation, failed transactions, upgrade, retained configuration,
+service identity, shutdown and uninstall, and cleans only its own state.
+
+The external evidence JSON is maintained under `release-evidence/` in a later
+repository commit. It contains these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | `1` |
+| `source_commit`, `candidate_run_id` | Exact tagged source and successful CI run |
+| `package_sha256` | Complete Windows ZIP/MSI map copied from candidate build-info |
+| `msi_report` | Original `AcceptWindowsMsi.ps1` result JSON |
+| `portable_report` | Original `acceptance_windows_zip.py` report, including the official SDK results |
+| `soak_report` | Original full cold/hot Windows 11 stability report |
+| `delivery_gates` | Recorded human review and QGIS integration signoff |
+
+`delivery_gates` records `council_status: "approved"`, `unresolved_p0_p1: 0`,
+the frozen `qgis_commit`, `qgis_development_passed`, `qgis_release_passed`, and
+`temporary_state_restored`. These are explicit delivery attestations. They do
+not replace the council's original reports, scoring, issue arbitration or QGIS
+test records. Preserve those underlying records with the delivery evidence.
+
+Run the **Promote verified release** workflow with the tag, candidate run ID,
+evidence commit, evidence path and exact evidence-file SHA-256. It verifies the
+run and artifact repository, source commit, workflow identity, artifact digests,
+package hashes, per-package inventories, matching sources, CTest receipts, SDK,
+full Linux/Windows stability, DEB/MSI acceptance, real Caddy HTTPS behavior,
+public search/read/find evidence and delivery signoff.
+Each Windows 11 SDK/stability report records its own kernel build and workstation
+product type. CI diagnostics must come from the same repository and run attempt.
+Use **Re-run all jobs** if repeating a candidate run, rather than mixing artifacts
+from successful and retried matrix jobs.
+
+Promotion never rebuilds the candidate. All required assets are uploaded to a
+draft release, downloaded and hashed again, then published together. A failure
+leaves the release unpublished. Existing releases are not overwritten or deleted.
+The workflow checks the tag again before publication. `promotion-inputs.json`
+records the original artifact IDs/digests and external evidence commit. Packages
+remain explicitly unsigned until separate signing evidence is provided.
+
+Public tests report engine failures and zero results without imposing a minimum
+search-success rate. They still require all 60 representative attempts and at
+least one real search/open/find closure. Service errors, invalid contracts or
+failed cleanup block acceptance. The reference Caddy check uses a synthetic
+search provider and is labelled separately from the real SearXNG public report.

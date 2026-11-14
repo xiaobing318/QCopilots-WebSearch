@@ -22,7 +22,8 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     if sys.platform != 'linux':
         raise RuntimeError('Reference Compose acceptance requires Linux')
-    report, code = {'owned_project':'qcws-live-' + secrets.token_hex(8), 'cleanup_passed':False}, 1
+    report, code = {'owned_project':'qcws-live-' + secrets.token_hex(8), 'cleanup_passed':False,
+                    'temporary_directory_removed':False}, 1
     with tempfile.TemporaryDirectory(prefix='qcws-live-compose-') as temporary:
         directory = Path(temporary) / 'team'
         shutil.copytree(root / 'deploy/team', directory)
@@ -31,7 +32,13 @@ def main():
             port = reservation.getsockname()[1]
         env = dict(os.environ, QCWS_HOST='acceptance.invalid', QCWS_ACME_EMAIL='acceptance@example.invalid',
                    SEARXNG_SECRET=secrets.token_hex(32), QCWS_SEARXNG_PORT=str(port))
-        command = ['docker','compose','--project-name',report['owned_project'],'-f',str(directory/'compose.yml')]
+        # The image otherwise chowns the bind mount to UID 977, preventing the
+        # unprivileged runner from deleting its own temporary settings directory.
+        override = directory / 'acceptance-override.json'
+        override.write_text(json.dumps({'services': {'searxng': {
+            'environment': {'FORCE_OWNERSHIP': 'false'}}}}), encoding='utf-8')
+        command = ['docker','compose','--project-name',report['owned_project'],
+                   '-f',str(directory/'compose.yml'),'-f',str(override)]
         def run(arguments, **kwargs):
             return subprocess.run(command + arguments, env=env, cwd=directory,
                                   capture_output=True, text=True, **kwargs)
@@ -61,6 +68,8 @@ def main():
             if not report['cleanup_passed']:
                 code = 1
             (output/'public-compose.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
+    report['temporary_directory_removed'] = not Path(temporary).exists()
+    (output/'public-compose.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
     return code
 
 

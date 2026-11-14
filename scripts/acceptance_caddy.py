@@ -88,12 +88,14 @@ def certificates(openssl,folder,hostname):
     tls.mkdir()
     command([openssl,'req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(folder/'ca.key'),
         '-out',str(folder/'ca.pem'),'-days','1','-subj','/CN=QCWS isolated test CA',
-        '-addext','basicConstraints=critical,CA:TRUE','-addext','keyUsage=critical,keyCertSign,cRLSign'])
+        '-addext','basicConstraints=critical,CA:TRUE','-addext','keyUsage=critical,keyCertSign,cRLSign',
+        '-addext','subjectKeyIdentifier=hash'])
     command([openssl,'req','-new','-newkey','rsa:2048','-nodes','-keyout',str(tls/'server.key'),
         '-out',str(folder/'server.csr'),'-subj','/CN='+hostname])
     extensions = folder/'server.ext'
     extensions.write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n'
-        'extendedKeyUsage=serverAuth\nsubjectAltName=DNS:'+hostname+'\n',encoding='utf-8')
+        'extendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n'
+        'subjectAltName=DNS:'+hostname+'\n',encoding='utf-8')
     command([openssl,'x509','-req','-in',str(folder/'server.csr'),'-CA',str(folder/'ca.pem'),
         '-CAkey',str(folder/'ca.key'),'-CAcreateserial','-out',str(tls/'server.pem'),
         '-days','1','-extfile',str(extensions)])
