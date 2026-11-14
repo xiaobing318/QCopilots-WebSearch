@@ -79,6 +79,7 @@ def main():
         'commands': [], 'fuzz': {}, 'tidy_files': [], 'environment': QUALITY_ENV,
         'coverage_exclusions': ['prebuilt Qt and ICU', 'system OpenSSL']}
     env = dict(os.environ, **QUALITY_ENV)
+    build = ROOT / 'build/quality'
 
     def run(label, command, timeout=1800):
         command = list(map(str, command))
@@ -121,7 +122,6 @@ def main():
         config = json.loads(args.ConfigPath.read_text(encoding='utf-8-sig'))
         profile = config['profiles'][args.Profile]
         need(profile['platform'] == 'ubuntu-x64', 'Quality profile must target Ubuntu')
-        build = ROOT / 'build/quality'
         profile.update(buildDir=str(build), installDir=str(ROOT / 'install/quality'), buildType='RelWithDebInfo', jobs=2)
         profile['cmakeArgs'] = profile.get('cmakeArgs', []) + ['-DCMAKE_C_COMPILER=/usr/bin/clang-21',
             '-DCMAKE_CXX_COMPILER=/usr/bin/clang++-21', '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON',
@@ -169,10 +169,13 @@ def main():
             executable, seed_dir = build / f'qcws_{name}_fuzz', ROOT / 'tests/fuzz/corpus' / name
             corpus = out / 'corpus' / name
             corpus.mkdir(parents=True, exist_ok=True)
+            artifacts = out / 'failures' / name
+            artifacts.mkdir(parents=True, exist_ok=True)
             item = {'executable_sha256': sha(executable), 'seeds': seeds(seed_dir), 'max_len': max_len}
             report['fuzz'][name] = item
             log = run('fuzz-' + name, [executable, corpus, seed_dir, f'-max_total_time={args.Seconds}',
-                f'-max_len={max_len}', '-timeout=5', '-rss_limit_mb=1024', '-print_final_stats=1'], timeout=args.Seconds + 60)
+                f'-max_len={max_len}', '-timeout=5', '-rss_limit_mb=1024', '-print_final_stats=1',
+                '-artifact_prefix=' + artifacts.as_posix() + '/'], timeout=args.Seconds + 60)
             text = log.read_text(encoding='utf-8', errors='replace')
             counts = re.findall(r'stat::number_of_executed_units:\s*(\d+)', text)
             coverage = re.findall(r'(?m)^#\d+\s+DONE\s+cov:\s*(\d+)\b', text)
@@ -187,6 +190,20 @@ def main():
         report['error'] = f'{type(error).__name__}: {error}'
         print(report['error'], file=sys.stderr)
     finally:
+        # Preserve actual failed compiler/test diagnostics as well as successful
+        # evidence. Failed runs must never need a rerun just to retrieve a crash.
+        for relative, name in (
+            ('test-results.xml', 'test-results.xml'),
+            ('compile_commands.json', 'compile_commands.json'),
+            ('CMakeCache.txt', 'CMakeCache.txt'),
+            ('dependencies/zlib-build/CMakeCache.txt', 'zlib-CMakeCache.txt'),
+            ('CMakeFiles/CMakeConfigureLog.yaml', 'CMakeConfigureLog.yaml'),
+            ('Testing/Temporary/LastTest.log', 'LastTest.log'),
+            ('Testing/Temporary/LastTestsFailed.log', 'LastTestsFailed.log'),
+        ):
+            candidate = build / relative
+            if candidate.is_file():
+                shutil.copyfile(candidate, out / name)
         report['files'] = {p.name: sha(p) for p in sorted(out.iterdir()) if p.is_file() and p.name != 'quality.json'}
         (out / 'quality.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
     return 0 if report['passed'] else 1

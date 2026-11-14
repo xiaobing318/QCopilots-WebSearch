@@ -96,7 +96,7 @@ if [[ "$mode" == reject ]]; then
 else
     # Empty profile.proxy must defeat inherited/global/per-host proxy settings.
     printf 'Acquire::http::Proxy "http://127.0.0.1:9";\nAcquire::http::Proxy::archive.ubuntu.com "http://127.0.0.1:9";\n' > /etc/apt/apt.conf.d/99qcws-proxy-test
-    export http_proxy=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 no_proxy='*'
+    export http_proxy=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 no_proxy='' NO_PROXY=''
     args=(--ConfigPath "$config" --Profile "$profile" --Stages bootstrap,doctor)
     printf '%s\0' "${args[@]}" > "$expected"
     no_python
