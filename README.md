@@ -19,7 +19,7 @@ No paid provider, independent web index, PDF extraction, JavaScript execution or
 
 ## Build
 
-Windows requires VS2022 with the C++ workload and Windows SDK, CMake 3.28+, Ninja, Git and Python 3.12+. Bootstrap installs the fixed Qt archives and isolated Python download tooling. It does not install Visual Studio. Ubuntu bootstrap installs its compiler and system dependencies using apt.
+Windows requires VS2022 with the C++ workload and Windows SDK, CMake 3.30+, Ninja, Git, native Windows Perl and Python 3.12+. Bootstrap installs the fixed Qt archives and isolated Python download tooling. It does not install Visual Studio or Perl. Ubuntu bootstrap installs its compiler and system dependencies using apt.
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/BuildPipeline.ps1 --Profile windows-x64 --Stages bootstrap,doctor,configure,build,test,install
@@ -59,3 +59,7 @@ Web content is untrusted source material. Tools return provenance and bounded te
 - `docs`: architecture, acceptance and review records
 
 See [the design and acceptance contract](docs/design.md). Native source uses Apache-2.0. Third-party libraries retain their own licenses. Qt is dynamically linked and release artifacts must include its matching source and replacement instructions. QGIS adaptation code remains in the QGIS GPL repository.
+
+Read the [research](docs/research.md), [runtime architecture](docs/architecture.md),
+[build instructions](docs/build.md), [team deployment](docs/deployment.md),
+[operations guide](docs/operations.md) and [license details](docs/licensing.md).

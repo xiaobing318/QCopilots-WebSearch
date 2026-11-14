@@ -19,5 +19,14 @@ govern redistribution. Windows system libraries are not included.
 Linux system libraries remain managed by the operating system package manager.
 The DEB dependency metadata identifies required runtime packages.
 
+Windows dynamically links bundled OpenSSL 3.5.9, licensed under Apache-2.0.
+The matching source archive accompanies release assets. Its license is installed
+with the application.
+
+The cpp-httplib 0.66.0 MIT header is modified for request-input deadlines and
+owned-socket shutdown. The modified header and patch script are under
+share/qcopilots-websearch/sources/httplib, with a modification notice under
+share/qcopilots-websearch/licenses/httplib.
+
 The separate QGIS adapter resides in the QGIS repository and is GPL-2.0-or-later.
 SearXNG, Caddy and Valkey remain separate deployed services with their own licenses.

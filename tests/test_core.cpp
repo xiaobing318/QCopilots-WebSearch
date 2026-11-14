@@ -1,8 +1,12 @@
 #include <QCoreApplication>
 #include <QFile>
+#include <QLockFile>
+#include <QProcess>
 #include <QSqlDatabase>
+#include <QSqlQuery>
 #include <QTemporaryDir>
 #include <QUrlQuery>
+#include <QUuid>
 #include <array>
 #include <future>
 #include <httplib.h>
@@ -124,6 +128,9 @@ void networkTests() {
         [&] { client.getPublic("http://localhost:" + std::to_string(port) + "/search", token()); });
   error("destination_blocked",
         [&] { client.getPublic("http://2130706433:" + std::to_string(port) + "/search", token()); });
+  error("destination_blocked",
+        [&] { client.getPublic("http://[::ffff:127.0.0.1]:" + std::to_string(port) + "/search", token()); });
+  REQUIRE(requests == 1);
   error("invalid_argument", [&] { client.getPublic("file:///etc/passwd", token()); });
   error("invalid_argument", [&] { client.getPublic("http://user:password@example.com", token()); });
   error("provider_unavailable", [&] { client.requestBackend(base + "/redirect", "", "", token()); });
@@ -414,6 +421,83 @@ void cacheTests() {
     error("cache_unavailable", [&] { Cache bad(dir.path().toStdString()); });
   REQUIRE(QSqlDatabase::connectionNames().size() == baseline);
 }
+struct SqlFixture {
+  QString name = "fixture-" + QUuid::createUuid().toString();
+  QSqlDatabase db;
+  explicit SqlFixture(const QString &path) : db(QSqlDatabase::addDatabase("QSQLITE", name)) {
+    db.setDatabaseName(path);
+    if (!db.open()) {
+      db = QSqlDatabase();
+      QSqlDatabase::removeDatabase(name);
+      throw std::runtime_error("Cannot open SQLite fixture");
+    }
+  }
+  ~SqlFixture() {
+    db.close();
+    db = QSqlDatabase();
+    QSqlDatabase::removeDatabase(name);
+  }
+  void execute(const QString &sql) {
+    QSqlQuery query(db);
+    REQUIRE(query.exec(sql));
+  }
+};
+void cacheFailureTests() {
+  QTemporaryDir dir;
+  REQUIRE(dir.isValid());
+  const auto baseline = QSqlDatabase::connectionNames().size();
+  const auto path = dir.filePath("faults.sqlite");
+  auto probe = [&](const QString &expect) {
+    QProcess child;
+    child.start(QCoreApplication::applicationFilePath(), {"--cache-lock-probe", path, expect});
+    if (!child.waitForFinished(5000)) {
+      child.kill();
+      child.waitForFinished(2000);
+      throw std::runtime_error("Cache lock probe timed out");
+    }
+    REQUIRE(child.exitStatus() == QProcess::NormalExit);
+    REQUIRE(child.exitCode() == 0);
+  };
+  {
+    Cache cache(path.toStdString(), 16 * 1024 * 1024, 100, [] { return std::int64_t(100); });
+    cache.put("stable", {{"value", "original"}}, 60);
+    probe("locked");
+    SqlFixture fixture(path);
+    fixture.execute("BEGIN IMMEDIATE");
+    const auto began = Clock::now();
+    error("cache_unavailable", [&] { cache.put("stable", {{"value", "replacement"}}, 60); });
+    REQUIRE(Clock::now() - began < std::chrono::seconds(2));
+    fixture.execute("ROLLBACK");
+    REQUIRE(cache.get("stable")->at("value") == "original");
+    cache.put("after-busy", {{"ok", true}}, 60);
+    REQUIRE(cache.get("after-busy")->at("ok") == true);
+    fixture.execute("CREATE TABLE fixture_filler(data BLOB)");
+    fixture.execute("INSERT INTO fixture_filler VALUES(zeroblob(3*1024*1024))");
+    Json large = {{"data", std::string(2 * 1024 * 1024, 'x')}};
+    REQUIRE(large.dump().size() < cache.stats()["effective_payload_limit"].get<std::size_t>());
+    error("cache_unavailable", [&] { cache.put("stable", large, 60); });
+    REQUIRE(cache.get("stable")->at("value") == "original");
+    fixture.execute("DROP TABLE fixture_filler");
+    cache.put("stable", large, 60);
+    REQUIRE(cache.get("stable")->at("data").get<std::string>().size() == 2 * 1024 * 1024);
+    fixture.execute("UPDATE entries SET payload=X'7B',size=1");
+    REQUIRE(!cache.get("stable"));
+    cache.put("recovered", {{"ok", true}}, 60);
+    REQUIRE(cache.get("recovered")->at("ok") == true);
+  }
+  probe("open");
+  REQUIRE(QSqlDatabase::connectionNames().size() == baseline);
+  const auto corrupt = dir.filePath("corrupt.sqlite");
+  {
+    QFile file(corrupt);
+    REQUIRE(file.open(QIODevice::WriteOnly));
+    REQUIRE(file.write("not a SQLite database") == 21);
+  }
+  error("cache_unavailable", [&] { Cache broken(corrupt.toStdString()); });
+  REQUIRE(QSqlDatabase::connectionNames().size() == baseline);
+  QLockFile lock(corrupt + ".lock");
+  REQUIRE(lock.tryLock(0));
+}
 void htmlTests() {
   auto p = parseHtml("<title>T &amp; T</title><nav>omit</nav><main><p>A &amp; B</p><p "
                      "hidden>secret</p><p>中文</p><script>bad</script><a href='/x'>Link</a></main>",
@@ -456,6 +540,44 @@ void htmlTests() {
     deep += "<div>";
   deep += 'x';
   error("response_too_large", [&] { parseHtml(deep, "https://example.com", "text/html"); });
+}
+void htmlBoundaryTests() {
+  auto read = [](const std::string &s, const std::string &type = "text/html") {
+    return parseHtml(s, "https://example.com/a", type);
+  };
+  REQUIRE(read("<table><tr><td>New</td><td>York</td></tr></table>").text == "New\nYork");
+  REQUIRE(read("<base href='https://cdn.example.org/docs/'><a href='guide'>x</a>").links[0]["url"] ==
+          "https://cdn.example.org/docs/guide");
+  REQUIRE(read("<base href='javascript:invalid'><base href='https://other.example/'><a href='guide'>x</a>")
+              .links[0]["url"] == "https://example.com/guide");
+  REQUIRE(read("<a href='https://@example.com/'>x</a>").links.empty());
+  REQUIRE(read("<base href='https://@other.example/'><a href='guide'>x</a>").links[0]["url"] ==
+          "https://example.com/guide");
+  REQUIRE(read("<!--<meta charset=GBK>--><script>'<meta charset=GBK>'</script><p>中文</p>").text == "中文");
+  REQUIRE(read("<meta charset=UTF-8><p>" + std::string("\xd6\xd0\xce\xc4", 4), "text/html; charset=\"GBK\"")
+              .text == "中文");
+  REQUIRE(read(std::string("\xff\xfe\x2d\x4e", 4), "text/plain; charset=UTF-8").text == "中");
+  auto big5 = read(std::string(4095, 'a') + std::string("\x88\x62", 2) + "Z", "text/plain; charset=Big5");
+  REQUIRE(QString::fromStdString(big5.text).remove('\n').endsWith(QString::fromUtf8("Ê̄Z")));
+  auto cut = read("<p>ok" + std::string(1024 * 1024 - 6, ' ') + "😀");
+  REQUIRE(cut.truncated);
+  REQUIRE(cut.text == "ok");
+  auto capped = read(QString::fromUtf8("😀").repeated(200001).toStdString(), "text/plain");
+  REQUIRE(capped.truncated);
+  REQUIRE(QString::fromStdString(capped.text).toUcs4().size() == 200000);
+  std::string exactLines;
+  for (int i = 0; i < 10000; ++i)
+    exactLines += "<p>x</p>";
+  auto exact = read(exactLines);
+  auto over = read(exactLines + "<p>y</p>");
+  REQUIRE(!exact.truncated);
+  REQUIRE(QString::fromStdString(exact.text).split('\n').size() == 10000);
+  REQUIRE(over.truncated);
+  REQUIRE(over.text == exact.text);
+  std::string hiddenDeep = "<base href='https://example.com/'><div hidden>";
+  for (int i = 0; i < 514; ++i)
+    hiddenDeep += "<div>";
+  error("response_too_large", [&] { read(hiddenDeep + "x"); });
 }
 void serviceTests() {
   QTemporaryDir dir;
@@ -606,6 +728,33 @@ void httpTests() {
 } // namespace
 int main(int argc, char **argv) {
   QCoreApplication app(argc, argv);
+  if (argc == 4 &&
+      (std::string(argv[1]) == "--tls-timeout-probe" || std::string(argv[1]) == "--tls-cancel-probe")) {
+    const bool cancel = std::string(argv[1]) == "--tls-cancel-probe";
+    auto cancellation = token(cancel ? 3000 : 300);
+    std::jthread canceller([cancel, cancellation] {
+      if (cancel) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        cancellation->cancelled = true;
+      }
+    });
+    try {
+      HttpClient client(argv[3]);
+      client.requestBackend(argv[2], "q=tls", "", cancellation);
+      return 41;
+    } catch (const Error &e) {
+      return e.code == (cancel ? "cancelled" : "timeout") ? 0 : 42;
+    }
+  }
+  if (argc == 4 && std::string(argv[1]) == "--cache-lock-probe") {
+    const bool expectOpen = std::string(argv[3]) == "open";
+    try {
+      Cache cache(argv[2], 16 * 1024 * 1024, 100);
+      return expectOpen ? 0 : 31;
+    } catch (const Error &e) {
+      return !expectOpen && e.code == "cache_unavailable" ? 0 : 32;
+    }
+  }
   if (argc == 5 && std::string(argv[1]) == "--tls-probe") {
     const bool success = std::string(argv[4]) == "success";
     try {
@@ -621,7 +770,9 @@ int main(int argc, char **argv) {
                                                        {"network-regression", networkRegressionTests},
                                                        {"coalescing", coalescingTests},
                                                        {"cache", cacheTests},
+                                                       {"cache-failures", cacheFailureTests},
                                                        {"html", htmlTests},
+                                                       {"html-boundaries", htmlBoundaryTests},
                                                        {"service", serviceTests},
                                                        {"concurrency", concurrencyTests},
                                                        {"protocol", protocolTests},

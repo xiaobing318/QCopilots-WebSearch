@@ -29,6 +29,12 @@ VS2022 and imports its x64 environment, including its bundled CMake/Ninja.
 Windows bootstrap downloads Qt and isolated Python tooling. It does not install
 Visual Studio or a Windows compiler. Missing prerequisites produce diagnostics.
 
+The Windows OpenSSL build also requires native Windows Perl, such as Strawberry
+Perl 5.42.3.1. Set `tools.perl` or put its `perl.exe` on PATH. Git/MSYS/Cygwin Perl
+is rejected because its path model does not match the MSVC build. Bootstrap does
+not install this toolchain prerequisite. CI prepares pinned official packages
+using `scripts/ci_windows_tools.py --IncludePerl` in a private tools directory.
+
 Ubuntu bootstrap uses apt to install GCC, CMake, Ninja, Git, Python and runtime
 development dependencies, then installs the same fixed Qt version from its
 verified archive. Root or noninteractive sudo is required for missing system
@@ -75,6 +81,11 @@ official WiX 7 EULA acknowledgment required by that tool. Review the fee terms
 described in [licensing](licensing.md) before use.
 
 `publish` builds local ZIP/MSI or DEB files. It never uploads a GitHub Release.
+Each completed configure/build/test/install stage writes a receipt binding the
+source bytes and selected profile. Tests also bind their executables and runtime
+libraries. A source or profile change requires repeating these stages before
+packaging. Failed stages invalidate prior receipts. ZIP and MSI payloads must
+match, and each package receives its own file inventory and SBOM.
 MSI installation requires elevation because it registers a machine service.
 Packages are unsigned unless a release explicitly supplies signing evidence.
 

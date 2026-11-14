@@ -43,7 +43,13 @@ Linux Qt also ships ICU 73.2 libraries, with their Unicode/ICU notices.
 
 Linux uses distribution-managed OpenSSL shared libraries. The DEB records its
 system dependencies. Apply Ubuntu security updates and restart the service to
-load updated libraries. Windows uses Schannel from the operating system.
+load updated libraries. Windows dynamically links the bundled OpenSSL 3.5.9
+libraries under Apache-2.0. Packages include their license and release assets
+include the matching fixed-version source archive.
+
+The cpp-httplib 0.66.0 header is modified to bound request-input lifetime and
+interrupt owned sockets on shutdown. Its MIT license still applies. Packages
+include the modified header, patch script and modification notice under `share`.
 
 Windows packages include the permitted Microsoft Visual C++ runtime DLLs from
 the licensed Visual Studio redistribution directory. These DLLs are proprietary

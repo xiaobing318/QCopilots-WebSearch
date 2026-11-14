@@ -28,9 +28,10 @@ struct Runtime {
       throw Error("internal_error", "HTTP runtime initialization failed.", 500);
     const auto *v = curl_version_info(CURLVERSION_NOW);
     if (!v || !v->ares || !(v->features & CURL_VERSION_ASYNCHDNS) || !(v->features & CURL_VERSION_SSL) ||
-        !(v->features & CURL_VERSION_LIBZ)) {
+        !(v->features & CURL_VERSION_LIBZ) || !v->ssl_version ||
+        !std::string_view(v->ssl_version).starts_with("OpenSSL/")) {
       curl_global_cleanup();
-      throw Error("internal_error", "HTTP requires c-ares, TLS and gzip.", 500);
+      throw Error("internal_error", "HTTP requires c-ares, OpenSSL and gzip.", 500);
     }
   }
   ~Runtime() {
@@ -271,6 +272,14 @@ HttpResponse perform(const QUrl &url, const std::string &body, const std::string
   option(h.easy, CURLOPT_NOPROXY, "*");
   option(h.easy, CURLOPT_SSL_VERIFYPEER, 1L);
   option(h.easy, CURLOPT_SSL_VERIFYHOST, 2L);
+  // OpenSSL never performs certificate AIA/CRL HTTP retrieval. Only import
+  // Windows trust anchors when no explicit private-backend CA was supplied.
+  long sslOptions = CURLSSLOPT_NO_PARTIALCHAIN;
+#ifdef _WIN32
+  if (ca.empty())
+    sslOptions |= CURLSSLOPT_NATIVE_CA;
+#endif
+  option(h.easy, CURLOPT_SSL_OPTIONS, sslOptions);
   option(h.easy, CURLOPT_FRESH_CONNECT, 1L);
   option(h.easy, CURLOPT_FORBID_REUSE, 1L);
   // netrc, Alt-Svc and HSTS are disabled at compile time in the pinned curl.
@@ -290,8 +299,10 @@ HttpResponse perform(const QUrl &url, const std::string &body, const std::string
   option(h.easy, CURLOPT_XFERINFODATA, &t);
   option(h.easy, CURLOPT_OPENSOCKETFUNCTION, openSocket);
   option(h.easy, CURLOPT_OPENSOCKETDATA, &t);
-  if (!ca.empty())
+  if (!ca.empty()) {
+    option(h.easy, CURLOPT_CAPATH, static_cast<const char *>(nullptr));
     option(h.easy, CURLOPT_CAINFO, ca.c_str());
+  }
   if (!body.empty()) {
     option(h.easy, CURLOPT_POSTFIELDSIZE_LARGE, curl_off_t(body.size()));
     option(h.easy, CURLOPT_POSTFIELDS, body.data());

@@ -21,7 +21,7 @@
 
 ## 构建与运行
 
-Windows 需先具备 VS2022 C++ 工作负载、Windows SDK、CMake 3.28+、Ninja、Git 和 Python 3.12+。引导阶段下载固定版本 Qt，默认安装根目录为 `C:/Softwares/Qt`。Ubuntu 引导阶段通过 apt 准备 GCC 等工具和系统依赖，再下载 Qt。
+Windows 需先具备 VS2022 C++ 工作负载、Windows SDK、CMake 3.30+、Ninja、Git、原生 Windows Perl 和 Python 3.12+。引导阶段下载固定版本 Qt，默认安装根目录为 `C:/Softwares/Qt`，不安装 Visual Studio 或 Perl。Ubuntu 引导阶段通过 apt 准备 GCC 等工具和系统依赖，再下载 Qt。
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/BuildPipeline.ps1 --Profile windows-x64 --Stages bootstrap,doctor,configure,build,test,install
@@ -48,3 +48,7 @@ REST 提供 `POST /v1/search`、`/v1/open`、`/v1/find` 和 `GET /v1/status`，�
 网页内容属于不可信外部资料。客户端应将返回内容用于引用与分析。公共抓取会检查真实连接地址及每次重定向，阻止内网和云元数据目标，不继承系统代理。
 
 详细约束见[架构与验收方案](docs/design.md)。原生仓库采用 Apache-2.0，第三方依赖保留各自许可。Qt 动态链接，正式发行须附匹配源码及共享库替换说明。QGIS 适配代码留在 QGIS 仓库中并遵循 GPL 许可。
+
+进一步阅读[开源调研](docs/research.md)、[运行架构](docs/architecture.md)、
+[构建说明](docs/build.md)、[团队部署](docs/deployment.md)、
+[运维指南](docs/operations.md)及[许可说明](docs/licensing.md)。

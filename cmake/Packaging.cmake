@@ -8,7 +8,12 @@ set(CPACK_VERBATIM_VARIABLES YES)
 set(CPACK_PACKAGE_CHECKSUM SHA256)
 set(CPACK_RESOURCE_FILE_LICENSE "${PROJECT_SOURCE_DIR}/LICENSE")
 if(WIN32)
-  configure_file("${PROJECT_SOURCE_DIR}/LICENSE" "${PROJECT_BINARY_DIR}/LICENSE.txt" COPYONLY)
+  file(READ "${PROJECT_SOURCE_DIR}/LICENSE" _project_license)
+  file(READ "${PROJECT_SOURCE_DIR}/packaging/windows/licenses/Microsoft-VC-Runtime.txt" _runtime_license)
+  file(WRITE "${PROJECT_BINARY_DIR}/LICENSE.txt"
+    "QCopilots-WebSearch source is Apache-2.0. The Apache license below applies to project code.\n\n"
+    "Windows packages also contain Microsoft runtime libraries. The separate Microsoft terms after the Apache license apply only to those libraries. Qt and other dependencies retain the licenses included in the package. LGPL library replacement and debugging rights are preserved.\n\n"
+    "${_project_license}\n\nMICROSOFT RUNTIME ONLY\n\n${_runtime_license}\n")
   set(CPACK_RESOURCE_FILE_LICENSE "${PROJECT_BINARY_DIR}/LICENSE.txt")
   if(CMAKE_VERSION VERSION_LESS 3.30)
     message(FATAL_ERROR "WiX .NET packaging requires CMake 3.30 or newer")

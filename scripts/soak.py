@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import psutil
+from runtime_evidence import fingerprint
 
 ROOT = Path(__file__).resolve().parents[1]
 MIB = 1024 * 1024
@@ -410,6 +411,7 @@ def main():
     report = {"report_version": 1, "started_at": datetime.now(timezone.utc).isoformat(),
               "run_kind": "acceptance" if args.Seconds >= 1800 else "smoke",
               "executable": str(executable), "executable_sha256": digest(executable),
+              "runtime": fingerprint(executable),
               "template_sha256": digest(template_path), "os": platform.platform(),
               "architecture": platform.machine(), "resources": resources(), "psutil": psutil.__version__,
               "seconds_per_phase": args.Seconds, "clients": 5, "requests_per_second": 2,
@@ -431,8 +433,9 @@ def main():
                 print(f"{name}: starting", flush=True)
                 report["phases"].append(phase(name, executable, template, folder / name, fixture, args.Seconds))
         report["executable_unchanged"] = digest(executable) == report["executable_sha256"]
+        report["runtime_unchanged"] = fingerprint(executable) == report["runtime"]
         report["checks_passed"] = (len(report["phases"]) == 2 and all(p["passed"] for p in report["phases"])
-                                   and report["executable_unchanged"])
+                                   and report["executable_unchanged"] and report["runtime_unchanged"])
         report["full_acceptance"] = (report["checks_passed"] and args.Seconds >= 1800
                                      and report["resources"]["minimum_met"])
         code = 0 if report["checks_passed"] and (args.Seconds < 1800 or report["full_acceptance"]) else 1

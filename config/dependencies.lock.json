@@ -1,4 +1,9 @@
 {
+  "openssl_windows": {
+    "url": "https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz",
+    "sha256": "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a",
+    "sourceDir": "openssl-3.5.9"
+  },
   "qt": {
     "windows-x64": {
       "version": "6.12.0",
@@ -28,6 +33,16 @@
           "destination": "lib"
         }
       ]
+    }
+  },
+  "redistribution": {
+    "qt_psl_data": {
+      "url": "https://raw.githubusercontent.com/publicsuffix/list/e452c7058d6946bd76952b128c12f5ce87a5acb8/public_suffix_list.dat",
+      "sha256": "5c75b7ea88e26f7940a888a34872345cb85c9484a4d0056c4063525d8c8aa184"
+    },
+    "icu_license": {
+      "url": "https://raw.githubusercontent.com/unicode-org/icu/release-73-2/icu4c/LICENSE",
+      "sha256": "f3005e195ff74d8812cc1f182a1c446fab678d70a10e3dada497585befee5416"
     }
   },
   "qt_source": {

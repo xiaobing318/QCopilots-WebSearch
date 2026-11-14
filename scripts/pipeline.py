@@ -3,6 +3,7 @@
 from __future__ import annotations
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -16,6 +17,8 @@ import tempfile
 import time
 import urllib.request
 import venv
+from build_evidence import identity, require_receipt, write_receipt, build_artifacts
+from runtime_evidence import fingerprint
 
 ROOT = Path(__file__).resolve().parents[1]
 WIN = sys.platform == "win32"
@@ -54,14 +57,14 @@ class Pipeline:
         p = Path(self.profile[key]).expanduser()
         return (p if p.is_absolute() else ROOT / p).resolve()
 
-    def run(self, command, capture=False):
+    def run(self, command, capture=False, cwd=None):
         command = list(map(str, command))
         if command[0] in self.tool_paths and self.tool_paths[command[0]]:
             command[0] = str(Path(self.tool_paths[command[0]]).expanduser().resolve())
         print("+", subprocess.list2cmdline(command), flush=True)
         if self.dry:
             return ""
-        return subprocess.run(command, cwd=ROOT, env=self.env, check=True, text=True,
+        return subprocess.run(command, cwd=cwd or ROOT, env=self.env, check=True, text=True,
                               encoding="utf-8", errors="replace",
                               stdout=subprocess.PIPE if capture else None).stdout or ""
 
@@ -258,6 +261,8 @@ class Pipeline:
             raise RuntimeError("CMake 3.28 or newer is required.")
         for tool in ("ninja", "git"):
             self.run([tool, "--version"])
+        if WIN:
+            self.native_perl()
         print("Host:", platform.platform(), "(CI build evidence is not desktop acceptance)")
         self.verify_qt()
 
@@ -276,9 +281,73 @@ class Pipeline:
                 Path(tmp).rename(destination)
         return destination / artifact["sourceDir"]
 
+    def native_perl(self):
+        if not self.tool_paths.get("perl") and not shutil.which("perl", path=self.env.get("PATH")):
+            raise RuntimeError("Install native Strawberry Perl or set tools.perl. Windows bootstrap only installs Qt, not compiler tools.")
+        if self.run(["perl", "-e", "print $^O"], True).strip() != "MSWin32" and not self.dry:
+            raise RuntimeError("OpenSSL requires native Windows Perl. Git/MSYS/Cygwin Perl is not supported.")
+
+    def patched_httplib(self, source):
+        script = ROOT / "cmake/patches/httplib_input_lifetime.py"
+        patch_hash = self.digest(script)
+        destination = self.build / "dependencies" / ("httplib-" + patch_hash[:16])
+        expected = "9234907a4431c8e62cb12f7573a03a1c095b028e246f578c9ede700395bd620c"
+        if not self.dry:
+            if not destination.exists():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.TemporaryDirectory(prefix=".httplib-", dir=destination.parent) as tmp:
+                    stage = Path(tmp) / "source"
+                    shutil.copytree(source, stage)
+                    spec = importlib.util.spec_from_file_location("qcws_httplib_patch", script)
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    header = stage / "httplib.h"
+                    header.write_bytes(module.patch(header.read_bytes()))
+                    if self.digest(header) != expected:
+                        raise RuntimeError("Patched cpp-httplib checksum mismatch")
+                    stage.rename(destination)
+            if self.digest(destination / "httplib.h") != expected:
+                raise RuntimeError("Modified cpp-httplib build copy")
+        return destination
+
+    def windows_openssl(self):
+        if not WIN:
+            return []
+        self.native_perl()
+        spec = self.lock["openssl_windows"]
+        verified_source = self.source(spec)
+        directory = self.build / "dependencies" / ("openssl-" + spec["sha256"][:12])
+        source = directory / "source"
+        build = directory / "build"
+        prefix = directory / "installed"
+        if not self.dry:
+            build.mkdir(parents=True, exist_ok=True)
+            # Native Perl resolves relative source paths before normalizing
+            # parent segments. Keep this build's source adjacent to its output
+            # instead of traversing back into the long SHA-keyed download cache.
+            if not source.is_dir():
+                shutil.copytree(verified_source, source)
+        marker = directory / "qcws-complete.json"
+        identity = {"source": spec["sha256"], "compiler": self.env.get("VCToolsVersion", ""),
+                    "sdk": self.env.get("WindowsSDKVersion", ""),
+                    "options": ["VC-WIN64A", "shared", "no-asm", "no-autoload-config", "no-module", "no-engine", "no-tests"]}
+        complete = marker.is_file() and json.loads(marker.read_text()) == identity
+        complete = complete and all((prefix / f"bin/{name}-3-x64.dll").is_file() for name in ("libssl", "libcrypto"))
+        if not complete:
+            self.run(["perl", source / "Configure", *identity["options"], f"--prefix={prefix}", "--libdir=lib"], cwd=build)
+            self.run(["nmake", "/nologo", "build_libs"], cwd=build)
+            self.run(["nmake", "/nologo", "install_dev"], cwd=build)
+            if not self.dry:
+                marker.write_text(json.dumps(identity), encoding="utf-8")
+        return [f"-DQCWS_OPENSSL_PREFIX={prefix}", f"-DQCWS_OPENSSL_SOURCE_DIR={source}"]
+
     def configure(self):
+        self.invalidate_receipts('configure', 'build', 'test', 'install')
+        current = identity(ROOT, self.profile) if not self.dry else None
         self.verify_qt()
         qt_source = self.source(self.lock["qt_source"])
+        redistribution = [f"-DQCWS_{name.upper()}={self.download(spec)}"
+                          for name, spec in self.lock["redistribution"].items()]
         source = self.source(self.lock["zlib"])
         dep_build, prefix = self.build / "dependencies/zlib-build", self.build / "dependencies/prefix"
         common = [f"-DCMAKE_BUILD_TYPE={self.kind}", "-DCMAKE_POSITION_INDEPENDENT_CODE=ON"]
@@ -288,27 +357,86 @@ class Pipeline:
                   "-DCMAKE_INSTALL_LIBDIR=lib", "-DZLIB_BUILD_SHARED=OFF", "-DZLIB_BUILD_STATIC=ON", "-DZLIB_BUILD_TESTING=OFF", "-DZLIB_INSTALL=ON"])
         self.run(["cmake", "--build", dep_build, "--parallel", self.jobs])
         self.run(["cmake", "--install", dep_build])
-        sources = [f"-DFETCHCONTENT_SOURCE_DIR_{name.upper()}={self.source(spec)}" for name, spec in self.lock["sources"].items()]
+        sources = []
+        for name, spec in self.lock["sources"].items():
+            prepared = self.source(spec)
+            if name == "httplib":
+                prepared = self.patched_httplib(prepared)
+            sources.append(f"-DFETCHCONTENT_SOURCE_DIR_{name.upper()}={prepared}")
+        tls = self.windows_openssl()
         self.run(["cmake", "-S", ROOT, "-B", self.build, "-G", "Ninja", *common, f"-DCMAKE_PREFIX_PATH={self.qt_prefix}",
                   f"-DCMAKE_INSTALL_PREFIX={self.install}", f"-DQCWS_DEPENDENCY_PREFIX={prefix}", "-DQCWS_BUILD_TESTING=ON",
                   f"-DPython3_EXECUTABLE={sys.executable}",
                   f"-DQCWS_QT_SOURCE_DIR={qt_source}",
                   f"-DQCWS_ZLIB_SOURCE_DIR={source}",
-                  *sources, *self.profile.get("cmakeArgs", [])])
+                  *sources, *redistribution, *tls, *self.profile.get("cmakeArgs", [])])
+        if not self.dry:
+            if identity(ROOT,self.profile) != current:
+                raise RuntimeError('Source changed during configure')
+            write_receipt(self.build / 'configure-receipt.json', current)
+
+    def invalidate_receipts(self, *stages):
+        if not self.dry:
+            for stage in stages:
+                (self.build / (stage + '-receipt.json')).unlink(missing_ok=True)
 
     def build_stage(self):
+        self.invalidate_receipts('build', 'test', 'install')
+        current = identity(ROOT, self.profile) if not self.dry else None
+        if not self.dry:
+            require_receipt(self.build / 'configure-receipt.json', current)
         self.run(["cmake", "--build", self.build, "--parallel", self.jobs])
+        if not self.dry:
+            if identity(ROOT, self.profile) != current:
+                raise RuntimeError("Source changed during build")
+            write_receipt(self.build / "build-receipt.json", current,
+                          artifacts=build_artifacts(self.build,self.qt_prefix,WIN))
 
     def test(self):
+        self.invalidate_receipts('test', 'install')
+        current = identity(ROOT, self.profile) if not self.dry else None
+        if not self.dry:
+            built = require_receipt(self.build / "build-receipt.json", current)
+            if built['artifacts'] != build_artifacts(self.build,self.qt_prefix,WIN):
+                raise RuntimeError('Build artifacts changed before tests')
         self.verify_qt()
-        self.run(["ctest", "--test-dir", self.build, "--output-on-failure", "--parallel", self.jobs,
+        self.run(["ctest", "--test-dir", self.build, "--output-on-failure", "--no-tests=error", "--parallel", self.jobs,
                   "--output-junit", self.build / "test-results.xml"])
+        if not self.dry:
+            if identity(ROOT, self.profile) != current:
+                raise RuntimeError("Source changed during tests")
+            if built['artifacts'] != build_artifacts(self.build,self.qt_prefix,WIN):
+                raise RuntimeError('Build artifacts changed during tests')
+            write_receipt(self.build / "test-receipt.json", current,
+                          artifacts=built['artifacts'],
+                          junit_sha256=self.digest(self.build / "test-results.xml"))
 
     def install_stage(self):
+        self.invalidate_receipts('install')
+        current = identity(ROOT, self.profile) if not self.dry else None
+        if not self.dry:
+            tested = require_receipt(self.build / "test-receipt.json", current)
+            if tested['artifacts'] != build_artifacts(self.build,self.qt_prefix,WIN):
+                raise RuntimeError('Build artifacts changed after tests')
         self.run(["cmake", "--install", self.build])
+        if not self.dry:
+            if identity(ROOT, self.profile) != current:
+                raise RuntimeError("Source changed during installation")
+            if tested['artifacts'] != build_artifacts(self.build,self.qt_prefix,WIN):
+                raise RuntimeError('Build artifacts changed during installation')
+            relative = "bin/qcopilots-websearch.exe" if WIN else "opt/qcopilots-websearch/bin/qcopilots-websearch"
+            write_receipt(self.build / "install-receipt.json", current,
+                          tested_artifacts=tested['artifacts'],
+                          runtime=fingerprint(self.install / relative))
 
     def publish(self):
-        if WIN:
+        if not self.dry:
+            current = identity(ROOT, self.profile)
+            installed = require_receipt(self.build / "install-receipt.json", current)
+            relative = "bin/qcopilots-websearch.exe" if WIN else "opt/qcopilots-websearch/bin/qcopilots-websearch"
+            if installed['runtime'] != fingerprint(self.install / relative):
+                raise RuntimeError("Installed runtime changed after validation")
+        if WIN and "WIX" in self.profile["packageGenerators"]:
             version = self.run(["wix", "--version"], True).strip()
             if not self.dry and not version.startswith("7.0.1"):
                 raise RuntimeError("Packaging requires official WiX 7.0.1. See docs/build.md.")
@@ -320,7 +448,8 @@ class Pipeline:
             packages = sorted(p for p in destination.iterdir() if p.is_file() and p.suffix.lower() in (".zip", ".msi", ".deb"))
             if len(packages) != len(self.profile["packageGenerators"]):
                 raise RuntimeError("Incomplete package set.")
-            (destination / "SHA256SUMS").write_text("".join(f"{self.digest(p)}  {p.name}\n" for p in packages), encoding="utf-8")
+            from release_assets import generate
+            generate(self, destination, packages)
 
 
 def main():

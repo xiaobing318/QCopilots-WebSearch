@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 
 
@@ -18,12 +19,22 @@ class Server(ThreadingHTTPServer):
     daemon_threads = False
     block_on_close = True
 
-    def __init__(self, context=None):
+    def __init__(self, context=None, stall=False):
         self.context = context
+        self.stall = stall
         self.lock = threading.Lock()
         self.accepted = self.posts = self.crl_reads = 0
         self.crl_path, self.crl_data = "", b""
         super().__init__(("127.0.0.1", 0), Handler)
+
+    def finish_request(self, request, address):
+        if not self.stall:
+            return super().finish_request(request, address)
+        try:
+            while request.recv(4096):
+                pass
+        except OSError:
+            pass
 
     def get_request(self):
         raw, address = super().get_request()
@@ -106,7 +117,7 @@ def certificates(directory, openssl, crl_url):
     write("request.cnf", "[req]\nprompt=no\ndistinguished_name=dn\n[dn]\nCN=QCWS fixture leaf\n")
     for name in ("ca", "other-ca"):
         text = (f"[req]\nprompt=no\ndistinguished_name=dn\n[dn]\nCN=QCWS {uuid.uuid4().hex}\n"
-                "[root]\nbasicConstraints=critical,CA:TRUE,pathlen:0\n"
+                "[root]\nbasicConstraints=critical,CA:TRUE,pathlen:1\n"
                 "keyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n"
                 "authorityKeyIdentifier=keyid:always\n")
         if name == "ca":
@@ -146,15 +157,29 @@ authorityKeyIdentifier=keyid:always
     cases = {"valid": ("IP:127.0.0.1", now-hour, now+day),
              "wrong-san": ("DNS:fixture.invalid", now-hour, now+day),
              "expired": ("IP:127.0.0.1", now-2*day, now-day),
-             "future": ("IP:127.0.0.1", now+day, now+2*day)}
+             "future": ("IP:127.0.0.1", now+day, now+2*day),
+             "client-only": ("IP:127.0.0.1", now-hour, now+day)}
     for name, (san, start, end) in cases.items():
         write(name + ".cnf", "[leaf]\nbasicConstraints=critical,CA:FALSE\n"
-              "keyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n"
+              "keyUsage=critical,digitalSignature,keyEncipherment\n"
+              f"extendedKeyUsage={'clientAuth' if name == 'client-only' else 'serverAuth'}\n"
               "subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid:always\n"
-              f"subjectAltName={san}\ncrlDistributionPoints=URI:{crl_url}\n")
+              f"subjectAltName={san}\ncrlDistributionPoints=URI:{crl_url}\n"
+              f"authorityInfoAccess=caIssuers;URI:{crl_url}.issuer,OCSP;URI:{crl_url}.ocsp\n")
         run("ca", "-batch", "-notext", "-config", "ca.cnf", "-in", "leaf.csr", "-out", name + ".pem",
             "-extfile", name + ".cnf", "-extensions", "leaf", "-startdate", start.strftime("%Y%m%d%H%M%SZ"),
             "-enddate", end.strftime("%Y%m%d%H%M%SZ"))
+    run("req", "-new", "-newkey", "rsa:2048", "-nodes", "-sha256", "-config", "request.cnf",
+        "-subj", "/CN=QCWS fixture intermediate", "-keyout", "intermediate.key", "-out", "intermediate.csr")
+    write("intermediate.cnf", "basicConstraints=critical,CA:TRUE,pathlen:0\n"
+          "keyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n"
+          "authorityKeyIdentifier=keyid:always\n")
+    run("x509", "-req", "-in", "intermediate.csr", "-CA", "ca.pem", "-CAkey", "ca.key",
+        "-set_serial", "101", "-days", "1", "-sha256", "-extfile", "intermediate.cnf", "-out", "intermediate.pem")
+    run("x509", "-req", "-in", "leaf.csr", "-CA", "intermediate.pem", "-CAkey", "intermediate.key",
+        "-set_serial", "102", "-days", "1", "-sha256", "-extfile", "valid.cnf", "-extensions", "leaf", "-out", "missing-chain.pem")
+    write("full-chain.pem", (directory / "missing-chain.pem").read_text() +
+          (directory / "intermediate.pem").read_text())
     run("ca", "-gencrl", "-config", "ca.cnf", "-out", "ca.crl.pem")
     run("crl", "-in", "ca.crl.pem", "-outform", "DER", "-out", "ca.crl")
     run("verify", "-CAfile", "ca.pem", "-CRLfile", "ca.crl.pem", "-crl_check_all", "-purpose",
@@ -193,14 +218,30 @@ def main():
             ca = directory / "ca.pem"
             with serving(tls_server(directory, "valid")) as good:
                 probe(executable, good, ca, "success", "trusted CA and IP SAN")
-                if sys.platform == "win32" and crl.counters()[2] == 0:
-                    raise RuntimeError("Schannel did not retrieve the fresh CRL")
+                if crl.counters()[0] != 0:
+                    raise RuntimeError("Certificate verification bypassed the outbound policy")
                 probe(executable, good, "", "reject", "missing CA")
                 probe(executable, good, directory / "other-ca.pem", "reject", "unrelated CA")
-                for name in ("wrong-san", "expired", "future"):
+                for name in ("wrong-san", "expired", "future", "client-only", "missing-chain"):
                     with serving(tls_server(directory, name)) as bad:
                         probe(executable, bad, ca, "reject", name)
                     probe(executable, good, ca, "success", "control after " + name)
+                with serving(tls_server(directory, "full-chain")) as chained:
+                    probe(executable, chained, ca, "success", "complete intermediate chain")
+                if crl.counters()[0] != 0:
+                    raise RuntimeError("AIA, OCSP or CRL caused an implicit network request")
+                print("PASS tls no implicit AIA/OCSP/CRL requests", flush=True)
+            # A real TCP peer accepts TLS ClientHello but never replies. The
+            # library must still obey cancellation and its total deadline.
+            with serving(Server(stall=True)) as stalled:
+                for mode in ("timeout", "cancel"):
+                    started = time.monotonic()
+                    result = subprocess.run([executable, "--tls-" + mode + "-probe",
+                        f"https://127.0.0.1:{stalled.server_port}/search", str(ca)],
+                        capture_output=True, text=True, timeout=4)
+                    if result.returncode or time.monotonic() - started > 2.5:
+                        raise RuntimeError("Stalled TLS did not honor " + mode)
+                    print("PASS tls stalled handshake " + mode, flush=True)
 
 
 if __name__ == "__main__":

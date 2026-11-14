@@ -259,18 +259,14 @@ struct Output {
   QString value;
   qsizetype scalarCount = 0, lineScalars = 0;
   int lines = 1;
-  bool pendingSpace = false, full = false;
+  bool pendingSpace = false, pendingBoundary = false, full = false;
   void boundary() {
     pendingSpace = false;
-    if (full || value.isEmpty() || value.endsWith('\n'))
+    if (full || value.isEmpty() || pendingBoundary)
       return;
-    if (lines >= 10000 || scalarCount >= 200000) {
-      full = true;
-      return;
-    }
-    value.append('\n');
-    ++scalarCount;
-    ++lines;
+    // A trailing block boundary is discarded, so it must not consume a
+    // line or report truncation until there is more visible content.
+    pendingBoundary = true;
     lineScalars = 0;
   }
   void put(char32_t cp) {
@@ -278,6 +274,16 @@ struct Output {
       return;
     if (lineScalars >= 1000)
       boundary();
+    if (pendingBoundary) {
+      if (lines >= 10000 || scalarCount + 1 >= 200000) {
+        full = true;
+        return;
+      }
+      value.append('\n');
+      ++scalarCount;
+      ++lines;
+      pendingBoundary = false;
+    }
     if (full)
       return;
     if (scalarCount >= 200000) {
@@ -349,6 +355,18 @@ HtmlDocument parseHtml(const std::string &body, const std::string &url, const st
     if (!doc || lxb_html_document_parse(doc.get(), reinterpret_cast<const lxb_char_t *>(html.constData()),
                                         size_t(html.size())) != LXB_STATUS_OK)
       throw Error("unsupported_content", "HTML parsing failed.", 415);
+    // Validate the whole DOM, including hidden and head subtrees, before
+    // choosing the readable subtree or stopping at the first base element.
+    std::vector<Frame> complexity{{lxb_dom_interface_node(doc.get()), 0}};
+    std::size_t nodes = 0;
+    while (!complexity.empty()) {
+      const auto f = complexity.back();
+      complexity.pop_back();
+      if (f.depth > 512 || ++nodes > 50000)
+        tooLarge();
+      for (auto *c = f.node->last_child; c; c = c->prev)
+        complexity.push_back({c, f.depth + 1});
+    }
     size_t length = 0;
     const auto *title = lxb_html_document_title(doc.get(), &length);
     auto titleText = utf8(title, length).simplified().left(2048);
@@ -392,6 +410,7 @@ HtmlDocument parseHtml(const std::string &body, const std::string &url, const st
           baseFound = true;
           const auto target = base.resolved(QUrl(attribute(n, "href"), QUrl::StrictMode));
           if (target.isValid() && !target.host().isEmpty() && target.userInfo().isEmpty() &&
+              !target.authority(QUrl::FullyEncoded).contains('@') &&
               (target.scheme() == "http" || target.scheme() == "https"))
             base = target;
         }
@@ -422,6 +441,7 @@ HtmlDocument parseHtml(const std::string &body, const std::string &url, const st
         const auto link = base.resolved(QUrl(href, QUrl::StrictMode));
         const auto encoded = link.toString(QUrl::FullyEncoded);
         if (!href.isEmpty() && link.isValid() && !link.host().isEmpty() && link.userInfo().isEmpty() &&
+            !link.authority(QUrl::FullyEncoded).contains('@') &&
             (link.scheme() == "http" || link.scheme() == "https") && encoded.size() <= 4096 &&
             !seen.contains(encoded)) {
           if (out.links.size() < 200) {

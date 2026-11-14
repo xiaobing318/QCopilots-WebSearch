@@ -24,6 +24,7 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError
 from soak import ROOT, Fault, digest, environment, start_process, stop_process
+from runtime_evidence import fingerprint
 
 EXPECTED = {"web_search", "web_open", "web_find", "web_search_status"}
 
@@ -310,6 +311,7 @@ def main():
     require(output not in (args.Executable, Path(__file__).resolve()), "invalid_output")
     logging.disable(logging.CRITICAL)
     report = {"report_version": 1, "executable_sha256": digest(args.Executable),
+              "runtime": fingerprint(args.Executable),
               "sdk_version": importlib.metadata.version("mcp"),
               "httpx2_version": importlib.metadata.version("httpx2"), "transports": [], "passed": False}
     code = 1
@@ -318,6 +320,7 @@ def main():
         require(report["httpx2_version"] == "2.16.0", "unexpected_httpx2_version")
         asyncio.run(run(args, report))
         require(digest(args.Executable) == report["executable_sha256"], "binary_changed")
+        require(fingerprint(args.Executable) == report["runtime"], "runtime_changed")
         require(len(report["transports"]) == 2, "missing_transport")
         require(report["http_process_stop"]["passed"], "http_process_stop_failed")
         report["passed"], code = True, 0

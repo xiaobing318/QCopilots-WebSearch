@@ -22,7 +22,8 @@
         "git": "",
         "wix": "",
         "dotnet": "",
-        "visualStudio": ""
+        "visualStudio": "",
+        "perl": ""
       }
     },
     "ubuntu-x64": {

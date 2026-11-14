@@ -100,38 +100,46 @@ struct HttpServer::Impl {
         .set_payload_max_length(1024 * 1024)
         .set_compress(false);
     server.set_default_headers({{"Cache-Control", "no-store"}, {"X-Content-Type-Options", "nosniff"}});
-    server.set_pre_routing_handler([this, listener](const httplib::Request &req, httplib::Response &res) {
-      try {
-        if (req.get_header_value_count("Host") != 1 ||
-            !contains(listener["allowed_hosts"], req.get_header_value("Host"), true))
-          throw Error("forbidden", "Host is not allowed.", 403);
-        if (req.get_header_value_count("Origin") > 1)
-          throw Error("forbidden", "Origin is not allowed.", 403);
-        if (req.has_header("Origin")) {
-          const auto origin = req.get_header_value("Origin");
-          if (!contains(listener["origins"], origin))
-            throw Error("forbidden", "Origin is not allowed.", 403);
-          res.set_header("Access-Control-Allow-Origin", origin);
-          res.set_header("Vary", "Origin");
-          res.set_header("Access-Control-Expose-Headers", "Mcp-Session-Id");
-        }
-        if (req.method == "OPTIONS") {
-          if (!req.has_header("Origin"))
-            throw Error("forbidden", "Browser preflight requires an allowed Origin.", 403);
-          res.status = 204;
-          res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-          res.set_header("Access-Control-Allow-Headers",
-                         "Authorization, Content-Type, Accept, Mcp-Session-Id, MCP-Protocol-Version");
-          res.set_header("Access-Control-Max-Age", "600");
-          return httplib::Server::HandlerResponse::Handled;
-        }
-        (void)authorize(req);
-        return httplib::Server::HandlerResponse::Unhandled;
-      } catch (const Error &e) {
-        sendError(res, e);
-        return httplib::Server::HandlerResponse::Handled;
-      }
-    });
+    server.set_pre_routing_handler(
+        [this, listener, controls](const httplib::Request &req, httplib::Response &res) {
+          try {
+            const bool hasBody =
+                req.has_header("Transfer-Encoding") ||
+                (req.has_header("Content-Length") && req.get_header_value("Content-Length") != "0");
+            if ((controls || req.method != "POST") && hasBody) {
+              res.set_header("Connection", "close");
+              throw Error("invalid_argument", "Request body is not permitted on this endpoint.", 400);
+            }
+            if (req.get_header_value_count("Host") != 1 ||
+                !contains(listener["allowed_hosts"], req.get_header_value("Host"), true))
+              throw Error("forbidden", "Host is not allowed.", 403);
+            if (req.get_header_value_count("Origin") > 1)
+              throw Error("forbidden", "Origin is not allowed.", 403);
+            if (req.has_header("Origin")) {
+              const auto origin = req.get_header_value("Origin");
+              if (!contains(listener["origins"], origin))
+                throw Error("forbidden", "Origin is not allowed.", 403);
+              res.set_header("Access-Control-Allow-Origin", origin);
+              res.set_header("Vary", "Origin");
+              res.set_header("Access-Control-Expose-Headers", "Mcp-Session-Id");
+            }
+            if (req.method == "OPTIONS") {
+              if (!req.has_header("Origin"))
+                throw Error("forbidden", "Browser preflight requires an allowed Origin.", 403);
+              res.status = 204;
+              res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+              res.set_header("Access-Control-Allow-Headers",
+                             "Authorization, Content-Type, Accept, Mcp-Session-Id, MCP-Protocol-Version");
+              res.set_header("Access-Control-Max-Age", "600");
+              return httplib::Server::HandlerResponse::Handled;
+            }
+            (void)authorize(req);
+            return httplib::Server::HandlerResponse::Unhandled;
+          } catch (const Error &e) {
+            sendError(res, e);
+            return httplib::Server::HandlerResponse::Handled;
+          }
+        });
     server.set_error_handler([](const httplib::Request &, httplib::Response &res) {
       if (!res.body.empty())
         return;
