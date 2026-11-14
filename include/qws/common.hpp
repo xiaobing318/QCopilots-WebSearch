@@ -1,9 +1,9 @@
 #pragma once
 
-#include <nlohmann/json.hpp>
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -14,10 +14,9 @@ using Clock = std::chrono::steady_clock;
 
 class Error final : public std::runtime_error {
 public:
-  Error(std::string value, std::string safeMessage, int httpStatus = 400,
-        bool canRetry = false)
-      : std::runtime_error(std::move(safeMessage)), code(std::move(value)),
-        status(httpStatus), retryable(canRetry) {}
+  Error(std::string value, std::string safeMessage, int httpStatus = 400, bool canRetry = false)
+      : std::runtime_error(std::move(safeMessage)), code(std::move(value)), status(httpStatus),
+        retryable(canRetry) {}
   const std::string code;
   const int status;
   const bool retryable;
@@ -32,7 +31,6 @@ struct CancelToken {
 };
 
 inline Json errorPayload(const Error &error) {
-  return {{"error", {{"code", error.code}, {"message", error.what()},
-                     {"retryable", error.retryable}}}};
+  return {{"error", {{"code", error.code}, {"message", error.what()}, {"retryable", error.retryable}}}};
 }
 } // namespace qws

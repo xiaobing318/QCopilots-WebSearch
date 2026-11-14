@@ -1,0 +1,39 @@
+# Every destination is relative to the staging root. Installing on a developer
+# machine must not write to its /etc or register a system service.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set(_app_root "opt/qcopilots-websearch")
+  set(_app_bin "${_app_root}/bin")
+  set(_app_share "${_app_root}/share/qcopilots-websearch")
+  set_target_properties(qcopilots-websearch PROPERTIES
+    INSTALL_RPATH "$ORIGIN/../lib" INSTALL_RPATH_USE_LINK_PATH FALSE)
+  install(TARGETS qcopilots-websearch RUNTIME DESTINATION "${_app_bin}")
+  qt6_generate_deploy_script(TARGET qcopilots-websearch OUTPUT_SCRIPT _deploy_script CONTENT "
+    qt6_deploy_runtime_dependencies(
+      EXECUTABLE \"$<TARGET_FILE:qcopilots-websearch>\"
+      BIN_DIR \"${_app_bin}\" LIB_DIR \"${_app_root}/lib\"
+      LIBEXEC_DIR \"${_app_root}/libexec\" PLUGINS_DIR \"${_app_root}/plugins\"
+      NO_TRANSLATIONS NO_COMPILER_RUNTIME
+      EXCLUDE_PLUGINS qsqlibase qsqlmimer qsqlmysql qsqloci qsqlodbc qsqlpsql)")
+  install(SCRIPT "${_deploy_script}")
+  file(MAKE_DIRECTORY "${PROJECT_BINARY_DIR}/debian")
+  file(WRITE "${PROJECT_BINARY_DIR}/debian/qt.conf"
+    "[Paths]\nPrefix=..\nLibraries=lib\nPlugins=plugins\nBinaries=bin\nLibraryExecutables=libexec\n")
+  install(FILES "${PROJECT_BINARY_DIR}/debian/qt.conf" DESTINATION "${_app_bin}")
+  file(READ "${PROJECT_SOURCE_DIR}/config/runtime.json" _runtime)
+  string(JSON _runtime SET "${_runtime}" clients "[{\"id\":\"local\",\"token_file\":\"client.token\"}]")
+  string(JSON _runtime SET "${_runtime}" cache directory "\"/var/lib/qcopilots-websearch/cache\"")
+  file(WRITE "${PROJECT_BINARY_DIR}/debian/runtime.json" "${_runtime}\n")
+  install(FILES "${PROJECT_BINARY_DIR}/debian/runtime.json" DESTINATION "etc/qcopilots-websearch"
+    PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ)
+  install(FILES deploy/systemd/qcopilots-websearch.service DESTINATION "usr/lib/systemd/system")
+else()
+  set(_app_share "share/qcopilots-websearch")
+  install(TARGETS qcopilots-websearch RUNTIME DESTINATION bin)
+  qt_generate_deploy_app_script(TARGET qcopilots-websearch OUTPUT_SCRIPT _deploy_script
+    NO_TRANSLATIONS NO_COMPILER_RUNTIME
+    EXCLUDE_PLUGINS qsqlibase qsqlmimer qsqlmysql qsqloci qsqlodbc qsqlpsql)
+  install(SCRIPT "${_deploy_script}")
+endif()
+install(DIRECTORY contracts/ DESTINATION "${_app_share}/contracts")
+install(FILES config/runtime.json config/runtime.schema.json DESTINATION "${_app_share}/config")
+install(FILES LICENSE README.md README.zh-CN.md DESTINATION "${_app_share}")

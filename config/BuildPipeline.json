@@ -14,7 +14,16 @@
       "packageGenerators": [
         "ZIP",
         "WIX"
-      ]
+      ],
+      "offline": false,
+      "tools": {
+        "cmake": "",
+        "ninja": "",
+        "git": "",
+        "wix": "",
+        "dotnet": "",
+        "visualStudio": ""
+      }
     },
     "ubuntu-x64": {
       "platform": "ubuntu-x64",
@@ -28,7 +37,16 @@
       "cmakeArgs": [],
       "packageGenerators": [
         "DEB"
-      ]
+      ],
+      "offline": false,
+      "tools": {
+        "cmake": "",
+        "ninja": "",
+        "git": "",
+        "wix": "",
+        "dotnet": "",
+        "visualStudio": ""
+      }
     }
   }
 }

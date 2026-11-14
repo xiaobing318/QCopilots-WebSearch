@@ -15,9 +15,20 @@ if(WIN32)
   set(CPACK_WIX_BUILD_EXTRA_FLAGS "-acceptEula;wix7")
 else()
   set(CPACK_GENERATOR DEB)
+  set(CPACK_PACKAGING_INSTALL_PREFIX "/")
+  set(CPACK_DEBIAN_PACKAGE_NAME "qcopilots-websearch")
+  set(CPACK_DEBIAN_FILE_NAME "DEB-DEFAULT")
   set(CPACK_DEBIAN_PACKAGE_MAINTAINER "QCopilots-WebSearch contributors")
   set(CPACK_DEBIAN_PACKAGE_SECTION net)
   set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE amd64)
-  set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6, libstdc++6, libgcc-s1, libglib2.0-0t64, libzstd1, zlib1g, libgssapi-krb5-2, libbrotli1, libssl3t64, ca-certificates, adduser")
+  set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/xiaobing318/QCopilots-WebSearch")
+  set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+  set(CPACK_DEBIAN_PACKAGE_DEPENDS "ca-certificates, adduser, init-system-helpers, libssl3t64")
+  set(CPACK_DEBIAN_PACKAGE_CONTROL_STRICT_PERMISSION TRUE)
+  set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA
+    "${PROJECT_SOURCE_DIR}/deploy/debian/postinst"
+    "${PROJECT_SOURCE_DIR}/deploy/debian/prerm"
+    "${PROJECT_SOURCE_DIR}/deploy/debian/postrm"
+    "${PROJECT_SOURCE_DIR}/deploy/debian/conffiles")
 endif()
 include(CPack)

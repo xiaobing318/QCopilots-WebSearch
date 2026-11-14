@@ -1,13 +1,13 @@
 #pragma once
-#include <qws/common.hpp>
 #include <functional>
 #include <optional>
+#include <qws/common.hpp>
 namespace qws {
 class Cache {
 public:
   using TimeSource = std::function<std::int64_t()>;
-  explicit Cache(std::string path, std::int64_t maxBytes = 256LL * 1024 * 1024,
-                 int maxEntries = 10000, TimeSource clock = {});
+  explicit Cache(std::string path, std::int64_t maxBytes = 256LL * 1024 * 1024, int maxEntries = 10000,
+                 TimeSource clock = {});
   ~Cache();
   Cache(const Cache &) = delete;
   Cache &operator=(const Cache &) = delete;
@@ -16,8 +16,9 @@ public:
   void erase(const std::string &key);
   Json stats();
   void close();
+
 private:
   struct Impl;
   std::unique_ptr<Impl> d_;
 };
-}
+} // namespace qws

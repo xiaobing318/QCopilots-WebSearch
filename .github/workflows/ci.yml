@@ -67,6 +67,21 @@ jobs:
           profile=os.environ['QCWS_PROFILE']
           with tarfile.open(output/f'QCopilots-WebSearch-{profile}-ci.tar.gz','w:gz') as archive:
               archive.add(source,arcname=f'QCopilots-WebSearch-{profile}')
+      - name: Build DEB candidate
+        if: runner.os == 'Linux'
+        shell: python
+        run: |
+          import os, subprocess, sys
+          subprocess.run([sys.executable,'scripts/pipeline.py','--ConfigPath',os.environ['QCWS_CONFIG'],'--Profile',os.environ['QCWS_PROFILE'],'--Stages','publish'],check=True)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: runner.os == 'Linux'
+        with:
+          name: packages-${{ matrix.profile }}
+          path: |
+            build/ci/packages/**/*.deb
+            build/ci/packages/**/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: installed-${{ matrix.profile }}
@@ -83,5 +98,6 @@ jobs:
             build/ci/Testing/Temporary/*.log
             build/ci/CMakeFiles/CMakeConfigureLog.yaml
             build/ci/CMakeCache.txt
+            build/ci/packages/**/CPack*.log
           if-no-files-found: ignore
           retention-days: 14

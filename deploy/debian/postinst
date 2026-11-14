@@ -1,0 +1,67 @@
+#!/bin/sh
+set -eu
+case "${1:-}" in
+    configure|abort-upgrade|abort-remove|abort-deconfigure) ;;
+    *) exit 0 ;;
+esac
+if [ -n "${DPKG_ROOT:-}" ]; then
+    echo "Configure QCopilots-WebSearch inside the target root using chroot." >&2
+    exit 1
+fi
+account=qcopilots-websearch
+unit=qcopilots-websearch.service
+config_dir=/etc/qcopilots-websearch
+config_file=$config_dir/runtime.json
+token_file=$config_dir/client.token
+state_dir=/var/lib/qcopilots-websearch
+program=/opt/qcopilots-websearch/bin/qcopilots-websearch
+fail() { echo "QCopilots-WebSearch: $1" >&2; exit 1; }
+if ! getent passwd "$account" >/dev/null; then
+    adduser --system --group --home "$state_dir" --no-create-home --disabled-login "$account"
+fi
+[ "$(id -u "$account")" -ne 0 ] || fail "The service account must not be root."
+[ "$(id -gn "$account")" = "$account" ] || fail "Unexpected primary service group."
+for directory in "$config_dir" "$state_dir"; do
+    [ ! -L "$directory" ] || fail "A managed directory is a symbolic link."
+    if [ -e "$directory" ] && [ ! -d "$directory" ]; then
+        fail "A managed directory path is not a directory."
+    fi
+done
+# Never recursively chown retained user data.
+install -d -o root -g "$account" -m 0750 "$config_dir"
+install -d -o "$account" -g "$account" -m 0700 "$state_dir"
+# dpkg owns the conffile. An intentional administrator deletion stays deleted.
+if [ -e "$config_file" ] || [ -L "$config_file" ]; then
+    [ -f "$config_file" ] && [ ! -L "$config_file" ] || fail "Configuration is not a regular file."
+    chown root:"$account" "$config_file"
+    chmod 0640 "$config_file"
+fi
+if [ -e "$token_file" ] || [ -L "$token_file" ]; then
+    [ -f "$token_file" ] && [ ! -L "$token_file" ] || fail "Credential is not a regular file."
+else
+    umask 077
+    token_tmp=$(mktemp "$config_dir/.client.token.XXXXXXXX")
+    trap 'test -z "${token_tmp:-}" || rm -f -- "$token_tmp"' 0
+    env -u LD_LIBRARY_PATH -u QT_PLUGIN_PATH -u QML2_IMPORT_PATH "$program" --GenerateToken >"$token_tmp"
+    [ -s "$token_tmp" ] || fail "Credential generation failed."
+    chown "$account:$account" "$token_tmp"
+    chmod 0600 "$token_tmp"
+    ln -T -- "$token_tmp" "$token_file"
+    rm -f -- "$token_tmp"
+    token_tmp=
+fi
+chown "$account:$account" "$token_file"
+chmod 0600 "$token_file"
+deb-systemd-helper unmask "$unit" >/dev/null || true
+if deb-systemd-helper --quiet was-enabled "$unit"; then
+    deb-systemd-helper enable "$unit" >/dev/null || true
+else
+    deb-systemd-helper update-state "$unit" >/dev/null || true
+fi
+if [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null || true
+    action=start
+    if [ -n "${2:-}" ]; then action=restart; fi
+    deb-systemd-invoke "$action" "$unit" >/dev/null || true
+fi
+exit 0

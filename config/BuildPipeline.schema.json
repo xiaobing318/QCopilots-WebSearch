@@ -91,6 +91,47 @@
             },
             "minItems": 1,
             "uniqueItems": true
+          },
+          "offline": {
+            "type": "boolean",
+            "description": "离线模式。候选true或false，默认false。true禁止网络下载并要求当前平台/Python版本的wheel、Qt和源码已在缓存，false允许校验后下载缺失依赖。"
+          },
+          "tools": {
+            "type": "object",
+            "description": "工具路径覆盖。候选为空对象或已列出的工具键，空值自动发现，绝对可执行文件路径优先于PATH。visualStudio指定VS2022安装目录。",
+            "additionalProperties": false,
+            "properties": {
+              "cmake": {
+                "type": "string",
+                "maxLength": 4096,
+                "description": "cmake路径。候选为空字符串或绝对可执行文件路径，空值自动发现，指定路径覆盖默认发现结果。"
+              },
+              "ninja": {
+                "type": "string",
+                "maxLength": 4096,
+                "description": "ninja路径。候选为空字符串或绝对可执行文件路径，空值自动发现，指定路径覆盖默认发现结果。"
+              },
+              "git": {
+                "type": "string",
+                "maxLength": 4096,
+                "description": "git路径。候选为空字符串或绝对可执行文件路径，空值自动发现，指定路径覆盖默认发现结果。"
+              },
+              "wix": {
+                "type": "string",
+                "maxLength": 4096,
+                "description": "wix路径。候选为空字符串或绝对可执行文件路径，空值自动发现，指定路径覆盖默认发现结果。"
+              },
+              "dotnet": {
+                "type": "string",
+                "maxLength": 4096,
+                "description": "dotnet路径。候选为空字符串或绝对可执行文件路径，空值自动发现，指定路径覆盖默认发现结果。"
+              },
+              "visualStudio": {
+                "type": "string",
+                "maxLength": 4096,
+                "description": "visualStudio路径。候选为空字符串或绝对VS2022安装目录，空值自动发现，指定路径覆盖默认发现结果。"
+              }
+            }
           }
         },
         "required": [

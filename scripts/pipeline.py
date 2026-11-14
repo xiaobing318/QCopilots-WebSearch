@@ -42,6 +42,8 @@ class Pipeline:
         self.qt_prefix = self.qt_root / self.qt["version"] / self.qt["directory"]
         self.kind = self.profile["buildType"]
         self.jobs = str(self.profile["jobs"])
+        self.offline = self.profile.get("offline", False)
+        self.tool_paths = self.profile.get("tools", {})
         if self.profile["platform"] != PLATFORM:
             raise RuntimeError("Selected profile does not match this operating system.")
         for path in (self.build, self.install, self.cache):
@@ -54,6 +56,8 @@ class Pipeline:
 
     def run(self, command, capture=False):
         command = list(map(str, command))
+        if command[0] in self.tool_paths and self.tool_paths[command[0]]:
+            command[0] = str(Path(self.tool_paths[command[0]]).expanduser().resolve())
         print("+", subprocess.list2cmdline(command), flush=True)
         if self.dry:
             return ""
@@ -75,8 +79,15 @@ class Pipeline:
             directory.parent.mkdir(parents=True, exist_ok=True)
             venv.EnvBuilder(with_pip=True).create(directory)
         if "bootstrap" in self.args.Stages and not self.args.CheckOnly:
-            self.run([python, "-m", "pip", "install", "--only-binary=:all:", "--require-hashes",
-                      "--cache-dir", self.cache / "pip", "-r", ROOT / "scripts/requirements-tools.lock"])
+            wheels = self.cache / "wheels" / f"{PLATFORM}-py{sys.version_info.major}.{sys.version_info.minor}"
+            if not self.dry:
+                wheels.mkdir(parents=True, exist_ok=True)
+            if not self.offline:
+                self.run([python, "-m", "pip", "download", "--only-binary=:all:", "--require-hashes",
+                          "--cache-dir", self.cache / "pip", "--dest", wheels,
+                          "-r", ROOT / "scripts/requirements-tools.lock"])
+            self.run([python, "-m", "pip", "install", "--no-index", "--find-links", wheels,
+                      "--only-binary=:all:", "--require-hashes", "-r", ROOT / "scripts/requirements-tools.lock"])
         if not self.dry:
             raise SystemExit(subprocess.call([str(python), __file__, *sys.argv[1:]], cwd=ROOT, env=self.env))
 
@@ -97,10 +108,12 @@ class Pipeline:
         if not WIN:
             return
         where = Path(os.environ.get("ProgramFiles(x86)", "")) / "Microsoft Visual Studio/Installer/vswhere.exe"
-        if not where.is_file():
+        studio = self.tool_paths.get("visualStudio", "")
+        if not studio and not where.is_file():
             raise RuntimeError("Install VS2022 with the Desktop development with C++ workload.")
-        studio = subprocess.check_output([str(where), "-latest", "-products", "*", "-version", "[17.0,18.0)",
-            "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"], text=True).strip()
+        if not studio:
+            studio = subprocess.check_output([str(where), "-latest", "-products", "*", "-version", "[17.0,18.0)",
+                "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"], text=True).strip()
         if not studio:
             raise RuntimeError("VS2022 x64 C++ tools were not found. Install them manually.")
         bat = Path(studio) / "Common7/Tools/VsDevCmd.bat"
@@ -113,11 +126,22 @@ class Pipeline:
         cmake = Path(studio) / "Common7/IDE/CommonExtensions/Microsoft/CMake"
         self.env["PATH"] = os.pathsep.join([str(cmake / "CMake/bin"), str(cmake / "Ninja"), self.env.get("PATH", "")])
 
+    def configured_tools(self):
+        directories = []
+        for name, value in self.tool_paths.items():
+            if not value or name == "visualStudio":
+                continue
+            path = Path(value).expanduser().resolve()
+            if not path.is_file():
+                raise RuntimeError(f"Configured {name} executable does not exist: {path}")
+            directories.append(str(path.parent))
+        self.env["PATH"] = os.pathsep.join([*directories, self.env.get("PATH", "")])
+
     def ubuntu_dependencies(self):
         if WIN:
             return
         packages = ["build-essential", "cmake", "ninja-build", "git", "python3", "python3-venv", "python3-pip",
-                    "pkg-config", "libssl-dev", "ca-certificates", "libglib2.0-0t64", "libzstd1", "zlib1g",
+                    "pkg-config", "dpkg-dev", "libssl-dev", "ca-certificates", "libglib2.0-0t64", "libzstd1", "zlib1g",
                     "libgssapi-krb5-2", "libbrotli1", "libssl3t64"]
         missing = []
         for package in packages:
@@ -125,6 +149,8 @@ class Pipeline:
             if result.returncode or "install ok installed" not in result.stdout:
                 missing.append(package)
         if missing:
+            if self.offline:
+                raise RuntimeError("Offline bootstrap requires preinstalled system packages: " + ", ".join(missing))
             prefix = [] if os.geteuid() == 0 else ["sudo", "-n"]
             self.run([*prefix, "apt-get", "update"])
             self.run([*prefix, "apt-get", "install", "-y", "--no-install-recommends", *missing])
@@ -141,6 +167,8 @@ class Pipeline:
         target = self.cache / "downloads" / sha
         if target.is_file() and self.digest(target) == sha:
             return target
+        if self.offline:
+            raise RuntimeError("Offline cache is missing verified artifact " + sha)
         print(f"Download pinned artifact {sha[:16]}", flush=True)
         if self.dry:
             return target
@@ -221,7 +249,7 @@ class Pipeline:
     def doctor(self):
         if platform.machine().lower() not in ("amd64", "x86_64"):
             raise RuntimeError("Only amd64/x86_64 is supported.")
-        missing = [t for t in ("cmake", "ninja", "git") if not shutil.which(t, path=self.env.get("PATH"))]
+        missing = [t for t in ("cmake", "ninja", "git") if not self.tool_paths.get(t) and not shutil.which(t, path=self.env.get("PATH"))]
         if missing:
             raise RuntimeError("Install missing build tools: " + ", ".join(missing))
         output = self.run(["cmake", "--version"], True)
@@ -253,6 +281,8 @@ class Pipeline:
         source = self.source(self.lock["zlib"])
         dep_build, prefix = self.build / "dependencies/zlib-build", self.build / "dependencies/prefix"
         common = [f"-DCMAKE_BUILD_TYPE={self.kind}", "-DCMAKE_POSITION_INDEPENDENT_CODE=ON"]
+        if self.tool_paths.get("ninja"):
+            common.append(f"-DCMAKE_MAKE_PROGRAM={Path(self.tool_paths['ninja']).expanduser().resolve()}")
         self.run(["cmake", "-S", source, "-B", dep_build, "-G", "Ninja", *common, f"-DCMAKE_INSTALL_PREFIX={prefix}",
                   "-DCMAKE_INSTALL_LIBDIR=lib", "-DZLIB_BUILD_SHARED=OFF", "-DZLIB_BUILD_STATIC=ON", "-DZLIB_BUILD_TESTING=OFF", "-DZLIB_INSTALL=ON"])
         self.run(["cmake", "--build", dep_build, "--parallel", self.jobs])
@@ -260,6 +290,7 @@ class Pipeline:
         sources = [f"-DFETCHCONTENT_SOURCE_DIR_{name.upper()}={self.source(spec)}" for name, spec in self.lock["sources"].items()]
         self.run(["cmake", "-S", ROOT, "-B", self.build, "-G", "Ninja", *common, f"-DCMAKE_PREFIX_PATH={self.qt_prefix}",
                   f"-DCMAKE_INSTALL_PREFIX={self.install}", f"-DQCWS_DEPENDENCY_PREFIX={prefix}", "-DQCWS_BUILD_TESTING=ON",
+                  f"-DPython3_EXECUTABLE={sys.executable}",
                   *sources, *self.profile.get("cmakeArgs", [])])
 
     def build_stage(self):
@@ -304,6 +335,7 @@ def main():
         raise RuntimeError("Python 3.12 or newer is required.")
     pipeline = Pipeline(args)
     pipeline.windows_environment()
+    pipeline.configured_tools()
     if "bootstrap" in args.Stages and not args.CheckOnly:
         pipeline.ubuntu_dependencies()
     pipeline.tools()

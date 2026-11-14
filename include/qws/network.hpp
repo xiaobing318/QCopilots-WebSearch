@@ -1,7 +1,7 @@
 #pragma once
-#include <qws/common.hpp>
 #include <QHostAddress>
 #include <map>
+#include <qws/common.hpp>
 
 namespace qws {
 struct HttpResponse {
@@ -13,11 +13,11 @@ class HttpClient {
 public:
   explicit HttpClient(std::string backendCaFile = {});
   HttpResponse getPublic(std::string url, std::shared_ptr<CancelToken> cancel) const;
-  HttpResponse requestBackend(std::string url, std::string formBody,
-      std::string bearerToken, std::shared_ptr<CancelToken> cancel,
-      std::string caFile = {}) const;
+  HttpResponse requestBackend(std::string url, std::string formBody, std::string bearerToken,
+                              std::shared_ptr<CancelToken> cancel, std::string caFile = {}) const;
   static bool isPublicAddress(const QHostAddress &address);
+
 private:
   std::string backendCaFile_;
 };
-}
+} // namespace qws
