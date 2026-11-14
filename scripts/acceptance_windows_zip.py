@@ -7,9 +7,46 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
+import psutil
 from package_inventory import package_files
 from verify_release import need, sha
+
+
+def run_sdk(command, env, directory, timeout=180):
+    """Retain process identities so timeout or early runner exit cannot orphan tests."""
+    child = subprocess.Popen(command, env=env, cwd=directory,
+                             creationflags=subprocess.CREATE_NO_WINDOW)
+    parent = psutil.Process(child.pid)
+    owned = {(parent.pid, parent.create_time()): parent}
+    deadline, code, forced = time.monotonic() + timeout, 124, 0
+    try:
+        while True:
+            try:
+                for proc in parent.children(recursive=True):
+                    owned[(proc.pid, proc.create_time())] = proc
+            except psutil.NoSuchProcess:
+                pass
+            try:
+                code = child.wait(timeout=0.1)
+                break
+            except subprocess.TimeoutExpired:
+                if time.monotonic() >= deadline:
+                    break
+    finally:
+        _, remaining = psutil.wait_procs(list(owned.values()), timeout=2 if code != 124 else 0)
+        for proc in reversed(remaining):
+            try:
+                if proc.is_running():
+                    proc.kill()
+                    forced += 1
+            except psutil.NoSuchProcess:
+                pass
+        _, alive = psutil.wait_procs(list(owned.values()), timeout=5)
+        need(not alive, 'Portable test process cleanup failed')
+        child.wait(timeout=5)
+    return code, forced
 
 
 def main():
@@ -45,14 +82,18 @@ def main():
                                'qt_qpa_platform_plugin_path','ld_library_path','pythonpath'}:
                 del env[key]
         env['PATH'] = os.pathsep.join(str(path) for path in (system / 'System32', system))
-        result = subprocess.run([sys.executable,str(Path(__file__).with_name('test_mcp_sdk.py')),
+        exit_code, forced = run_sdk([sys.executable,str(Path(__file__).with_name('test_mcp_sdk.py')),
             '--Executable',str(found[0]),'--Output',str(folder / 'sdk.json')],
-            env=env,cwd=folder,check=False,timeout=180)
-        report = json.loads((folder / 'sdk.json').read_text('utf-8'))
+            env,folder)
+        if (folder / 'sdk.json').exists():
+            report = json.loads((folder / 'sdk.json').read_text('utf-8'))
+        if exit_code or forced:
+            report.update(passed=False, error='sdk_runner_or_cleanup_failed')
         report['portable'] = {'package_sha256':sha(package), 'relocated_path_with_spaces':True,
-                              'system_only_path':True, 'temporary_directory_removed':False}
+                              'system_only_path':True, 'temporary_directory_removed':False,
+                              'forced_process_count':forced, 'runner_exit_code':exit_code}
         need(report['portable']['package_sha256'] == args.PackageSHA256.lower(), 'ZIP changed during acceptance')
-        code = result.returncode
+        code = 1 if forced else exit_code
     report['portable']['temporary_directory_removed'] = not Path(temporary).exists()
     need(report['portable']['temporary_directory_removed'], 'Portable test cleanup failed')
     output.parent.mkdir(parents=True,exist_ok=True)

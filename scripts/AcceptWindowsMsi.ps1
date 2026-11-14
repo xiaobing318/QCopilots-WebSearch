@@ -35,22 +35,22 @@ function Read-Msi([string]$path) {
     try {
         $properties = @{}
         $view = $db.OpenView(('SELECT {0}Property{0}, {0}Value{0} FROM {0}Property{0}' -f [char]96))
-        $view.Execute()
+        [void]$view.Execute()
         while ($null -ne ($record = $view.Fetch())) {
             $properties[[string]$record.StringData(1)] = [string]$record.StringData(2)
             [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($record)
         }
-        $view.Close()
+        [void]$view.Close()
         [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($view)
         $view = $db.OpenView(('SELECT {0}Name{0}, {0}StartName{0} FROM {0}ServiceInstall{0}' -f [char]96))
-        $view.Execute()
+        [void]$view.Execute()
         $record = $view.Fetch()
         Assert ($null -ne $record) 'MSI has no service.'
         $properties.ServiceName = [string]$record.StringData(1)
         $properties.ServiceAccount = [string]$record.StringData(2)
         [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($record)
         Assert ($null -eq $view.Fetch()) 'Expected exactly one service.'
-        $view.Close()
+        [void]$view.Close()
         [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($view)
         $properties.Path = $full
         $properties.Sha256 = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash
