@@ -14,6 +14,12 @@ on:
         required: false
         type: boolean
         default: false
+      FuzzSeconds:
+        description: Seconds per fuzzer without repeating the full stability workload
+        required: false
+        type: choice
+        options: ['60', '300']
+        default: '60'
 permissions:
   contents: read
 concurrency:
@@ -144,7 +150,7 @@ jobs:
       - name: Run native quality gates
         if: always() && runner.os == 'Linux' && steps.native_build.outcome == 'success'
         env:
-          QCWS_FUZZ_SECONDS: ${{ (inputs.FullStability || startsWith(github.ref, 'refs/tags/v')) && '300' || '60' }}
+          QCWS_FUZZ_SECONDS: ${{ (inputs.FullStability || startsWith(github.ref, 'refs/tags/v')) && '300' || inputs.FuzzSeconds || '60' }}
         run: python scripts/quality.py --ConfigPath "$QCWS_CONFIG" --Profile "$QCWS_PROFILE" --Seconds "$QCWS_FUZZ_SECONDS" --OutputDir work/ci-artifacts/quality
       - name: Collect exact candidate distribution files
         shell: python

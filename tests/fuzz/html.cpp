@@ -1,4 +1,5 @@
 #include <QString>
+#include <QStringDecoder>
 #include <QUrl>
 #include <array>
 #include <cstddef>
@@ -16,8 +17,12 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
   try {
     const auto result =
         qws::parseHtml(body, "https://example.invalid/base/document", types[data[0] % types.size()]);
-    const auto text = QString::fromUtf8(result.text.data(), qsizetype(result.text.size()));
-    if (text.toUtf8().toStdString() != result.text || text.toUcs4().size() > 200000 ||
+    // Extraction can remove controls before an embedded U+FEFF. It then becomes
+    // the first scalar, but remains content rather than an input byte-order mark.
+    QStringDecoder decoder(QStringDecoder::Utf8, QStringConverter::Flag::ConvertInitialBom |
+                                                    QStringConverter::Flag::Stateless);
+    const QString text = decoder(QByteArrayView(result.text.data(), qsizetype(result.text.size())));
+    if (decoder.hasError() || text.toUtf8().toStdString() != result.text || text.toUcs4().size() > 200000 ||
         result.title.size() > 8192 || !result.links.is_array() || result.links.size() > 200)
       std::abort();
     const auto lines = text.split('\n');

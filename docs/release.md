@@ -10,6 +10,9 @@ all discovered tests, analyzes every first-party C++ translation unit with
 clang-tidy, and runs HTML, URL and JSON-RPC fuzz campaigns. Ordinary CI uses
 60 seconds per campaign. Full and tag candidates use 300 seconds. The retained
 logs, compiler flags, seed hashes and source snapshot are checked at promotion.
+Manual dispatch can select `FuzzSeconds: 300` independently to rerun a failed
+quality campaign without repeating an already completed stability workload.
+This does not turn the short stability evidence into full release acceptance.
 The minimal Ubuntu bootstrap check starts from a pinned image without Python.
 
 Windows Server CI does not prove Windows 11 installation behavior. Download the

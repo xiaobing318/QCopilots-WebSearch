@@ -4,6 +4,7 @@
 #include <QProcess>
 #include <QSqlDatabase>
 #include <QSqlQuery>
+#include <QStringDecoder>
 #include <QTemporaryDir>
 #include <QUrlQuery>
 #include <QUuid>
@@ -572,6 +573,23 @@ void htmlBoundaryTests() {
   auto read = [](const std::string &s, const std::string &type = "text/html") {
     return parseHtml(s, "https://example.com/a", type);
   };
+  // Regression from the HTML fuzz campaign: control removal moves a valid
+  // embedded U+FEFF to the first output scalar. Default Qt decoding strips it.
+  const auto bom = read(std::string("\x1c\0\xef\xbb\xbf", 5) +
+                        "eta charset=\"unknown-charset\"><p>x</p>", "text/html; charset=utf-8");
+  REQUIRE(bom.text == std::string("\xef\xbb\xbf", 3) + "eta charset=\"unknown-charset\">\nx");
+  REQUIRE(QString::fromUtf8(bom.text.data(), qsizetype(bom.text.size())).toUtf8().toStdString() != bom.text);
+  QStringDecoder decoder(QStringDecoder::Utf8, QStringConverter::Flag::ConvertInitialBom |
+                                                  QStringConverter::Flag::Stateless);
+  const QString preserved = decoder(QByteArrayView(bom.text.data(), qsizetype(bom.text.size())));
+  REQUIRE(!decoder.hasError());
+  REQUIRE(preserved.front().unicode() == 0xfeff);
+  REQUIRE(preserved.toUtf8().toStdString() == bom.text);
+  QStringDecoder invalid(QStringDecoder::Utf8, QStringConverter::Flag::ConvertInitialBom |
+                                                  QStringConverter::Flag::Stateless);
+  const QString truncated = invalid(QByteArrayView("\xf0\x9f", 2));
+  REQUIRE(invalid.hasError());
+  REQUIRE(!truncated.isEmpty());
   REQUIRE(read("<table><tr><td>New</td><td>York</td></tr></table>").text == "New\nYork");
   REQUIRE(read("<base href='https://cdn.example.org/docs/'><a href='guide'>x</a>").links[0]["url"] ==
           "https://cdn.example.org/docs/guide");
