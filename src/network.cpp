@@ -358,6 +358,9 @@ HttpResponse perform(const QUrl &url, const std::string &body, const std::string
   return std::move(t.response);
 }
 } // namespace
+QUrl normalizeHttpUrl(const std::string &value) {
+  return normalizedUrl(value);
+}
 HttpClient::HttpClient(std::string ca) : backendCaFile_(std::move(ca)) {
   static Runtime runtime;
   (void)runtime;

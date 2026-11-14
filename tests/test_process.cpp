@@ -135,6 +135,13 @@ int main(int argc, char **argv) {
     auto error = first.receive();
     require(error["id"].is_null() && error["error"]["code"] == -32700, "Parse error changed protocol");
     first.ping("after-parse-error");
+    for (const int depth : {65, 10000, 30000}) {
+      first.bytes(QByteArray("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"params\":{\"deep\":") +
+                  QByteArray(depth, '[') + '0' + QByteArray(depth, ']') + "}}\n");
+      auto rejected = first.receive();
+      require(rejected["error"]["code"] == -32700, "Deep stdio JSON was not rejected safely");
+      first.ping("after-deep-" + std::to_string(depth));
+    }
     second.ping("still-alive");
     auto status =
         first.exchange({{"jsonrpc", "2.0"},

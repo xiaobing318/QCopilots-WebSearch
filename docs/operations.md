@@ -34,6 +34,13 @@ cache budget is 256 MiB and 10,000 entries. SQLite is owned by a dedicated threa
 and the cache directory is locked against a second process. Corrupt, inaccessible
 or unsupported cache state fails explicitly rather than silently discarding data.
 
+Cache hits record their latest access order in bounded memory. The next content
+write applies those updates in its existing SQLite transaction before choosing
+an eviction victim. Normal shutdown checkpoints the remaining access metadata.
+A crash or failed shutdown checkpoint can lose recent access order, but does not
+change committed page content or expiry times. Reads do not issue a synchronous
+disk commit for each hit.
+
 Stop the service before taking a filesystem backup of configuration, credentials
 and cache. Protect backups with the same access controls as the originals.
 Do not copy a live SQLite file while ignoring its journal. Cache data can be

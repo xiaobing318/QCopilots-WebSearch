@@ -13,6 +13,7 @@
 #include <QVariant>
 #include <future>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <qws/cache.hpp>
 #include <type_traits>
@@ -38,6 +39,7 @@ struct Cache::Impl {
   QSqlDatabase db;
   QLockFile lockFile;
   std::mutex dispatchMutex;
+  std::map<QString, qint64> pendingTouches;
   bool closed = false;
   Impl(std::string p, qint64 bytes, int entries, TimeSource c)
       : path(QString::fromStdString(p)),
@@ -86,12 +88,30 @@ struct Cache::Impl {
     return size;
   }
   void destroyConnection() {
+    // Access ordering is expendable metadata. Payload writes remain fully
+    // synchronous. A clean shutdown checkpoints hits once, with bounded busy wait.
+    if (db.isOpen() && !pendingTouches.empty()) {
+      try {
+        if (!db.transaction())
+          unavailable();
+        flushTouches();
+        if (!db.commit())
+          unavailable();
+      } catch (...) {
+        db.rollback();
+      }
+    }
+    pendingTouches.clear();
     if (db.isValid())
       db.close();
     db = QSqlDatabase();
     if (QSqlDatabase::contains(name))
       QSqlDatabase::removeDatabase(name);
     lockFile.unlock();
+  }
+  void flushTouches() {
+    for (const auto &[key, accessed] : pendingTouches)
+      query("UPDATE entries SET accessed=? WHERE key=?", {accessed, key});
   }
   void start() {
     if (!QDir().mkpath(QFileInfo(path).absolutePath()) || QFileInfo(path).isSymLink())
@@ -180,18 +200,20 @@ std::optional<Json> Cache::get(const std::string &key) {
     {
       auto q = d_->query("SELECT payload FROM entries WHERE key=? AND expires>?", {k, qint64(d_->clock())});
       if (!q.next()) {
-        q.finish();
-        d_->query("DELETE FROM entries WHERE key=? AND expires<=?", {k, qint64(d_->clock())});
+        // Expired rows are collected by put/stats. A cache read never needs a
+        // disk write merely to update eviction metadata or report a miss.
+        d_->pendingTouches.erase(k);
         return std::nullopt;
       }
       bytes = q.value(0).toByteArray();
     }
-    Json value = Json::parse(bytes.constData(), bytes.constData() + bytes.size(), nullptr, false);
+    Json value = parseBoundedJson(std::string_view(bytes.constData(), size_t(bytes.size())));
     if (value.is_discarded()) {
       d_->query("DELETE FROM entries WHERE key=?", {k});
+      d_->pendingTouches.erase(k);
       return std::nullopt;
     }
-    d_->query("UPDATE entries SET accessed=? WHERE key=?", {++d_->serial, k});
+    d_->pendingTouches[k] = ++d_->serial;
     return value;
   });
 }
@@ -207,6 +229,9 @@ void Cache::put(const std::string &key, const Json &value, std::int64_t ttl) {
     if (!d_->db.transaction())
       unavailable();
     try {
+      // Apply all recent reads in this existing write transaction before eviction.
+      // Do not clear on rollback: the next successful write still sees exact LRU.
+      d_->flushTouches();
       d_->query("DELETE FROM entries WHERE expires<=? OR key=?", {now, k});
       while (d_->scalar("SELECT COUNT(*) FROM entries") >= d_->maxEntries ||
              d_->scalar("SELECT COALESCE(SUM(size),0) FROM entries") + data.size() > d_->payloadBudget)
@@ -215,6 +240,7 @@ void Cache::put(const std::string &key, const Json &value, std::int64_t ttl) {
                 {k, data, qint64(data.size()), now + ttl, ++d_->serial});
       if (!d_->db.commit())
         unavailable();
+      d_->pendingTouches.clear();
     } catch (...) {
       d_->db.rollback();
       throw;
@@ -225,7 +251,10 @@ void Cache::put(const std::string &key, const Json &value, std::int64_t ttl) {
 }
 void Cache::erase(const std::string &key) {
   const auto k = keyHash(key);
-  d_->run([&] { d_->query("DELETE FROM entries WHERE key=?", {k}); });
+  d_->run([&] {
+    d_->query("DELETE FROM entries WHERE key=?", {k});
+    d_->pendingTouches.erase(k);
+  });
 }
 Json Cache::stats() {
   return d_->run([&] {

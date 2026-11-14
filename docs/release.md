@@ -5,6 +5,13 @@ release. A `vMAJOR.MINOR.PATCH` tag triggers CI on that exact commit, including
 full stability and live public-search acceptance. Ordinary push/PR builds use
 short deterministic checks. Manual CI dispatch can enable the same long checks.
 
+Linux also builds an isolated Clang 21 configuration with ASan and UBSan, runs
+all discovered tests, analyzes every first-party C++ translation unit with
+clang-tidy, and runs HTML, URL and JSON-RPC fuzz campaigns. Ordinary CI uses
+60 seconds per campaign. Full and tag candidates use 300 seconds. The retained
+logs, compiler flags, seed hashes and source snapshot are checked at promotion.
+The minimal Ubuntu bootstrap check starts from a pinned image without Python.
+
 Windows Server CI does not prove Windows 11 installation behavior. Download the
 candidate ZIP and MSI from the successful CI run. Keep their exact bytes. On a
 clean Windows 11 desktop, validate the portable ZIP in a fresh path containing
@@ -54,6 +61,13 @@ leaves the release unpublished. Existing releases are not overwritten or deleted
 The workflow checks the tag again before publication. `promotion-inputs.json`
 records the original artifact IDs/digests and external evidence commit. Packages
 remain explicitly unsigned until separate signing evidence is provided.
+
+Tag CI generates GitHub artifact attestations for the exact ZIP, MSI and DEB
+bytes in a separate job with OIDC permission. PR jobs do not receive signing
+permissions. Promotion runs `gh attestation verify` for each package and checks
+the certificate's repository identity, source commit, tag, workflow, run ID and
+attempt. It preserves the verified bundles in `verified-build-provenance.json`.
+This proves build origin. It does not provide Windows Authenticode signing.
 
 Public tests report engine failures and zero results without imposing a minimum
 search-success rate. They still require all 60 representative attempts and at

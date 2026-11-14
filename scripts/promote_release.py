@@ -24,6 +24,50 @@ def api(path):
     return json.loads(run(['gh','api',path],capture=True))
 
 
+def attestation_match(verified, package_digest, repo_name, repository, commit, tag, run_id, attempt):
+    need(isinstance(verified, list) and verified, 'No verified package attestation')
+    invocation = f'https://github.com/{repo_name}/actions/runs/{run_id}/attempts/{attempt}'
+    matching = []
+    for index, record in enumerate(verified):
+        result = record.get('verificationResult', {})
+        certificate = result.get('signature', {}).get('certificate', {})
+        if (certificate.get('runInvocationURI') == invocation
+            and str(certificate.get('sourceRepositoryIdentifier')) == str(repository['id'])
+            and str(certificate.get('sourceRepositoryOwnerIdentifier')) == str(repository['owner']['id'])
+            and certificate.get('sourceRepositoryDigest') == commit
+            and certificate.get('sourceRepositoryRef') == 'refs/tags/' + tag
+            and result.get('verifiedTimestamps')
+            and any(isinstance(subject, dict) and subject.get('digest', {}).get('sha256') == package_digest
+                    for subject in result.get('statement', {}).get('subject', []))):
+            matching.append(index)
+    need(matching, 'Attestation does not belong to the exact candidate run/attempt')
+    return matching
+
+
+def verify_attestations(output, repo_name, repository, commit, tag, run_id, attempt):
+    packages = sorted(path for path in output.iterdir() if path.suffix in ('.zip', '.msi', '.deb'))
+    need(len(packages) == 3 and {path.suffix for path in packages} == {'.zip', '.msi', '.deb'},
+         'Attestation requires all three actual distribution packages')
+    report = {'schema_version': 1, 'source_commit': commit, 'run_id': run_id, 'run_attempt': attempt,
+              'gh_version': run(['gh', '--version'], capture=True).strip(), 'packages': []}
+    for package in packages:
+        command = ['gh', 'attestation', 'verify', str(package), '--hostname', 'github.com', '--repo', repo_name,
+                   '--source-ref', 'refs/tags/' + tag, '--source-digest', commit,
+                   '--cert-identity', f'https://github.com/{repo_name}/.github/workflows/ci.yml@refs/tags/{tag}',
+                   '--signer-digest', commit, '--cert-oidc-issuer', 'https://token.actions.githubusercontent.com',
+                   '--deny-self-hosted-runners', '--predicate-type', 'https://slsa.dev/provenance/v1',
+                   '--digest-alg', 'sha256', '--format', 'json']
+        verified = json.loads(run(command, capture=True))
+        digest = sha(package)
+        matching = attestation_match(verified, digest, repo_name, repository, commit, tag, run_id, attempt)
+        report['packages'].append({'name': package.name, 'sha256': digest, 'verified': verified,
+            'matching_records': matching, 'policy_arguments': command[4:],
+            'api_url': f'https://api.github.com/repos/{repo_name}/attestations/sha256:{digest}?predicate_type=provenance'})
+    path = output / 'verified-build-provenance.json'
+    path.write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+    return path
+
+
 def tag_commit(base,tag):
     obj = api(base+'/git/ref/tags/'+quote(tag,safe=''))['object']
     for _ in range(10):
@@ -134,6 +178,9 @@ def main():
         provenance.write_text(json.dumps(metadata,indent=2)+'\n',encoding='utf-8')
         manifest_path = args.Output/'release-manifest.json'
         manifest = json.loads(manifest_path.read_text('utf-8'))
+        attestation = verify_attestations(args.Output, repo_name, repo, commit, args.Tag,
+                                          args.CandidateRunId, candidate['run_attempt'])
+        manifest['assets'][attestation.name] = sha(attestation)
         manifest['assets'][provenance.name] = sha(provenance)
         manifest_path.write_text(json.dumps(manifest,indent=2)+'\n',encoding='utf-8')
         (args.Output/'SHA256SUMS').write_text(''.join(sha(path)+'  '+path.name+'\n'

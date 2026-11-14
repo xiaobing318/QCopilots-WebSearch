@@ -336,7 +336,7 @@ Json Service::fetchSearch(const Json &args, const std::shared_ptr<CancelToken> &
         throw Error("rate_limited", "Search provider is rate limited.", 429, true);
       if (response.status != 200)
         throw Error("provider_unavailable", "Search provider did not return a usable response.", 502, true);
-      auto data = Json::parse(response.body, nullptr, false);
+      auto data = parseBoundedJson(response.body);
       if (data.is_discarded() || !data.is_object() || !data.contains("results") ||
           !data["results"].is_array())
         throw Error("provider_unavailable", "Search provider returned invalid JSON results.", 502, true);

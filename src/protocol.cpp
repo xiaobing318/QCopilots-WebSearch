@@ -105,7 +105,9 @@ ProtocolReply Protocol::handle(const std::string &principal, const std::string &
   }
   const bool hasMethod = m.contains("method"), hasId = m.contains("id"), notification = hasMethod && !hasId;
   const std::string method = hasMethod ? m["method"].get<std::string>() : "";
-  const Json id = hasId ? m["id"] : Json(nullptr), params = m.value("params", Json::object());
+  const Json id = hasId ? m["id"] : Json(nullptr);
+  const Json emptyParams = Json::object();
+  const Json &params = m.contains("params") ? m["params"] : emptyParams;
   const auto now = now_();
   if (method == "initialize") {
     if (!hasId)
@@ -219,6 +221,8 @@ ProtocolReply Protocol::handle(const std::string &principal, const std::string &
       tool = params["name"].get<std::string>();
       args = params.value("arguments", Json::object());
       token = cancellation ? cancellation : std::make_shared<CancelToken>();
+      if (!cancellation)
+        token->deadline = Clock::now() + std::chrono::seconds(60);
       session->inFlight.emplace(key, token);
     }
   }

@@ -66,6 +66,7 @@ jobs:
           destination.write_text(json.dumps(config),encoding='utf-8')
           with open(os.environ['GITHUB_ENV'],'a',encoding='utf-8') as f: f.write(f'QCWS_CONFIG={destination}\n')
       - name: Bootstrap, build, test and install
+        id: native_build
         shell: python
         run: |
           import os, subprocess, sys
@@ -106,10 +107,10 @@ jobs:
           duration='1800' if os.environ['QCWS_FULL_STABILITY']=='true' else '10'
           subprocess.run([sys.executable,'scripts/soak.py','--Executable',str(exe),'--Seconds',duration,'--Output','work/ci-artifacts/soak.json'],check=True)
       - name: Caddy HTTPS deployment contract
-        if: runner.os == 'Linux'
+        if: always() && runner.os == 'Linux' && steps.native_build.outcome == 'success'
         run: python scripts/acceptance_caddy.py --Executable install/ci/opt/qcopilots-websearch/bin/qcopilots-websearch --Output work/ci-artifacts/caddy-contract.json
       - name: DEB installation and recovery
-        if: runner.os == 'Linux'
+        if: always() && runner.os == 'Linux' && steps.native_build.outcome == 'success'
         shell: python
         run: |
           import hashlib,json,os,subprocess,sys
@@ -133,8 +134,16 @@ jobs:
               with p.open('rb') as f: return hashlib.file_digest(f,'sha256').hexdigest()
           subprocess.run(['sudo','/usr/bin/python3','scripts/acceptance_deb.py','--Package',str(candidate),'--PackageSHA256',sha(candidate),'--BaselinePackage',str(baseline),'--BaselineSHA256',sha(baseline),'--OutputPath',str(Path('work/ci-artifacts/deb-acceptance.json').resolve()),'--DisposableMachine'],check=True)
       - name: Real public search and read/find closure
-        if: runner.os == 'Linux' && (inputs.LivePublicSearch || startsWith(github.ref, 'refs/tags/v'))
+        if: always() && runner.os == 'Linux' && steps.native_build.outcome == 'success' && (inputs.LivePublicSearch || startsWith(github.ref, 'refs/tags/v'))
         run: python scripts/run_live_compose.py --Executable install/ci/opt/qcopilots-websearch/bin/qcopilots-websearch --OutputDir work/ci-artifacts
+      - name: Minimal Ubuntu Python bootstrap
+        if: always() && runner.os == 'Linux' && steps.native_build.outcome == 'success'
+        run: bash tests/bootstrap_ubuntu.sh > work/ci-artifacts/bootstrap-ubuntu.log 2>&1
+      - name: Run native quality gates
+        if: always() && runner.os == 'Linux' && steps.native_build.outcome == 'success'
+        env:
+          QCWS_FUZZ_SECONDS: ${{ (inputs.FullStability || startsWith(github.ref, 'refs/tags/v')) && '300' || '60' }}
+        run: python scripts/quality.py --ConfigPath "$QCWS_CONFIG" --Profile "$QCWS_PROFILE" --Seconds "$QCWS_FUZZ_SECONDS" --OutputDir work/ci-artifacts/quality
       - name: Collect exact candidate distribution files
         shell: python
         run: |
@@ -175,5 +184,52 @@ jobs:
             build/ci/packages/**/CPack*.log
             work/ci-artifacts/*.json
             work/ci-artifacts/*.log
+            work/ci-artifacts/quality/
           if-no-files-found: ignore
+          retention-days: 14
+
+  attest:
+    name: Attest exact distribution packages
+    needs: build
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download this run's exact distribution packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name packages-windows-x64 --dir work/attest/windows
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name packages-ubuntu-x64 --dir work/attest/ubuntu
+          python3 - <<'PY'
+          from pathlib import Path
+          for folder, suffixes in (("windows", (".zip", ".msi")), ("ubuntu", (".deb",))):
+              for suffix in suffixes:
+                  files = list((Path("work/attest") / folder).glob("*" + suffix))
+                  if len(files) != 1 or not files[0].is_file():
+                      raise RuntimeError("Expected one distribution package per format")
+          PY
+      - name: Attest distribution package bytes
+        id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            ${{ github.workspace }}/work/attest/windows/*.zip
+            ${{ github.workspace }}/work/attest/windows/*.msi
+            ${{ github.workspace }}/work/attest/ubuntu/*.deb
+          create-storage-record: false
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-provenance
+          path: ${{ steps.provenance.outputs.bundle-path }}
+          if-no-files-found: error
           retention-days: 14

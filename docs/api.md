@@ -60,6 +60,12 @@ payload as both `structuredContent` and one JSON text content block. Business
 failures use `isError: true`. Invalid tool names or input shapes use JSON-RPC
 invalid-params errors. No `outputSchema` is advertised in this version.
 
+JSON input is limited to 1 MiB and 64 nested containers. Excessive nesting is
+rejected before building the JSON tree. Stdio responses share the 1 MiB response
+budget and use a bounded queue of at most 32 messages and 4 MiB, including the
+active write. Closing stdin cancels a blocked stdout writer after a short drain
+period, so a client that stops reading cannot prevent process cleanup.
+
 REST errors use this envelope and a suitable HTTP status:
 
 ```json

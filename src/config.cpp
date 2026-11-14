@@ -21,7 +21,7 @@ Json readJson(const QString &path) {
   if (!file.open(QIODevice::ReadOnly) || file.size() > 1024 * 1024)
     throw Error("invalid_configuration", "Cannot read bounded JSON configuration.");
   const auto bytes = file.readAll();
-  auto result = Json::parse(bytes.constData(), bytes.constData() + bytes.size(), nullptr, false);
+  auto result = parseBoundedJson(std::string_view(bytes.constData(), size_t(bytes.size())));
   if (result.is_discarded())
     throw Error("invalid_configuration", "Configuration is not valid UTF-8 JSON.");
   return result;

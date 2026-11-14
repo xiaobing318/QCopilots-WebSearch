@@ -154,6 +154,30 @@ class PackageInventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'fingerprint mismatch'):
             verify_release.checked_runtime(runtime)
 
+    def test_attestation_requires_certificate_bound_candidate(self):
+        import copy
+        repository = {'id': 101, 'owner': {'id': 202}}
+        certificate = {'runInvocationURI': 'https://github.com/owner/project/actions/runs/123/attempts/2',
+            'sourceRepositoryIdentifier': '101', 'sourceRepositoryOwnerIdentifier': '202',
+            'sourceRepositoryDigest': 'a' * 40, 'sourceRepositoryRef': 'refs/tags/v0.1.0'}
+        record = {'verificationResult': {'signature': {'certificate': certificate},
+            'verifiedTimestamps': [{'type': 'timestamp'}],
+            'statement': {'subject': [{'digest': {'sha256': 'b' * 64}}]}}}
+        def validate(records):
+            return promote_release.attestation_match(records, 'b' * 64, 'owner/project', repository,
+                                                      'a' * 40, 'v0.1.0', 123, 2)
+        self.assertEqual(validate([record]), [0])
+        for key, value in (('runInvocationURI', 'https://github.com/owner/project/actions/runs/123/attempts/1'),
+                           ('sourceRepositoryIdentifier', '303'), ('sourceRepositoryOwnerIdentifier', '303'),
+                           ('sourceRepositoryDigest', 'c' * 40), ('sourceRepositoryRef', 'refs/heads/main')):
+            altered = copy.deepcopy(record)
+            altered['verificationResult']['signature']['certificate'][key] = value
+            with self.assertRaises(RuntimeError):
+                validate([altered])
+        for altered in ({}, {'verificationResult': {'statement': record['verificationResult']['statement']}}):
+            with self.assertRaises(RuntimeError):
+                validate([altered])
+
     def test_windows11_gate_rejects_server_and_missing_host(self):
         for host in ({}, {'system':'Windows','windows':{'product_type':3,'build':26100}},
                      {'system':'Windows','windows':{'product_type':1,'build':19045}}):

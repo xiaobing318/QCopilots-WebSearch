@@ -26,6 +26,20 @@ PLATFORM = "windows-x64" if WIN else "ubuntu-x64"
 STAGES = ("doctor", "bootstrap", "configure", "build", "test", "install", "publish")
 
 
+def apt_command(proxy, root):
+    if not isinstance(proxy, str) or not re.fullmatch(r"(?:|https?://[^\s@\x00-\x1f\x7f]+)", proxy):
+        raise RuntimeError("Invalid bootstrap download proxy.")
+    command = [] if root else ["sudo", "-n", "--"]
+    command += ["/usr/bin/env"]
+    for key in ("APT_CONFIG", "http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
+                "ALL_PROXY", "all_proxy", "no_proxy", "NO_PROXY"):
+        command += ["-u", key]
+    return command + ["DEBIAN_FRONTEND=noninteractive", "/usr/bin/apt-get",
+                      "-c", str(ROOT / "scripts/apt-proxy-reset.conf"),
+                      "-o", "Acquire::http::Proxy=" + (proxy or "DIRECT"),
+                      "-o", "Acquire::https::Proxy=" + (proxy or "DIRECT")]
+
+
 class Pipeline:
     def __init__(self, args):
         self.args = args
@@ -154,9 +168,9 @@ class Pipeline:
         if missing:
             if self.offline:
                 raise RuntimeError("Offline bootstrap requires preinstalled system packages: " + ", ".join(missing))
-            prefix = [] if os.geteuid() == 0 else ["sudo", "-n"]
-            self.run([*prefix, "apt-get", "update"])
-            self.run([*prefix, "apt-get", "install", "-y", "--no-install-recommends", *missing])
+            command = apt_command(self.profile["proxy"], os.geteuid() == 0)
+            self.run([*command, "update", "--error-on=any"])
+            self.run([*command, "install", "-y", "--no-install-recommends", *missing])
 
     @staticmethod
     def digest(path):

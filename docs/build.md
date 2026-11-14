@@ -41,6 +41,14 @@ verified archive. Root or noninteractive sudo is required for missing system
 packages. Linux does not use MSVC. Qt's vendor platform table is distinct from
 the Ubuntu 26.04 build/runtime evidence produced by this project.
 
+On a minimal Ubuntu image without Python, the Bash entry point uses the bundled
+JSON::PP parser and the Essential `perl-base` package to read the selected profile.
+Only an online `bootstrap` stage installs Python. `--CheckOnly` reports the
+missing interpreter and `--DryRun` prints the installation plan without running
+APT. An offline bootstrap requires Python and other system packages to be present.
+The APT calls explicitly apply the profile proxy through sudo. An empty proxy
+selects direct access, including when the host has other proxy settings.
+
 ## Configuration and downloads
 
 Copy `config/BuildPipeline.json` to a file ending in `.local.json`. That suffix

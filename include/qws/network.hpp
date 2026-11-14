@@ -1,9 +1,12 @@
 #pragma once
 #include <QHostAddress>
+#include <QUrl>
 #include <map>
 #include <qws/common.hpp>
 
 namespace qws {
+// Syntax normalization only. Does not resolve or authorize a destination.
+QUrl normalizeHttpUrl(const std::string &value);
 struct HttpResponse {
   int status = 0;
   std::string body, contentType, url;

@@ -109,6 +109,41 @@ void tests(const char *templatePath) {
   httplib::Client control("127.0.0.1", server.controlPort());
   control.set_connection_timeout(1);
   control.set_read_timeout(1);
+  auto mcpHeaders = auth;
+  mcpHeaders.emplace("Accept", "application/json, text/event-stream");
+  for (const int depth : {65, 10000, 30000}) {
+    const auto body = std::string(R"({"jsonrpc":"2.0","id":1,"method":"ping","params":{"deep":)") +
+                      std::string(depth, '[') + "0" + std::string(depth, ']') + "}}";
+    auto rejected = client.Post("/mcp", mcpHeaders, body, "application/json");
+    require(rejected && rejected->status == 400, "deep MCP JSON must be rejected without crashing");
+    require(Json::parse(rejected->body)["error"]["code"] == -32700, "bounded MCP parse error");
+    rejected = client.Post("/v1/search", auth, body, "application/json");
+    require(rejected && rejected->status == 400, "deep REST JSON must be rejected");
+    auto healthy = control.Get("/health/live", auth);
+    require(healthy && healthy->status == 200, "health after excessive JSON nesting");
+  }
+  auto initialized = client.Post(
+      "/mcp", mcpHeaders,
+      R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"headers","version":"1"}}})",
+      "application/json");
+  require(initialized && initialized->status == 200, "initialize header test session");
+  mcpHeaders.emplace("Mcp-Session-Id", initialized->get_header_value("Mcp-Session-Id"));
+  for (const int scenario : {0, 1, 2}) {
+    auto invalid = mcpHeaders;
+    invalid.emplace("MCP-Protocol-Version", scenario == 0 ? "invalid" : "2025-06-18");
+    if (scenario != 0)
+      invalid.emplace(scenario == 2 ? "Mcp-Session-Id" : "MCP-Protocol-Version", "2025-06-18");
+    auto rejected = client.Delete("/mcp", invalid);
+    require(rejected && rejected->status == 400, "invalid DELETE headers must not retire session");
+    auto ping = client.Post("/mcp", mcpHeaders,
+                            Json{{"jsonrpc", "2.0"}, {"id", scenario + 2}, {"method", "ping"}}.dump(),
+                            "application/json");
+    require(ping && ping->status == 200 && Json::parse(ping->body).contains("result"),
+            "session survives rejected DELETE");
+  }
+  auto deleted = client.Delete("/mcp", mcpHeaders);
+  require(deleted && deleted->status == 204, "valid session deletion");
+  std::cout << "PASS bounded JSON and DELETE protocol headers\n";
   std::vector<std::unique_ptr<QTcpSocket>> active;
   for (int i = 0; i < 5; ++i) {
     auto sock = connection(server.businessPort());

@@ -8,6 +8,7 @@ import shutil
 import tarfile
 import xml.etree.ElementTree as ET
 from package_inventory import package_files, require_windows_payload_match
+from quality_evidence import verify_quality
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -102,7 +103,7 @@ def verify(root,commit,tag,run_id,evidence_path,evidence_sha,repository,run_atte
         junit = folder/(target+'-test-results.xml')
         need(sha(junit) == info['junit_sha256'] == receipts['test']['junit_sha256'],'JUnit receipt mismatch')
         cases = ET.parse(junit).getroot().findall('.//testcase')
-        expected_tests = {'core','http-limits','tls','stdio-process','release-assets'}
+        expected_tests = {'core','http-limits','tls','stdio-process','release-assets','build-pipeline'}
         if target == 'windows-x64':
             expected_tests.add('windows-security')
         need({case.get('name') for case in cases} == expected_tests and len(cases) == len(expected_tests)
@@ -155,6 +156,9 @@ def verify(root,commit,tag,run_id,evidence_path,evidence_sha,repository,run_atte
         need(soak.get('checks_passed') is True and soak['runtime'] == runtime
              and soak['executable_sha256'] == info['executable_sha256'],'Stability runtime/result mismatch')
         if target == 'ubuntu-x64':
+            for quality_file in verify_quality(unique(diagnostics, 'quality.json'), ROOT, info,
+                                                commit, run_id, repository, run_attempt):
+                collect(quality_file, 'quality-' + quality_file.name)
             need(soak.get('full_acceptance') is True and soak['seconds_per_phase'] >= 1800,'Full Linux stability required')
             accepted_path = unique(diagnostics,'deb-acceptance.json')
             accepted = read(accepted_path)
@@ -197,8 +201,9 @@ def verify(root,commit,tag,run_id,evidence_path,evidence_sha,repository,run_atte
          and portable['portable'].get('relocated_path_with_spaces') is True
          and portable['portable'].get('system_only_path') is True
          and portable['portable'].get('temporary_directory_removed') is True,'Portable ZIP acceptance required')
-    need(soak.get('full_acceptance') is True and soak['seconds_per_phase'] >= 1800
-         and soak['runtime'] == windows['installed_runtime'],'Windows 11 stability required')
+    need(soak.get('full_acceptance') is True and soak.get('checks_passed') is True
+         and soak['seconds_per_phase'] >= 1800 and soak['runtime'] == windows['installed_runtime']
+         and soak.get('executable_sha256') == windows['executable_sha256'], 'Windows 11 stability required')
     gates = evidence['delivery_gates']
     need(gates.get('council_status') == 'approved' and gates.get('unresolved_p0_p1') == 0
          and gates.get('qgis_development_passed') is True and gates.get('qgis_release_passed') is True

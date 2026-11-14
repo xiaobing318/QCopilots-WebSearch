@@ -464,6 +464,7 @@ void cacheFailureTests() {
     probe("locked");
     SqlFixture fixture(path);
     fixture.execute("BEGIN IMMEDIATE");
+    REQUIRE(cache.get("stable")->at("value") == "original");
     const auto began = Clock::now();
     error("cache_unavailable", [&] { cache.put("stable", {{"value", "replacement"}}, 60); });
     REQUIRE(Clock::now() - began < std::chrono::seconds(2));
@@ -486,6 +487,32 @@ void cacheFailureTests() {
     REQUIRE(cache.get("recovered")->at("ok") == true);
   }
   probe("open");
+  const auto lruPath = dir.filePath("lru.sqlite");
+  {
+    Cache cache(lruPath.toStdString(), 16 * 1024 * 1024, 2, [] { return std::int64_t(100); });
+    cache.put("a", {{"value", 1}}, 60);
+    cache.put("b", {{"value", 2}}, 60);
+    {
+      SqlFixture fixture(lruPath);
+      fixture.execute("BEGIN IMMEDIATE");
+      REQUIRE(cache.get("a")->at("value") == 1);
+      error("cache_unavailable", [&] { cache.put("c", {{"value", 3}}, 60); });
+      fixture.execute("ROLLBACK");
+      fixture.execute("CREATE TRIGGER fixture_fail_insert BEFORE INSERT ON entries "
+                      "BEGIN SELECT RAISE(ABORT,'fixture'); END");
+      error("cache_unavailable", [&] { cache.put("c", {{"value", 3}}, 60); });
+      fixture.execute("DROP TRIGGER fixture_fail_insert");
+    }
+    cache.put("c", {{"value", 3}}, 60);
+    REQUIRE(!cache.get("b"));
+    REQUIRE(cache.get("a"));
+  }
+  {
+    Cache reopened(lruPath.toStdString(), 16 * 1024 * 1024, 2, [] { return std::int64_t(100); });
+    reopened.put("d", {{"value", 4}}, 60);
+    REQUIRE(reopened.get("a"));
+    REQUIRE(!reopened.get("c"));
+  }
   REQUIRE(QSqlDatabase::connectionNames().size() == baseline);
   const auto corrupt = dir.filePath("corrupt.sqlite");
   {
@@ -690,6 +717,50 @@ void protocolTests() {
   REQUIRE(Protocol::validateJsonRpc(Json::array()).has_value());
   REQUIRE(Protocol::validateJsonRpc({{"jsonrpc", "2.0"}, {"method", "ping"}, {"id", true}}).has_value());
 }
+void jsonAndDeadlineTests() {
+  REQUIRE(!parseBoundedJson(std::string(64, '[') + "0" + std::string(64, ']')).is_discarded());
+  for (int depth : {65, 1000, 10000, 30000})
+    REQUIRE(parseBoundedJson(std::string(depth, '[') + "0" + std::string(depth, ']')).is_discarded());
+  const Json quoted = {{"quoted", std::string(200, '[') + "\\\""}};
+  REQUIRE(parseBoundedJson(quoted.dump()) == quoted);
+  REQUIRE(parseBoundedJson("{]}").is_discarded());
+  for (const int seconds : {20, 60}) {
+    QTemporaryDir dir;
+    auto c = config(dir);
+    c.value["limits"]["open_timeout_seconds"] = seconds;
+    std::chrono::milliseconds remaining{};
+    auto t = transport();
+    const auto original = t.open;
+    t.open = [&](auto url, auto cancellation) {
+      remaining =
+          std::chrono::duration_cast<std::chrono::milliseconds>(cancellation->deadline - Clock::now());
+      return original(url, cancellation);
+    };
+    Service service(c, t);
+    Protocol p(service, QCWS_VERSION, {}, Protocol::TransportPolicy::Stdio);
+    const auto sid = p.handle("alice", "",
+                              {{"jsonrpc", "2.0"},
+                               {"id", 1},
+                               {"method", "initialize"},
+                               {"params",
+                                {{"protocolVersion", "2025-06-18"},
+                                 {"capabilities", Json::object()},
+                                 {"clientInfo", {{"name", "deadline"}, {"version", "1"}}}}}})
+                         .sessionId;
+    p.handle("alice", sid, {{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}});
+    auto call = Json{{"jsonrpc", "2.0"},
+                     {"id", 2},
+                     {"method", "tools/call"},
+                     {"params", {{"name", "web_open"}, {"arguments", {{"url", "https://example.com"}}}}}};
+    auto reply = p.handle("alice", sid, call);
+    REQUIRE((*reply.message)["result"]["isError"] == false);
+    REQUIRE(remaining.count() <= seconds * 1000 && remaining.count() > seconds * 1000 - 1000);
+    call["id"] = 3;
+    reply = p.handle("alice", sid, call, token(500));
+    REQUIRE((*reply.message)["result"]["isError"] == false);
+    REQUIRE(remaining.count() > 0 && remaining.count() <= 500);
+  }
+}
 void httpTests() {
   qputenv("QCWS_TEST_CREDENTIAL", QByteArray(64, 'a'));
   QTemporaryDir dir;
@@ -776,6 +847,7 @@ int main(int argc, char **argv) {
                                                        {"service", serviceTests},
                                                        {"concurrency", concurrencyTests},
                                                        {"protocol", protocolTests},
+                                                       {"json-and-deadlines", jsonAndDeadlineTests},
                                                        {"http", httpTests}};
   int failed = 0;
   for (auto [name, fn] : tests)

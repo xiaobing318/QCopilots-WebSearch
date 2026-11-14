@@ -6,11 +6,39 @@
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace qws {
 using Json = nlohmann::json;
 using Clock = std::chrono::steady_clock;
+
+// Bound nesting before constructing a DOM. nlohmann's parser is iterative, but
+// copying a deeply nested value is recursive and can exhaust a worker's stack.
+inline Json parseBoundedJson(std::string_view input) {
+  unsigned depth = 0;
+  bool quoted = false, escaped = false;
+  for (const char ch : input) {
+    if (quoted) {
+      if (escaped)
+        escaped = false;
+      else if (ch == '\\')
+        escaped = true;
+      else if (ch == '"')
+        quoted = false;
+    } else if (ch == '"') {
+      quoted = true;
+    } else if (ch == '{' || ch == '[') {
+      if (++depth > 64)
+        return Json(Json::value_t::discarded);
+    } else if (ch == '}' || ch == ']') {
+      if (depth == 0)
+        return Json(Json::value_t::discarded);
+      --depth;
+    }
+  }
+  return Json::parse(input.begin(), input.end(), nullptr, false);
+}
 
 class Error final : public std::runtime_error {
 public:

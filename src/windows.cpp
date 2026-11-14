@@ -370,7 +370,7 @@ void finishWindowsInitialization(const QString &path, const QString &transaction
       fail();
     validate(file.value, false, true);
     const auto bytes = read(file.value, 16384);
-    record = Json::parse(bytes.constData(), bytes.constData() + bytes.size(), nullptr, false);
+    record = parseBoundedJson(std::string_view(bytes.constData(), size_t(bytes.size())));
     receiptSignature = stamp(file.value, bytes);
   }
   if (!record.is_object() || record.value("version", 0) != 1 ||

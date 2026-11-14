@@ -67,8 +67,10 @@ def digest(path):
         return value.hexdigest()
 
 
-def request(port, token, path="/health/live", payload=None, timeout=2):
+def request(port, token, path="/health/live", payload=None, timeout=2, measurement=None, origin=0):
     started = time.monotonic()
+    if measurement is not None:
+        measurement["actual_start_offset_ms"] = round((started - origin) * 1000, 3)
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     headers = {"Authorization": "Bearer " + token, "Accept": "application/json"}
     body = None if payload is None else json.dumps(payload).encode()
@@ -77,6 +79,8 @@ def request(port, token, path="/health/live", payload=None, timeout=2):
     try:
         connection.request("GET" if body is None else "POST", path, body, headers)
         response = connection.getresponse()
+        if measurement is not None:
+            measurement["http_status"] = response.status
         if response.status != 200:
             raise Fault(f"http_{response.status}")
         if response.getheader("Content-Type", "").split(";")[0] != "application/json":
@@ -98,6 +102,8 @@ def request(port, token, path="/health/live", payload=None, timeout=2):
     except (OSError, http.client.HTTPException):
         raise Fault("transport") from None
     finally:
+        if measurement is not None:
+            measurement["duration_ms"] = round((time.monotonic() - started) * 1000, 3)
         connection.close()
 
 
@@ -267,7 +273,7 @@ def stats(rows):
     return {"attempted": len(rows), "successful": len(values),
             "p95_ms": values[math.ceil(len(values) * 0.95) - 1] if values else None,
             "errors": dict(collections.Counter(row["error"] for row in rows if "error" in row)),
-            "latency_ms": values}
+            "latency_ms": values, "samples": rows}
 
 
 def phase(name, executable, template, folder, fixture, seconds):
@@ -280,10 +286,13 @@ def phase(name, executable, template, folder, fixture, seconds):
               "search_ttl_seconds": ttl, "workload_passed": False}
     rows, health, rss = [[] for _ in range(5)], [], []
 
-    def search(index, sequence, expected_hit):
+    def search(index, sequence, expected_hit, measurement=None, origin=0):
         query = f"hot-{index}" if hot else f"cold-{index}-{sequence}"
-        value, elapsed = request(ports[0], tokens[index], "/v1/search", {"query": query, "limit": 10})
+        value, elapsed = request(ports[0], tokens[index], "/v1/search", {"query": query, "limit": 10},
+                                 measurement=measurement, origin=origin)
         hit = value.get("cache", {}).get("hit")
+        if measurement is not None:
+            measurement["cache_hit"] = hit if type(hit) is bool else None
         if value.get("status") != "ok" or len(value.get("results", [])) != 10:
             raise Fault("search_payload")
         if type(hit) is not bool or hit != expected_hit:
@@ -304,28 +313,39 @@ def phase(name, executable, template, folder, fixture, seconds):
                 due = start + index * 0.5 + sequence * 2.5
                 if due >= end or halt.wait(max(0, due - time.monotonic())):
                     return
+                attempt = time.monotonic()
+                sample = {"client_index": index, "sequence": sequence,
+                          "scheduled_start_offset_ms": round((due - start) * 1000, 3),
+                          "attempt_start_offset_ms": round((attempt - start) * 1000, 3),
+                          "schedule_lag_ms": round((attempt - due) * 1000, 3),
+                          "actual_start_offset_ms": None, "duration_ms": None,
+                          "http_status": None, "cache_hit": None}
                 try:
-                    if time.monotonic() - due > 0.25:
+                    if attempt - due > 0.25:
                         raise Fault("schedule_missed")
-                    rows[index].append(search(index, sequence, hot))
+                    sample.update(search(index, sequence, hot, sample, start))
                 except Fault as exc:
-                    rows[index].append({"error": exc.args[0]})
+                    sample["error"] = exc.args[0]
                 except Exception:
-                    rows[index].append({"error": "client_failed"})
+                    sample["error"] = "client_failed"
+                rows[index].append(sample)
                 sequence += 1
 
         def monitor():
             while not halt.is_set():
+                sample = {"sequence": len(health), "actual_start_offset_ms": None,
+                          "duration_ms": None, "http_status": None}
                 try:
                     rss.append(native.memory_info().rss)
-                    value, elapsed = request(ports[1], tokens[0], timeout=1)
+                    value, elapsed = request(ports[1], tokens[0], timeout=1, measurement=sample, origin=start)
                     if value.get("live") is not True:
                         raise Fault("not_live")
-                    health.append({"ms": elapsed})
+                    sample["ms"] = elapsed
                 except Fault as exc:
-                    health.append({"error": exc.args[0]})
+                    sample["error"] = exc.args[0]
                 except Exception:
-                    health.append({"error": "monitor_failed"})
+                    sample["error"] = "monitor_failed"
+                health.append(sample)
                 halt.wait(1)
 
         threads = [threading.Thread(target=client, args=(i,)) for i in range(5)]
@@ -408,7 +428,7 @@ def main():
     template_path = ROOT / "config/runtime.json"
     if output in (executable, template_path.resolve(), Path(__file__).resolve()):
         parser.error("--Output must be a separate report file")
-    report = {"report_version": 1, "started_at": datetime.now(timezone.utc).isoformat(),
+    report = {"report_version": 1, "samples_schema_version": 1, "started_at": datetime.now(timezone.utc).isoformat(),
               "run_kind": "acceptance" if args.Seconds >= 1800 else "smoke",
               "executable": str(executable), "executable_sha256": digest(executable),
               "runtime": fingerprint(executable), "host": host_info(),
