@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import psutil
+from process_cleanup import wait_owned
 from runtime_evidence import fingerprint, host_info
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -211,7 +212,7 @@ def stop_process(proc):
                 pass
             except psutil.Error:
                 error = "child_cleanup_failed"
-        if psutil.wait_procs(children, timeout=3)[1]:
+        if wait_owned(children, timeout=3):
             error = "child_cleanup_failed"
     elapsed = round(time.monotonic() - started, 3)
     return {"seconds": elapsed, "returncode": proc.returncode, "forced": forced,

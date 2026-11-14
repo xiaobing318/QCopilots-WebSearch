@@ -52,6 +52,9 @@ full Linux/Windows stability, DEB/MSI acceptance, real Caddy HTTPS behavior,
 public search/read/find evidence and delivery signoff.
 Each Windows 11 SDK/stability report records its own kernel build and workstation
 product type. CI diagnostics must come from the same repository and run attempt.
+`FullStability` runs the full Ubuntu cold/hot workload and five-minute fuzz
+campaigns. The Windows Server CI job retains its smoke workload, then makes the
+candidate available for the required cold/hot Windows 11 desktop acceptance.
 Use **Re-run all jobs** if repeating a candidate run, rather than mixing artifacts
 from successful and retried matrix jobs.
 

@@ -25,6 +25,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError
 from soak import ROOT, Fault, digest, environment, start_process, stop_process
 from runtime_evidence import fingerprint, host_info
+from process_cleanup import wait_owned
 
 EXPECTED = {"web_search", "web_open", "web_find", "web_search_status"}
 
@@ -261,7 +262,7 @@ async def exercise_stdio(executable, config, tokens, fixture, public_url):
             with suppress(psutil.NoSuchProcess):
                 if child.is_running():
                     child.kill()
-        psutil.wait_procs(owned, timeout=5)
+        require(not wait_owned(owned, timeout=5), "stdio_child_cleanup_failed")
 
 
 async def run(args, report):

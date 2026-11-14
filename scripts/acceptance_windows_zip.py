@@ -12,6 +12,7 @@ import zipfile
 import psutil
 from package_inventory import package_files
 from verify_release import need, sha
+from process_cleanup import wait_owned
 
 
 def run_sdk(command, env, directory, timeout=180):
@@ -35,7 +36,7 @@ def run_sdk(command, env, directory, timeout=180):
                 if time.monotonic() >= deadline:
                     break
     finally:
-        _, remaining = psutil.wait_procs(list(owned.values()), timeout=2 if code != 124 else 0)
+        remaining = wait_owned(owned.values(), timeout=2 if code != 124 else 0)
         for proc in reversed(remaining):
             try:
                 if proc.is_running():
@@ -43,7 +44,7 @@ def run_sdk(command, env, directory, timeout=180):
                     forced += 1
             except psutil.NoSuchProcess:
                 pass
-        _, alive = psutil.wait_procs(list(owned.values()), timeout=5)
+        alive = wait_owned(owned.values(), timeout=5)
         need(not alive, 'Portable test process cleanup failed')
         child.wait(timeout=5)
     return code, forced

@@ -14,9 +14,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import package_inventory as assets
 import promote_release
 import verify_release
+from process_cleanup import wait_owned
 REAL_ZIP = zipfile.ZipFile
 REG = stat.S_IFREG | 0o644
 LINK = stat.S_IFLNK | 0o777
+
+
+class ProcessCleanupTests(unittest.TestCase):
+    def test_reused_pid_is_not_reopened_and_uncertain_identity_is_not_success(self):
+        def forbidden_wait(*args, **kwargs):
+            raise AssertionError('A reused numeric PID must never be reopened for wait')
+        reused = types.SimpleNamespace(is_running=lambda: False, wait=forbidden_wait,
+                                      status=forbidden_wait)
+        alive = types.SimpleNamespace(is_running=lambda: True, status=lambda: 'running', wait=forbidden_wait)
+        zombie = types.SimpleNamespace(is_running=lambda: True, status=lambda: 'zombie', wait=forbidden_wait)
+        def denied():
+            raise PermissionError('Unconfirmed original process')
+        uncertain = types.SimpleNamespace(is_running=denied, wait=forbidden_wait)
+        self.assertEqual(wait_owned([reused, alive, zombie, uncertain], 0), [alive, uncertain])
+
+    def test_identity_exit_is_observed_without_numeric_pid_wait(self):
+        states = iter([True, False])
+        process = types.SimpleNamespace(is_running=lambda: next(states), status=lambda: 'running')
+        with patch('process_cleanup.time.sleep'), patch('process_cleanup.time.monotonic', side_effect=[0, 0, 0.1]):
+            self.assertEqual(wait_owned([process], 1), [])
 
 
 class PackageInventoryTests(unittest.TestCase):

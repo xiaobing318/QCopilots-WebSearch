@@ -1,7 +1,8 @@
 """Validate retained Linux analysis evidence before promoting candidate bytes."""
 import hashlib
 import json
-from pathlib import Path
+from pathlib import PurePosixPath
+import posixpath
 import re
 import xml.etree.ElementTree as ET
 
@@ -18,6 +19,14 @@ def verify_quality(path, source, info, commit, run_id, repository, run_attempt):
     def read(file):
         return json.loads(file.read_text(encoding='utf-8'))
 
+    def recorded_path(value):
+        # These are paths from the Linux producer, not the verifier's filesystem.
+        # resolve() here would follow local aliases or probe a different machine.
+        need(isinstance(value, str) and '\x00' not in value, 'Invalid recorded quality path')
+        result = PurePosixPath(posixpath.normpath(value))
+        need(result.is_absolute(), 'Recorded quality path must be absolute on Linux')
+        return result
+
     folder, evidence = path.parent, read(path)
     need(evidence.get('schema_version') == 1 and evidence.get('passed') is True, 'Quality checks did not complete')
     need(evidence['source_commit'] == commit == evidence['github_sha'] and evidence['repository'] == repository
@@ -30,7 +39,7 @@ def verify_quality(path, source, info, commit, run_id, repository, run_attempt):
          'Quality profile identity mismatch')
     required_args = {'-DCMAKE_C_COMPILER=/usr/bin/clang-21', '-DCMAKE_CXX_COMPILER=/usr/bin/clang++-21',
                      '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON', '-DQCWS_SANITIZERS=ON', '-DQCWS_FUZZING=ON'}
-    need(profile['platform'] == 'ubuntu-x64' and Path(profile['buildDir']).name == 'quality'
+    need(profile['platform'] == 'ubuntu-x64' and recorded_path(profile['buildDir']).name == 'quality'
          and required_args <= set(profile['cmakeArgs']), 'Quality instrumentation settings missing')
     need(evidence['dependency_lock_sha256'] == sha(source / 'config/dependencies.lock.json')
          and evidence['clang_tidy_config_sha256'] == sha(source / '.clang-tidy'), 'Quality checked different source settings')
@@ -75,12 +84,12 @@ def verify_quality(path, source, info, commit, run_id, repository, run_attempt):
          and sorted(names) == sorted(case.get('name') for case in cases) == evidence['test_names']
          and not any(case.find(k) is not None for case in cases for k in ('failure', 'error', 'skipped')),
          'Incomplete or failed quality CTest results')
-    original_source, units = Path(evidence['source_root']), set()
+    original_source, units = recorded_path(evidence['source_root']), set()
     database = read(folder / 'compile_commands.json')
     lexbor = []
     for item in database:
-        file = Path(item['file'])
-        file = (file if file.is_absolute() else Path(item['directory']) / file).resolve()
+        file = PurePosixPath(item['file'])
+        file = recorded_path(str(file if file.is_absolute() else recorded_path(item['directory']) / file))
         if file.is_relative_to(original_source):
             relative = file.relative_to(original_source)
             if relative.parts[0] in ('src', 'app', 'tests') and relative.suffix == '.cpp':
@@ -90,7 +99,7 @@ def verify_quality(path, source, info, commit, run_id, repository, run_attempt):
     need(lexbor and all('-fsanitize=address,undefined' in cmd and '-fsanitize=fuzzer-no-link' in cmd for cmd in lexbor),
          'Lexbor fuzz/sanitizer instrumentation missing')
     tidy = [c for c in commands if c['label'].startswith('tidy-')]
-    actual = [Path(c['argv'][3]).relative_to(original_source).as_posix() for c in tidy]
+    actual = [recorded_path(c['argv'][3]).relative_to(original_source).as_posix() for c in tidy]
     need(units and sorted(units) == evidence['expected_tidy_files'] == evidence['tidy_files'] == sorted(actual)
          and len(actual) == len(units) and all(c['argv'][0] == 'clang-tidy-21' and '--warnings-as-errors=*' in c['argv']
          and '--config-file=' + str(original_source / '.clang-tidy') in c['argv'] for c in tidy),
@@ -99,7 +108,10 @@ def verify_quality(path, source, info, commit, run_id, repository, run_attempt):
     for name, max_len in {'html': 1048578, 'url': 16384, 'jsonrpc': 1048576}.items():
         result, command = evidence['fuzz'][name], labels['fuzz-' + name]
         args = command['argv']
-        need(Path(args[0]).name == f'qcws_{name}_fuzz' and {f'-max_total_time={evidence["seconds"]}',
+        need(command.get('duration_seconds', 0) >= evidence['seconds'] - 1
+             and not any(arg.startswith('-runs=') for arg in args[1:]),
+             'Fuzz campaign ended before its required duration or used an iteration shortcut')
+        need(recorded_path(args[0]).name == f'qcws_{name}_fuzz' and {f'-max_total_time={evidence["seconds"]}',
              f'-max_len={max_len}', '-timeout=5', '-rss_limit_mb=1024', '-print_final_stats=1'} <= set(args), 'Wrong fuzz settings')
         text = (folder / command['log']).read_text('utf-8', errors='replace')
         counts = re.findall(r'stat::number_of_executed_units:\s*(\d+)', text)

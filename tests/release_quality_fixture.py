@@ -1,10 +1,12 @@
 """Synthetic, hash-consistent evidence for release-validator contract tests only."""
 import hashlib
 import json
+from pathlib import PurePosixPath
 
 
 def make_quality(source, folder, info):
     folder.mkdir(parents=True)
+    producer = PurePosixPath('/synthetic-linux-run') / source.parent.name / 'source'
     def sha(path):
         return hashlib.sha256(path.read_bytes()).hexdigest()
     def write(name, value):
@@ -13,15 +15,15 @@ def make_quality(source, folder, info):
         return path
     (source / '.clang-tidy').write_text('Checks: clang-analyzer-core.*\n')
     flags = '-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer'
-    profile = {'platform': 'ubuntu-x64', 'buildDir': str(source / 'build/quality'), 'cmakeArgs': [
+    profile = {'platform': 'ubuntu-x64', 'buildDir': str(producer / 'build/quality'), 'cmakeArgs': [
         '-DCMAKE_C_COMPILER=/usr/bin/clang-21', '-DCMAKE_CXX_COMPILER=/usr/bin/clang++-21',
         '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON', '-DQCWS_SANITIZERS=ON', '-DQCWS_FUZZING=ON']}
     commands = []
-    def command(label, argv, text='controlled successful command\n'):
+    def command(label, argv, text='controlled successful command\n', duration=1):
         path = folder / (label + '.log')
         path.write_text(text, encoding='utf-8')
         commands.append({'label': label, 'argv': argv, 'log': path.name, 'log_sha256': sha(path),
-                         'exit_code': 0, 'timed_out': False, 'duration_seconds': 1})
+                         'exit_code': 0, 'timed_out': False, 'duration_seconds': duration})
         return text
     for stage in ('doctor', 'configure', 'build', 'test'):
         command('pipeline-' + stage, ['python', 'pipeline.py', '--ConfigPath', 'config', '--Profile', 'ubuntu-x64', '--Stages', stage])
@@ -36,25 +38,25 @@ def make_quality(source, folder, info):
     (folder / 'CMakeCache.txt').write_text(cache + 'QCWS_SANITIZERS:BOOL=ON\nQCWS_FUZZING:BOOL=ON\n')
     (folder / 'zlib-CMakeCache.txt').write_text(cache)
     unit = 'src/example.cpp'
-    write('compile_commands.json', [{'file': str(source / unit), 'directory': str(source), 'command': 'clang++ ' + flags},
-        {'file': str(source / 'external/parser.c'), 'directory': str(source),
+    write('compile_commands.json', [{'file': str(producer / unit), 'directory': str(producer), 'command': 'clang++ ' + flags},
+        {'file': str(producer / 'external/parser.c'), 'directory': str(producer),
          'command': 'clang -fsanitize=address,undefined -fsanitize=fuzzer-no-link -o lexbor_static.dir/parser.o'}])
-    command('tidy-0', ['clang-tidy-21', '-p', profile['buildDir'], str(source / unit),
-            '--config-file=' + str(source / '.clang-tidy'), '--warnings-as-errors=*'])
+    command('tidy-0', ['clang-tidy-21', '-p', profile['buildDir'], str(producer / unit),
+            '--config-file=' + str(producer / '.clang-tidy'), '--warnings-as-errors=*'])
     fuzz = {}
     for name, maximum in {'html': 1048578, 'url': 16384, 'jsonrpc': 1048576}.items():
         seed = source / 'tests/fuzz/corpus' / name / 'fixture'
         seed.parent.mkdir(parents=True)
         seed.write_bytes(b'controlled seed')
-        command('fuzz-' + name, [str(source / ('build/quality/qcws_' + name + '_fuzz')),
+        command('fuzz-' + name, [str(producer / ('build/quality/qcws_' + name + '_fuzz')),
             '-max_total_time=300', f'-max_len={maximum}', '-timeout=5', '-rss_limit_mb=1024', '-print_final_stats=1'],
-            '#100 DONE cov: 10 ft: 20\nstat::number_of_executed_units: 100\n')
+            '#100 DONE cov: 10 ft: 20\nstat::number_of_executed_units: 100\n', duration=301)
         fuzz[name] = {'log': 'fuzz-' + name + '.log', 'executed_units': 100, 'done_cov': 10,
                       'max_len': maximum, 'executable_sha256': 'd' * 64, 'seeds': {'fixture': sha(seed)}}
     write('quality-config.json', {'version': 1, 'profiles': {'ubuntu-x64': profile}})
     evidence = {'schema_version': 1, 'passed': True, 'source_commit': '1' * 40, 'github_sha': '1' * 40,
         'repository': 'example/QCopilots-WebSearch', 'run_id': '123', 'run_attempt': '2',
-        'clean_before': True, 'clean_after': True, 'source_root': str(source),
+        'clean_before': True, 'clean_after': True, 'source_root': str(producer),
         'source_after': info['build_identity']['source_sha256'], 'profile': profile,
         'build_identity': {'source_sha256': info['build_identity']['source_sha256'],
             'profile_sha256': hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()},

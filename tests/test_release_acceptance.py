@@ -19,6 +19,7 @@ sys.path.insert(0, str(REPO / 'scripts'))
 import package_inventory
 import verify_release
 from release_quality_fixture import make_quality
+from quality_evidence import verify_quality
 COMMIT, TAG, RUN, ATTEMPT, REPOSITORY = '1' * 40, 'v0.1.0', 123, 2, 'example/QCopilots-WebSearch'
 
 
@@ -268,6 +269,8 @@ class ReleaseAcceptanceTests(unittest.TestCase):
         original = path.read_bytes()
         for change in (lambda v: v.update(passed=False), lambda v: v.update(source_after='0' * 64),
                        lambda v: v.update(tidy_files=[]), lambda v: v.update(seconds=60),
+                       lambda v: next(c for c in v['commands'] if c['label'] == 'fuzz-html').update(duration_seconds=1),
+                       lambda v: next(c for c in v['commands'] if c['label'] == 'fuzz-html')['argv'].append('-runs=100'),
                        lambda v: v['fuzz']['html'].update(executed_units=1)):
             path.write_bytes(original)
             self.edit(path, change)
@@ -277,6 +280,12 @@ class ReleaseAcceptanceTests(unittest.TestCase):
         (path.parent / 'fuzz-html.log').write_text('tampered evidence')
         with self.assertRaisesRegex(RuntimeError, 'Quality evidence changed'):
             self.verify()
+
+    def test_foreign_provenance_does_not_resolve_on_verifier_filesystem(self):
+        with patch.object(Path, 'resolve', side_effect=AssertionError('Foreign paths are not local paths')):
+            files = verify_quality(self.diagnostic('quality/quality.json'), self.f.control,
+                self.f.infos['ubuntu-x64'], COMMIT, RUN, REPOSITORY, ATTEMPT)
+        self.assertTrue(files)
 
     def test_live_and_stability_gates(self):
         path = self.diagnostic('soak.json')
