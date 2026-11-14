@@ -4,7 +4,7 @@
 
 An Apache-2.0 C++20 / Qt 6.12 service for self-hosted web search, HTML reading and literal page search. SearXNG supplies search results. REST, MCP HTTP and MCP stdio share the same versioned tools. A separate GPL adapter connects QGIS QCopilots to the service.
 
-This repository is under implementation. Windows native compilation and the first deterministic tests have passed. Production service installers, Ubuntu acceptance and the release gates are still being completed. Do not treat an untagged source checkout as an accepted team deployment.
+Windows and Ubuntu compilation, packaging and automated validation are implemented. Ubuntu acceptance has exercised the SDK, DEB lifecycle, Caddy HTTPS, 60 public queries, sanitizers, static analysis and bounded fuzzing. Final delivery still requires complete candidate-specific stability evidence, Windows 11 production MSI acceptance and the independent review council. A version tag creates candidates. Only a verified, promoted Release represents an accepted distribution. See [release gates](docs/release.md).
 
 ## Tools
 

@@ -20,6 +20,7 @@ import package_inventory
 import verify_release
 from release_quality_fixture import make_quality
 from quality_evidence import verify_quality
+from public_evidence import load_queries, navigation_summary
 COMMIT, TAG, RUN, ATTEMPT, REPOSITORY = '1' * 40, 'v0.1.0', 123, 2, 'example/QCopilots-WebSearch'
 
 
@@ -28,6 +29,9 @@ def build_fixture(FIXTURE):
     (CONTROL / 'config').mkdir(parents=True)
     INPUTS = FIXTURE / 'artifacts'
     INPUTS.mkdir()
+    (CONTROL / 'tests/data').mkdir(parents=True)
+    query_path = CONTROL / 'tests/data/public_queries.json'
+    shutil.copyfile(REPO / 'tests/data/public_queries.json', query_path)
     COMMIT, TAG, RUN, ATTEMPT, REPOSITORY = '1' * 40, 'v0.1.0', 123, 2, 'example/QCopilots-WebSearch'
 
     def sha_bytes(data):
@@ -149,8 +153,13 @@ def build_fixture(FIXTURE):
         if not windows:
             put_json(diagnostic / 'deb-acceptance.json', {'status': 'passed', 'candidateSha256': package_hashes[deb.name]})
             put_json(diagnostic / 'caddy-contract.json', {'passed': True, 'runtime': installed, 'compose_cleanup': True})
+            queries = [{'id': q['id'], 'category': q['category'],
+                        'expected_domains': q.get('expected_domains', []),
+                        'request': {**{key: q[key] for key in ('query', 'language', 'domains', 'time_range')}, 'limit': 5},
+                        'urls': [], 'status': 'ok'} for q in load_queries(query_path)]
             put_json(diagnostic / 'public-search.json', {'minimum_live_evidence_passed': True, 'runtime': installed,
-                'closure': {'completed': True}, 'queries': [{'language': 'zh' if i < 30 else 'en', 'index': i} for i in range(60)]})
+                'queries_sha256': verify_release.sha(query_path), 'navigation': navigation_summary(queries),
+                'closure': {'completed': True}, 'queries': queries})
             put_json(diagnostic / 'public-compose.json', {'cleanup_passed': True, 'temporary_directory_removed': True})
             make_quality(CONTROL, diagnostic / 'quality', info)
 
@@ -296,6 +305,19 @@ class ReleaseAcceptanceTests(unittest.TestCase):
         path.write_bytes(original)
         self.edit(self.diagnostic('public-search.json'), lambda v: v['closure'].update(completed=False))
         with self.assertRaisesRegex(RuntimeError, 'Live public evidence'):
+            self.verify()
+
+    def test_navigation_evidence_cannot_omit_or_change_targets(self):
+        path = self.diagnostic('public-search.json')
+        original = path.read_bytes()
+        self.edit(path, lambda value: value.pop('navigation'))
+        with self.assertRaisesRegex(RuntimeError, 'Navigation ranking evidence'):
+            self.verify()
+        path.write_bytes(original)
+        def change_target(value):
+            next(row for row in value['queries'] if row['category'] == 'navigation')['expected_domains'] = ['wrong.example']
+        self.edit(path, change_target)
+        with self.assertRaisesRegex(RuntimeError, 'predeclared request or target'):
             self.verify()
 
 

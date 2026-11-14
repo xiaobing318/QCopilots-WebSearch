@@ -9,6 +9,7 @@ import tarfile
 import xml.etree.ElementTree as ET
 from package_inventory import package_files, require_windows_payload_match
 from quality_evidence import verify_quality
+from public_evidence import verify_public_queries
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -171,6 +172,7 @@ def verify(root,commit,tag,run_id,evidence_path,evidence_sha,repository,run_atte
                  'Caddy acceptance incomplete')
             need(public.get('minimum_live_evidence_passed') is True and public['runtime'] == runtime
                  and public['closure']['completed'] is True and len(public['queries']) == 60,'Live public evidence incomplete')
+            verify_public_queries(public, ROOT/'tests/data/public_queries.json')
             compose_path = unique(diagnostics,'public-compose.json')
             cleanup = read(compose_path)
             need(cleanup.get('cleanup_passed') is True and cleanup.get('temporary_directory_removed') is True,

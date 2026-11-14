@@ -190,34 +190,46 @@
     {
       "id": "zh-22",
       "language": "zh-CN",
-      "category": "general",
-      "query": "国际单位制 米 秒 基本单位 定义",
+      "category": "navigation",
+      "query": "QGIS 官方网站",
       "domains": [],
-      "time_range": "any"
+      "time_range": "any",
+      "expected_domains": [
+        "qgis.org"
+      ]
     },
     {
       "id": "zh-23",
       "language": "zh-CN",
-      "category": "general",
-      "query": "墨卡托 地图投影 面积 变形 原理",
+      "category": "navigation",
+      "query": "OpenStreetMap 官方网站",
       "domains": [],
-      "time_range": "any"
+      "time_range": "any",
+      "expected_domains": [
+        "openstreetmap.org"
+      ]
     },
     {
       "id": "zh-24",
       "language": "zh-CN",
-      "category": "general",
-      "query": "Creative Commons 署名许可 公共领域 区别",
+      "category": "navigation",
+      "query": "Python 官方网站",
       "domains": [],
-      "time_range": "any"
+      "time_range": "any",
+      "expected_domains": [
+        "python.org"
+      ]
     },
     {
       "id": "zh-25",
       "language": "zh-CN",
-      "category": "general",
-      "query": "闰年 公历 世纪年 计算规则",
+      "category": "navigation",
+      "query": "GDAL 官方网站",
       "domains": [],
-      "time_range": "any"
+      "time_range": "any",
+      "expected_domains": [
+        "gdal.org"
+      ]
     },
     {
       "id": "zh-26",
@@ -450,34 +462,46 @@
     {
       "id": "en-22",
       "language": "en",
-      "category": "general",
-      "query": "International System of Units metre second definitions",
+      "category": "navigation",
+      "query": "QGIS official website",
       "domains": [],
-      "time_range": "any"
+      "time_range": "any",
+      "expected_domains": [
+        "qgis.org"
+      ]
     },
     {
       "id": "en-23",
       "language": "en",
-      "category": "general",
-      "query": "Mercator map projection area distortion explanation",
+      "category": "navigation",
+      "query": "OpenStreetMap official website",
       "domains": [],
-      "time_range": "any"
+      "time_range": "any",
+      "expected_domains": [
+        "openstreetmap.org"
+      ]
     },
     {
       "id": "en-24",
       "language": "en",
-      "category": "general",
-      "query": "Creative Commons attribution license public domain differences",
+      "category": "navigation",
+      "query": "Python official website",
       "domains": [],
-      "time_range": "any"
+      "time_range": "any",
+      "expected_domains": [
+        "python.org"
+      ]
     },
     {
       "id": "en-25",
       "language": "en",
-      "category": "general",
-      "query": "Gregorian calendar leap year century year rule",
+      "category": "navigation",
+      "query": "GDAL official website",
       "domains": [],
-      "time_range": "any"
+      "time_range": "any",
+      "expected_domains": [
+        "gdal.org"
+      ]
     },
     {
       "id": "en-26",

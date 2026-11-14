@@ -80,7 +80,7 @@ the private build configuration. For example, with a .NET 10 SDK available:
 
 ```text
 dotnet tool install --tool-path <tool-directory> wix --version 7.0.1
-wix extension add -g WixToolset.UI.wixext/7.0.1
+wix extension add -g WixToolset.UI.wixext/7.0.1 -acceptEula wix7
 ```
 
 CPack's `CPACK_WIX_VERSION=4` selects its modern .NET WiX driver. It does not mean

@@ -4,7 +4,7 @@
 
 使用 C++20 和 Qt 6.12 实现的独立网页搜索服务，通过自部署 SearXNG 搜索公网，提供网页阅读、页内查找、REST、MCP HTTP 和 MCP stdio。QGIS 通过独立 Python MCP 适配插件接入，同一原生服务也可用于其他项目。
 
-当前仓库正在实施中。Windows 原生编译和首批确定性测试已通过，生产服务安装包、Ubuntu 验收及正式发布门禁仍在完成。未打正式版本标签的源码不表示已通过团队部署验收。
+Windows 和 Ubuntu 的编译、打包与自动验证已实现。Ubuntu 已实测 SDK、DEB 生命周期、Caddy HTTPS、60 条公网查询、sanitizer、静态分析和有界 fuzz。正式交付仍需完整的候选版本稳定性证据、Windows 11 生产 MSI 验收及独立委员会评审。版本标签生成候选包，只有经验证并晋级的正式 Release 才代表已验收的分发版本。详见[发布门禁](docs/release.md)。
 
 ## 能力与边界
 

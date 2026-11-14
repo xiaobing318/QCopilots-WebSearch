@@ -77,3 +77,11 @@ search-success rate. They still require all 60 representative attempts and at
 least one real search/open/find closure. Service errors, invalid contracts or
 failed cleanup block acceptance. The reference Caddy check uses a synthetic
 search provider and is labelled separately from the real SearXNG public report.
+
+The 60-query corpus includes four navigation queries per language with official
+domains declared before execution. These requests have no domain or time filter.
+Reports retain their first matching official-domain rank, top-1/top-5 counts and
+MRR@5, including zero credit for empty/error results. These are domain-level
+navigation observations, not a human relevance judgment or a coverage guarantee.
+Promotion verifies the exact query corpus and recomputes the recorded metrics.
+No ranking-quality threshold is imposed on the best-effort public backend.

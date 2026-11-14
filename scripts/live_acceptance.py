@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
 from soak import digest, environment, hidden_console, stop_process
 from runtime_evidence import fingerprint
+from public_evidence import load_queries, navigation_summary
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -176,11 +177,7 @@ def validate_search(value, request):
 
 
 def run(args, report, token):
-    data = json.loads(args.Queries.read_text('utf-8'))
-    rows = data.get('queries',[])
-    check(data.get('schema_version') == 1 and len(rows) == 60, 'query_count')
-    check(collections.Counter(row['language'] for row in rows) == {'en':30,'zh-CN':30}, 'query_languages')
-    check(len({row['id'] for row in rows}) == len({row['query'] for row in rows}) == 60, 'query_unique')
+    rows = load_queries(args.Queries)
     groups = [[row for row in rows if row['language'] == lang] for lang in ('zh-CN','en')]
     rows = [row for pair in zip(*groups) for row in pair]
     next_start, tried = 0.0,set()
@@ -207,7 +204,8 @@ def run(args, report, token):
             for query in rows:
                 payload = {key:query[key] for key in ('query','language','domains','time_range')}
                 payload['limit'] = 5
-                row = {'id':query['id'],'request':payload}
+                row = {'id':query['id'],'request':payload,'category':query['category'],
+                       'expected_domains':query.get('expected_domains',[])}
                 report['queries'].append(row)
                 throttle()
                 started = time.monotonic()
@@ -329,6 +327,7 @@ def main():
         report['summary'] = summary(rows)
         report['summary'].update(quality_threshold_applied=False,
             languages={lang:summary([row for row in rows if row['request']['language']==lang]) for lang in ('zh-CN','en')})
+        report['navigation'] = navigation_summary(rows)
         output.parent.mkdir(parents=True,exist_ok=True)
         text = json.dumps(report,ensure_ascii=False,indent=2,allow_nan=False).replace(token,'[REDACTED]')
         with tempfile.NamedTemporaryFile(mode='w',encoding='utf-8',dir=output.parent,
