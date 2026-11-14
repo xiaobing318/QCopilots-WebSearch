@@ -91,13 +91,6 @@ int main(int argc, char **argv) {
         commitInitialization = true;
       else if (args[i] == "--TransactionId" && i + 1 < args.size())
         transaction = args[++i];
-#ifdef _WIN32
-      else if (args[i] == "--InstallerFailureTest") {
-        // An explicit MSI acceptance action. Never enabled by runtime JSON.
-        std::cerr << "Requested installer rollback test.\n";
-        return 1;
-      }
-#endif
       else if (args[i] == "--ServiceName" && i + 1 < args.size()) {
         const auto name = args[++i];
         if (!QRegularExpression("^[A-Za-z][A-Za-z0-9_.-]{0,63}$").match(name).hasMatch())

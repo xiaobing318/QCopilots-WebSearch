@@ -8,6 +8,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     INSTALL_RPATH "$ORIGIN/../lib" INSTALL_RPATH_USE_LINK_PATH FALSE)
   install(TARGETS qcopilots-websearch RUNTIME DESTINATION "${_app_bin}")
   qt6_generate_deploy_script(TARGET qcopilots-websearch OUTPUT_SCRIPT _deploy_script CONTENT "
+    set(QT_DEPLOY_LIB_DIR \"${_app_root}/lib\")
     qt6_deploy_runtime_dependencies(
       EXECUTABLE \"$<TARGET_FILE:qcopilots-websearch>\"
       BIN_DIR \"${_app_bin}\" LIB_DIR \"${_app_root}/lib\"

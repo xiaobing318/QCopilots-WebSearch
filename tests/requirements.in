@@ -1,0 +1,4 @@
+# Acceptance tooling only, never a runtime service dependency.
+mcp==2.3.0
+httpx2==2.16.0
+psutil==7.2.2

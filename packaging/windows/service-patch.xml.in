@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CPackWiXPatch>
+  <CPackWiXFragment Id="CM_CP_bin.qcopilots_websearch.exe">
+    <ServiceInstall Id="QcwsServiceInstall" Name="@QCWS_SERVICE_NAME@"
+      DisplayName="@CPACK_PACKAGE_NAME@" Description="Web search and page reading for MCP clients"
+      Type="ownProcess" Start="auto" ErrorControl="normal" Vital="yes"
+      Account="NT SERVICE\@QCWS_SERVICE_NAME@"
+      Arguments="--WindowsService --ServiceName @QCWS_SERVICE_NAME@ --ConfigPath &quot;[QcwsDataRoot]service.json&quot;" />
+    <ServiceControl Id="QcwsServiceControl" Name="@QCWS_SERVICE_NAME@"
+      Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+  </CPackWiXFragment>
+  <CPackWiXFragment Id="#PRODUCT">
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="QcwsDataRoot" Name="@QCWS_DATA_DIRECTORY@">
+        <Component Id="QcwsDataRootComponent" Guid="@QCWS_DATA_COMPONENT_GUID@" Bitness="always64" KeyPath="yes">
+          <CreateFolder>
+            <PermissionEx Id="QcwsDataRootAcl"
+              Sddl="O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;@QCWS_SERVICE_SID@)" />
+          </CreateFolder>
+        </Component>
+        <Directory Id="QcwsStateRoot" Name="state">
+          <Component Id="QcwsStateRootComponent" Guid="@QCWS_STATE_COMPONENT_GUID@" Bitness="always64" KeyPath="yes">
+            <CreateFolder>
+              <PermissionEx Id="QcwsStateRootAcl"
+                Sddl="O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;@QCWS_SERVICE_SID@)" />
+            </CreateFolder>
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+    <CustomAction Id="QcwsRollbackInitialization" FileRef="CM_FP_bin.qcopilots_websearch.exe"
+      ExeCommand="--RollbackInitialization --ConfigPath &quot;[QcwsDataRoot]service.json&quot; --TransactionId [ProductCode] --ServiceName @QCWS_SERVICE_NAME@"
+      Execute="rollback" Impersonate="no" Return="check" />
+    <CustomAction Id="QcwsInitializeConfig" FileRef="CM_FP_bin.qcopilots_websearch.exe"
+      ExeCommand="--InitializeConfig --ConfigPath &quot;[QcwsDataRoot]service.json&quot; --TransactionId [ProductCode] --ServiceName @QCWS_SERVICE_NAME@"
+      Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="QcwsCommitInitialization" FileRef="CM_FP_bin.qcopilots_websearch.exe"
+      ExeCommand="--CommitInitialization --ConfigPath &quot;[QcwsDataRoot]service.json&quot; --TransactionId [ProductCode] --ServiceName @QCWS_SERVICE_NAME@"
+      Execute="commit" Impersonate="no" Return="ignore" />
+    <!-- Explicit administrator-only acceptance injection. Tests use the exact
+         same MSI bytes as normal installation, without a shell or helper DLL. -->
+    <Property Id="QCWS_TEST_FAILPOINT" Value="none" Secure="yes" />
+    <CustomAction Id="QcwsFailAfterInitialize" FileRef="CM_FP_bin.qcopilots_websearch.exe"
+      ExeCommand="--ConfigPath" Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="QcwsFailAfterStartServices" FileRef="CM_FP_bin.qcopilots_websearch.exe"
+      ExeCommand="--ConfigPath" Execute="deferred" Impersonate="no" Return="check" />
+    <InstallExecuteSequence>
+      <Custom Action="QcwsRollbackInitialization" After="InstallServices"
+        Condition="NOT REMOVE AND NOT UPGRADINGPRODUCTCODE AND ($CM_CP_bin.qcopilots_websearch.exe = 3)" />
+      <Custom Action="QcwsInitializeConfig" After="QcwsRollbackInitialization"
+        Condition="NOT REMOVE AND NOT UPGRADINGPRODUCTCODE AND ($CM_CP_bin.qcopilots_websearch.exe = 3)" />
+      <Custom Action="QcwsCommitInitialization" After="QcwsInitializeConfig"
+        Condition="NOT REMOVE AND NOT UPGRADINGPRODUCTCODE AND ($CM_CP_bin.qcopilots_websearch.exe = 3)" />
+      <Custom Action="QcwsFailAfterInitialize" After="QcwsCommitInitialization"
+        Condition='NOT REMOVE AND NOT UPGRADINGPRODUCTCODE AND ($CM_CP_bin.qcopilots_websearch.exe = 3) AND QCWS_TEST_FAILPOINT = "afterInitialize"' />
+      <Custom Action="QcwsFailAfterStartServices" After="StartServices"
+        Condition='NOT REMOVE AND NOT UPGRADINGPRODUCTCODE AND ($CM_CP_bin.qcopilots_websearch.exe = 3) AND QCWS_TEST_FAILPOINT = "afterStartServices"' />
+    </InstallExecuteSequence>
+  </CPackWiXFragment>
+  <CPackWiXFragment Id="#PRODUCTFEATURE">
+    <ComponentRef Id="QcwsDataRootComponent" />
+    <ComponentRef Id="QcwsStateRootComponent" />
+  </CPackWiXFragment>
+</CPackWiXPatch>
