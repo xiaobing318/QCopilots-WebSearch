@@ -73,6 +73,36 @@ jobs:
         run: |
           import os, subprocess, sys
           subprocess.run([sys.executable,'scripts/pipeline.py','--ConfigPath',os.environ['QCWS_CONFIG'],'--Profile',os.environ['QCWS_PROFILE'],'--Stages','publish'],check=True)
+      - name: Install acceptance tooling
+        shell: python
+        run: |
+          import subprocess,sys
+          subprocess.run([sys.executable,'-m','pip','install','--require-hashes','-r','tests/requirements.lock'],check=True)
+      - name: Official SDK and short stability checks
+        shell: python
+        run: |
+          import os,subprocess,sys
+          from pathlib import Path
+          relative='bin/qcopilots-websearch.exe' if os.name=='nt' else 'opt/qcopilots-websearch/bin/qcopilots-websearch'
+          exe=Path('install/ci',relative).resolve()
+          subprocess.run([sys.executable,'scripts/test_mcp_sdk.py','--Executable',str(exe),'--Output','work/ci-artifacts/mcp-sdk.json'],check=True)
+          subprocess.run([sys.executable,'scripts/soak.py','--Executable',str(exe),'--Seconds','10','--Output','work/ci-artifacts/soak-smoke.json'],check=True)
+      - name: DEB installation and recovery
+        if: runner.os == 'Linux'
+        shell: python
+        run: |
+          import hashlib,json,os,subprocess,sys
+          from pathlib import Path
+          candidate=next(Path('build/ci/packages').glob('**/*_0.1.0_amd64.deb')).resolve()
+          config=json.loads(Path(os.environ['QCWS_CONFIG']).read_text())
+          config['profiles'][os.environ['QCWS_PROFILE']]['cmakeArgs'].append('-DQCWS_VERSION=0.0.1')
+          baseline_config=Path(os.environ['RUNNER_TEMP'])/'qcws-baseline.json'
+          baseline_config.write_text(json.dumps(config))
+          subprocess.run([sys.executable,'scripts/pipeline.py','--ConfigPath',str(baseline_config),'--Profile',os.environ['QCWS_PROFILE'],'--Stages','configure,build,install,publish'],check=True)
+          baseline=next(Path('build/ci/packages').glob('**/*_0.0.1_amd64.deb')).resolve()
+          def sha(p):
+              with p.open('rb') as f: return hashlib.file_digest(f,'sha256').hexdigest()
+          subprocess.run(['sudo','/usr/bin/python3','scripts/acceptance_deb.py','--Package',str(candidate),'--PackageSHA256',sha(candidate),'--BaselinePackage',str(baseline),'--BaselineSHA256',sha(baseline),'--OutputPath',str(Path('work/ci-artifacts/deb-acceptance.json').resolve()),'--DisposableMachine'],check=True)
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: runner.os == 'Linux'
         with:
@@ -99,5 +129,7 @@ jobs:
             build/ci/CMakeFiles/CMakeConfigureLog.yaml
             build/ci/CMakeCache.txt
             build/ci/packages/**/CPack*.log
+            work/ci-artifacts/*.json
+            work/ci-artifacts/*.log
           if-no-files-found: ignore
           retention-days: 14
