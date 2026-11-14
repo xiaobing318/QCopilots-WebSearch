@@ -96,7 +96,7 @@ jobs:
       - name: Official SDK and stability checks
         shell: python
         env:
-          QCWS_FULL_STABILITY: ${{ inputs.FullStability && 'true' || 'false' }}
+          QCWS_FULL_STABILITY: ${{ (inputs.FullStability || startsWith(github.ref, 'refs/tags/v')) && 'true' || 'false' }}
         run: |
           import os,subprocess,sys
           from pathlib import Path
@@ -105,6 +105,9 @@ jobs:
           subprocess.run([sys.executable,'scripts/test_mcp_sdk.py','--Executable',str(exe),'--Output','work/ci-artifacts/mcp-sdk.json'],check=True)
           duration='1800' if os.environ['QCWS_FULL_STABILITY']=='true' else '10'
           subprocess.run([sys.executable,'scripts/soak.py','--Executable',str(exe),'--Seconds',duration,'--Output','work/ci-artifacts/soak.json'],check=True)
+      - name: Caddy HTTPS deployment contract
+        if: runner.os == 'Linux'
+        run: python scripts/acceptance_caddy.py --Executable install/ci/opt/qcopilots-websearch/bin/qcopilots-websearch --Output work/ci-artifacts/caddy-contract.json
       - name: DEB installation and recovery
         if: runner.os == 'Linux'
         shell: python
@@ -130,7 +133,7 @@ jobs:
               with p.open('rb') as f: return hashlib.file_digest(f,'sha256').hexdigest()
           subprocess.run(['sudo','/usr/bin/python3','scripts/acceptance_deb.py','--Package',str(candidate),'--PackageSHA256',sha(candidate),'--BaselinePackage',str(baseline),'--BaselineSHA256',sha(baseline),'--OutputPath',str(Path('work/ci-artifacts/deb-acceptance.json').resolve()),'--DisposableMachine'],check=True)
       - name: Real public search and read/find closure
-        if: runner.os == 'Linux' && inputs.LivePublicSearch
+        if: runner.os == 'Linux' && (inputs.LivePublicSearch || startsWith(github.ref, 'refs/tags/v'))
         run: python scripts/run_live_compose.py --Executable install/ci/opt/qcopilots-websearch/bin/qcopilots-websearch --OutputDir work/ci-artifacts
       - name: Collect exact candidate distribution files
         shell: python

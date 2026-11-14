@@ -15,7 +15,7 @@ $db=$null
 function Rows([string]$sql,[string[]]$names) {
   $view=$db.OpenView($sql)
   try {
-    $view.Execute()
+    [void]$view.Execute()
     while ($null -ne ($record=$view.Fetch())) {
       try {
         $row=[ordered]@{}
@@ -23,7 +23,7 @@ function Rows([string]$sql,[string[]]$names) {
         [pscustomobject]$row
       } finally {[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($record)}
     }
-  } finally {$view.Close();[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($view)}
+  } finally {[void]$view.Close();[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($view)}
 }
 try {
   $db=$wi.OpenDatabase($env:QCWS_MSI_INVENTORY_PATH,0)
@@ -96,24 +96,30 @@ def inventory_msi(package, wix, environment=None):
         # WiX deletes an existing -x directory. Only pass this new scoped child.
         if payload.exists() or payload.parent.resolve() != root:
             raise RuntimeError('Unsafe WiX extraction directory')
-        subprocess.run([str(wix),'msi','decompile',str(package),'-x',str(payload),
+        subprocess.run([str(wix),'msi','decompile',str(package),'-acceptEula','wix7','-x',str(payload),
                         '-o',str(root/'package.wxs'),'-intermediateFolder',str(root/'intermediate')],
                        env=env,capture_output=True,check=True)
         extracted = payload / 'File'
         if not extracted.is_dir():
             raise RuntimeError('Missing MSI File payload')
-        actual = set()
+        actual = {}
         for path in extracted.rglob('*'):
             if path.is_symlink() or not path.resolve().is_relative_to(extracted.resolve()):
                 raise RuntimeError('Unexpected extracted MSI link')
             if path.is_file():
                 if path.parent != extracted:
                     raise RuntimeError('Unexpected nested MSI file identifier')
-                actual.add(path.name)
-        if actual != set(files):
+                key = path.name.casefold()
+                if key in actual:
+                    raise RuntimeError('Duplicate extracted MSI identifier')
+                actual[key] = path
+        # MSI identifiers may end in dots. Win32 removes trailing dots when WiX
+        # writes those identifiers as extraction filenames. Require a bijection.
+        normalized = {leaf(identity).rstrip(' .').casefold():identity for identity in files}
+        if len(normalized) != len(files) or set(actual) != set(normalized):
             raise RuntimeError('MSI File table differs from extracted payload')
         for identity, row in sorted(files.items()):
-            source = extracted / leaf(identity)
+            source = actual[leaf(identity).rstrip(' .').casefold()]
             if source.stat().st_size != int(row['size']):
                 raise RuntimeError('MSI FileSize mismatch')
             name = '/'.join(directory(components[row['component']]['directory']) + [leaf(row['name'].split('|')[-1])])

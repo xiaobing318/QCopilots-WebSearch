@@ -135,7 +135,7 @@ def main():
         raise RuntimeError("Unexpected WiX version")
     extension = Path(values["WIX_EXTENSIONS"]) / ".wix/extensions/WixToolset.UI.wixext/7.0.1/wixext7/WixToolset.UI.wixext.dll"
     if not extension.is_file():
-        run([wix, "extension", "add", "--global", "WixToolset.UI.wixext/7.0.1"])
+        run([wix, "extension", "add", "--global", "WixToolset.UI.wixext/7.0.1", "-acceptEula", "wix7"])
     if not extension.is_file():
         raise RuntimeError("Missing pinned WiX UI extension")
     tools = {"dotnet": str(dotnet), "wix": str(wix)}

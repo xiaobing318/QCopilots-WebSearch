@@ -254,7 +254,8 @@ finally {
         Assert (@(Owned-Processes).Count -eq 0) 'Cleanup left a process.'
     } catch { $cleanupFailures.Add($_.Exception.Message) }
     @{ Passed = (!$failure -and !$cleanupFailures.Count); Candidate = $candidate; Baseline = $baseline;
-       StopSeconds = $stopSeconds; WindowsBuild = $osInfo.BuildNumber; CleanupErrors = @($cleanupFailures); Error = "$failure" } |
+       StopSeconds = $stopSeconds; WindowsBuild = $osInfo.BuildNumber; WindowsProductType = $osInfo.ProductType;
+       CleanupErrors = @($cleanupFailures); Error = "$failure" } |
         ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $runDir 'result.json') -Encoding UTF8
     [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($wi)
 }
