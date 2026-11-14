@@ -1,0 +1,74 @@
+{
+  "qt": {
+    "windows-x64": {
+      "version": "6.12.0",
+      "arch": "win64_msvc2022_64",
+      "directory": "msvc2022_64",
+      "artifacts": [
+        {
+          "url": "https://download.qt.io/online/qtsdkrepository/windows_x86/desktop/qt6_6120/qt6_6120_msvc2022_64/qt.qt6.6120.win64_msvc2022_64/6.12.0-0-202609280346qtbase-Windows-Windows_11_24H2-MSVC2022-Windows-Windows_11_24H2-X86_64.7z",
+          "sha256": "219d1b86def3be418e31d704572bc4acc91b2ec373c65595c9fb12b42bf098dc",
+          "destination": "."
+        }
+      ]
+    },
+    "ubuntu-x64": {
+      "version": "6.12.0",
+      "arch": "linux_gcc_64",
+      "directory": "gcc_64",
+      "artifacts": [
+        {
+          "url": "https://download.qt.io/online/qtsdkrepository/linux_x64/desktop/qt6_6120/qt6_6120/qt.qt6.6120.linux_gcc_64/6.12.0-0-202609280346qtbase-Linux-RHEL_9_6-GCC-Linux-RHEL_9_6-X86_64.7z",
+          "sha256": "943023b929d0c08eafe7341700b5ed7601284410b7afd6093f950be291d1d7cd",
+          "destination": "."
+        },
+        {
+          "url": "https://download.qt.io/online/qtsdkrepository/linux_x64/desktop/qt6_6120/qt6_6120/qt.qt6.6120.linux_gcc_64/6.12.0-0-202609280346icu-linux-Rhel8.6-x86_64.7z",
+          "sha256": "1fdbcd67b1760f3a3f031c64637a9f19992aed2f35aa615e12a468f8c655d4da",
+          "destination": "lib"
+        }
+      ]
+    }
+  },
+  "qt_source": {
+    "url": "https://download.qt.io/official_releases/qt/6.12/6.12.0/submodules/qtbase-everywhere-src-6.12.0.tar.xz",
+    "sha256": "a951bd163c7b80fc6b8c88d7668fb56abf91c152373e13c10666763238131307"
+  },
+  "zlib": {
+    "url": "https://github.com/madler/zlib/releases/download/v1.4/zlib-1.4.tar.xz",
+    "sha256": "4f11c512053d7bab8d9e9b89bde3575add3e4c50a383b42ef6cb837035fc5a7c",
+    "sourceDir": "zlib-1.4"
+  },
+  "sources": {
+    "cares": {
+      "url": "https://github.com/c-ares/c-ares/releases/download/v1.34.9/c-ares-1.34.9.tar.gz",
+      "sha256": "9364b70a12eb59a06830fb488d9357f90100dff0d98b23ea3593a183d43e6f2f",
+      "sourceDir": "c-ares-1.34.9"
+    },
+    "curl": {
+      "url": "https://github.com/curl/curl/releases/download/curl-8_23_0/curl-8.23.0.tar.xz",
+      "sha256": "8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5",
+      "sourceDir": "curl-8.23.0"
+    },
+    "httplib": {
+      "url": "https://codeload.github.com/yhirose/cpp-httplib/tar.gz/refs/tags/v0.66.0",
+      "sha256": "537a77cdb96d3b4ad64d0b7103971de52eac75cd4ee03a2fdb84417b0d742459",
+      "sourceDir": "cpp-httplib-0.66.0"
+    },
+    "lexbor": {
+      "url": "https://codeload.github.com/lexbor/lexbor/tar.gz/refs/tags/v3.0.0",
+      "sha256": "eafaa79ef9871f0bbb1978eda8677d184f7ecdcaa203d7cd25b3f86e32c014c2",
+      "sourceDir": "lexbor-3.0.0"
+    },
+    "nlohmann_json": {
+      "url": "https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz",
+      "sha256": "42f6e95cad6ec532fd372391373363b62a14af6d771056dbfc86160e6dfff7aa",
+      "sourceDir": "json"
+    },
+    "json_schema_validator": {
+      "url": "https://codeload.github.com/pboettch/json-schema-validator/tar.gz/refs/tags/2.4.1",
+      "sha256": "0c8bf7ba59bd50e312d82da4bab1d49cf3e2211cfbd659472f9c90505d2a4e4c",
+      "sourceDir": "json-schema-validator-2.4.1"
+    }
+  }
+}

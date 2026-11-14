@@ -1,0 +1,87 @@
+name: CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    name: ${{ matrix.profile }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            profile: windows-x64
+          - os: ubuntu-26.04
+            profile: ubuntu-x64
+    env:
+      QCWS_PROFILE: ${{ matrix.profile }}
+      PYTHONUTF8: "1"
+      PYTHONUNBUFFERED: "1"
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13.17"
+          architecture: x64
+          check-latest: false
+      - name: Create runner-local configuration
+        shell: python
+        run: |
+          import json, os
+          from pathlib import Path
+          root, temp = Path(os.environ['GITHUB_WORKSPACE']), Path(os.environ['RUNNER_TEMP'])
+          name = os.environ['QCWS_PROFILE']
+          config = json.loads((root/'config/BuildPipeline.json').read_text())
+          profile = config['profiles'][name]
+          profile.update(qtRoot=str(temp/'qcws-qt'),buildDir=str(root/'build/ci'),installDir=str(root/'install/ci'),cacheDir=str(temp/'qcws-cache'),proxy='',jobs=2)
+          config['profiles'] = {name:profile}
+          destination=temp/'qcws-build.json'
+          destination.write_text(json.dumps(config),encoding='utf-8')
+          with open(os.environ['GITHUB_ENV'],'a',encoding='utf-8') as f: f.write(f'QCWS_CONFIG={destination}\n')
+      - name: Bootstrap, build, test and install
+        shell: python
+        run: |
+          import os, subprocess, sys
+          subprocess.run([sys.executable,'scripts/pipeline.py','--ConfigPath',os.environ['QCWS_CONFIG'],'--Profile',os.environ['QCWS_PROFILE'],'--Stages','bootstrap,doctor,configure,build,test,install'],check=True)
+      - name: Archive installed tree
+        shell: python
+        run: |
+          import os, tarfile
+          from pathlib import Path
+          root=Path(os.environ['GITHUB_WORKSPACE'])
+          source=root/'install/ci'
+          if not source.is_dir(): raise RuntimeError('No installed tree')
+          output=root/'work/ci-artifacts'
+          output.mkdir(parents=True,exist_ok=True)
+          profile=os.environ['QCWS_PROFILE']
+          with tarfile.open(output/f'QCopilots-WebSearch-{profile}-ci.tar.gz','w:gz') as archive:
+              archive.add(source,arcname=f'QCopilots-WebSearch-{profile}')
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installed-${{ matrix.profile }}
+          path: work/ci-artifacts/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: diagnostics-${{ matrix.profile }}
+          path: |
+            build/ci/test-results.xml
+            build/ci/Testing/Temporary/*.log
+            build/ci/CMakeFiles/CMakeConfigureLog.yaml
+            build/ci/CMakeCache.txt
+          if-no-files-found: ignore
+          retention-days: 14

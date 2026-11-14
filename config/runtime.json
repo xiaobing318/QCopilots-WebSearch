@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "business": {
+    "host": "127.0.0.1",
+    "port": 8088,
+    "allowed_hosts": [
+      "127.0.0.1:8088"
+    ],
+    "origins": []
+  },
+  "control": {
+    "host": "127.0.0.1",
+    "port": 8089,
+    "allowed_hosts": [
+      "127.0.0.1:8089"
+    ],
+    "origins": []
+  },
+  "clients": [
+    {
+      "id": "local",
+      "token_env": "QCWS_CLIENT_TOKEN"
+    }
+  ],
+  "provider": {
+    "url": "http://127.0.0.1:8080/search",
+    "ca_file": ""
+  },
+  "cache": {
+    "directory": "../runtime/cache",
+    "max_bytes": 268435456,
+    "max_entries": 10000,
+    "search_ttl_seconds": 300,
+    "page_ttl_seconds": 1800
+  },
+  "limits": {
+    "max_concurrent": 5,
+    "search_timeout_seconds": 15,
+    "open_timeout_seconds": 20
+  }
+}

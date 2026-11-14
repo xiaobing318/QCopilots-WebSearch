@@ -1,0 +1,147 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "integer",
+      "description": "配置格式版本。候选值仅1。不支持的版本会拒绝执行。",
+      "const": 1
+    },
+    "profiles": {
+      "type": "object",
+      "description": "构建方案集合。候选为名称到方案对象的映射。--Profile选择其中一个方案，未选择的方案不执行。",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "description": "命名构建方案。候选为规定字段组成的对象。每个方案独立选择平台、路径和构建选项。",
+        "properties": {
+          "platform": {
+            "type": "string",
+            "description": "目标平台。候选值windows-x64或ubuntu-x64。必须与当前主机匹配，决定Qt归档和打包格式。",
+            "enum": [
+              "windows-x64",
+              "ubuntu-x64"
+            ]
+          },
+          "qtRoot": {
+            "type": "string",
+            "description": "Qt安装根目录。候选值为绝对路径或仓库相对路径，支持开头的~。选择不同目录会改变Qt下载与发现位置，Windows默认C:/Softwares/Qt。",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "buildDir": {
+            "type": "string",
+            "description": "构建目录。候选值为独立的绝对路径或仓库相对路径。不同目录隔离构建缓存，不允许指向仓库根目录。",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "installDir": {
+            "type": "string",
+            "description": "安装暂存目录。候选值为独立绝对路径或仓库相对路径。install阶段将可运行文件放入此处。",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "cacheDir": {
+            "type": "string",
+            "description": "下载和工具缓存目录。候选值为独立绝对路径或仓库相对路径。复用目录减少下载并支持已缓存依赖的离线重建。",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "buildType": {
+            "type": "string",
+            "description": "构建类型。候选值Debug、RelWithDebInfo、Release。依次用于调试、带符号优化构建、优化发布。",
+            "enum": [
+              "Debug",
+              "RelWithDebInfo",
+              "Release"
+            ]
+          },
+          "proxy": {
+            "type": "string",
+            "description": "下载代理。候选为空字符串或HTTP(S)代理地址，例如http://127.0.0.1:7897。空值直连，指定值仅用于构建依赖下载，不改变运行时网页抓取。",
+            "pattern": "^$|^https?://[^\\s@]+$"
+          },
+          "jobs": {
+            "type": "integer",
+            "description": "构建和测试并发度。候选整数1至64。较高值加快构建但占用更多内存。",
+            "minimum": 1,
+            "maximum": 64
+          },
+          "cmakeArgs": {
+            "type": "array",
+            "description": "附加CMake配置参数。候选为-DNAME=VALUE字符串数组。空数组采用默认配置，非空值用于显式调整项目选项。",
+            "items": {
+              "type": "string",
+              "description": "单项CMake参数。候选为-D开头的缓存设置。改变对应构建选项而不执行shell代码。",
+              "pattern": "^-D[^=]+=.*$"
+            },
+            "maxItems": 32
+          },
+          "packageGenerators": {
+            "type": "array",
+            "description": "本地分发格式。Windows候选ZIP和WIX，Ubuntu候选DEB。publish只生成所选格式，不上传GitHub。",
+            "items": {
+              "type": "string",
+              "description": "CPack生成器。候选ZIP、WIX、DEB。分别创建便携压缩包、MSI和Debian包。",
+              "enum": [
+                "ZIP",
+                "WIX",
+                "DEB"
+              ]
+            },
+            "minItems": 1,
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "platform",
+          "qtRoot",
+          "buildDir",
+          "installDir",
+          "cacheDir",
+          "buildType",
+          "proxy",
+          "jobs",
+          "cmakeArgs",
+          "packageGenerators"
+        ],
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "platform": {
+                  "const": "windows-x64"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "packageGenerators": {
+                  "const": [
+                    "ZIP",
+                    "WIX"
+                  ]
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "packageGenerators": {
+                  "const": [
+                    "DEB"
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "required": [
+    "version",
+    "profiles"
+  ],
+  "additionalProperties": false
+}

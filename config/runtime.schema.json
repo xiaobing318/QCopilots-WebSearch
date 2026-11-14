@@ -1,0 +1,324 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "description": "Configuration format. Accepts 1 only. Other versions fail startup rather than being silently migrated.",
+      "const": 1
+    },
+    "business": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string",
+          "description": "Listen address. Accepts 127.0.0.1 or ::1. Chooses IPv4 or IPv6 loopback behind the TLS proxy.",
+          "enum": [
+            "127.0.0.1",
+            "::1"
+          ],
+          "default": "127.0.0.1"
+        },
+        "port": {
+          "type": "integer",
+          "description": "TCP port. Accepts 1–65535 in deployed configurations. Use a free port distinct from the other listener.",
+          "default": 8088,
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "allowed_hosts": {
+          "type": "array",
+          "description": "Exact accepted Host headers. Accepts host:port strings, including the reverse proxy public authority. Other hosts are rejected to prevent DNS rebinding.",
+          "items": {
+            "type": "string",
+            "description": "Accepted authority. Accepts a hostname with optional port or bracketed IPv6 with port. Matching is case-insensitive and exact.",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "minItems": 1,
+          "maxItems": 20,
+          "uniqueItems": true
+        },
+        "origins": {
+          "type": "array",
+          "description": "Browser origins. Accepts exact scheme://host[:port] strings, or an empty list. Empty rejects all browser Origin headers but permits native clients without Origin.",
+          "items": {
+            "type": "string",
+            "description": "Allowed Origin. Accepts one exact HTTP or HTTPS origin without a trailing slash. Only this origin receives CORS access.",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "maxItems": 20,
+          "uniqueItems": true,
+          "default": []
+        }
+      },
+      "required": [
+        "host",
+        "port",
+        "allowed_hosts",
+        "origins"
+      ],
+      "additionalProperties": false,
+      "description": "Business listener configuration. Accepts the specified loopback host, port, Host and Origin fields. Controls REST and MCP ingress."
+    },
+    "control": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string",
+          "description": "Listen address. Accepts 127.0.0.1 or ::1. Chooses IPv4 or IPv6 loopback behind the TLS proxy.",
+          "enum": [
+            "127.0.0.1",
+            "::1"
+          ],
+          "default": "127.0.0.1"
+        },
+        "port": {
+          "type": "integer",
+          "description": "TCP port. Accepts 1–65535 in deployed configurations. Use a free port distinct from the other listener.",
+          "default": 8088,
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "allowed_hosts": {
+          "type": "array",
+          "description": "Exact accepted Host headers. Accepts host:port strings, including the reverse proxy public authority. Other hosts are rejected to prevent DNS rebinding.",
+          "items": {
+            "type": "string",
+            "description": "Accepted authority. Accepts a hostname with optional port or bracketed IPv6 with port. Matching is case-insensitive and exact.",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "minItems": 1,
+          "maxItems": 20,
+          "uniqueItems": true
+        },
+        "origins": {
+          "type": "array",
+          "description": "Browser origins. Accepts exact scheme://host[:port] strings, or an empty list. Empty rejects all browser Origin headers but permits native clients without Origin.",
+          "items": {
+            "type": "string",
+            "description": "Allowed Origin. Accepts one exact HTTP or HTTPS origin without a trailing slash. Only this origin receives CORS access.",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "maxItems": 20,
+          "uniqueItems": true,
+          "default": []
+        }
+      },
+      "required": [
+        "host",
+        "port",
+        "allowed_hosts",
+        "origins"
+      ],
+      "additionalProperties": false,
+      "description": "Control listener configuration. Accepts the specified loopback host, port, Host and Origin fields. Keeps health and metrics independent of business capacity."
+    },
+    "clients": {
+      "type": "array",
+      "description": "Client credentials. Accepts 1–100 client objects. Each unique ID and secret define a separate cache identity.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Client identity. Accepts 1–64 letters, digits, dot, underscore or hyphen. Distinct IDs isolate cached pages.",
+            "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+          },
+          "token_env": {
+            "type": "string",
+            "description": "Credential environment variable. Accepts a nonempty variable name. The value is loaded at startup without storing it in JSON.",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "token_file": {
+            "type": "string",
+            "description": "Credential file. Accepts a protected absolute or config-relative path. Read once at startup, so restart applies rotation.",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "required": [
+              "token_env"
+            ],
+            "not": {
+              "required": [
+                "token_file"
+              ]
+            }
+          },
+          {
+            "required": [
+              "token_file"
+            ],
+            "not": {
+              "required": [
+                "token_env"
+              ]
+            }
+          }
+        ]
+      },
+      "minItems": 1,
+      "maxItems": 100
+    },
+    "provider": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "Fixed SearXNG JSON endpoint. Accepts HTTP for trusted local deployment or HTTPS. Tool arguments can never change this destination.",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "token_env": {
+          "type": "string",
+          "description": "Credential environment variable. Accepts a nonempty variable name. The value is loaded at startup without storing it in JSON.",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "token_file": {
+          "type": "string",
+          "description": "Credential file. Accepts a protected absolute or config-relative path. Read once at startup, so restart applies rotation.",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "ca_file": {
+          "type": "string",
+          "description": "Backend CA file. Accepts an empty string for system trust or a config-relative/absolute PEM path. A supplied bundle changes backend trust only.",
+          "default": "",
+          "maxLength": 4096
+        },
+        "engines": {
+          "type": "array",
+          "description": "Requested upstream engines. Accepts one to twenty configured SearXNG engine names. All named engines failing produces provider_unavailable.",
+          "items": {
+            "type": "string",
+            "description": "Engine identifier. Accepts a configured SearXNG name. Unknown names cannot produce results.",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "minItems": 1,
+          "maxItems": 20,
+          "uniqueItems": true,
+          "default": [
+            "google",
+            "bing",
+            "duckduckgo"
+          ]
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "additionalProperties": false,
+      "not": {
+        "required": [
+          "token_env",
+          "token_file"
+        ]
+      },
+      "description": "Search provider configuration. Accepts one fixed SearXNG endpoint plus optional credential and CA source. Changes require restart."
+    },
+    "cache": {
+      "type": "object",
+      "properties": {
+        "directory": {
+          "type": "string",
+          "description": "Disposable state directory. Accepts a config-relative or absolute path. Cache files are created here and must not be shared between running instances.",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "max_bytes": {
+          "type": "integer",
+          "description": "Total cache file budget. Accepts 16 MiB–1 TiB, default 256 MiB. Includes database and journal reserve, so payload capacity is lower.",
+          "default": 268435456,
+          "minimum": 16777216,
+          "maximum": 1099511627776
+        },
+        "max_entries": {
+          "type": "integer",
+          "description": "Maximum cached records. Accepts 1–1000000, default 10000. Smaller limits evict older entries sooner.",
+          "default": 10000,
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "search_ttl_seconds": {
+          "type": "integer",
+          "description": "Search cache lifetime. Accepts 1–86400 seconds, default 300. Larger values reduce upstream traffic but retain older results.",
+          "default": 300,
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "page_ttl_seconds": {
+          "type": "integer",
+          "description": "Page snapshot lifetime. Accepts 1–86400 seconds, default 1800. Expired page IDs can no longer be opened or searched.",
+          "default": 1800,
+          "minimum": 1,
+          "maximum": 86400
+        }
+      },
+      "required": [
+        "directory",
+        "max_bytes",
+        "max_entries",
+        "search_ttl_seconds",
+        "page_ttl_seconds"
+      ],
+      "additionalProperties": false,
+      "description": "Cache limits. Accepts directory, byte/entry budgets and TTLs. All cached content remains scoped to client identity."
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "max_concurrent": {
+          "type": "integer",
+          "description": "Business request capacity. Accepts 1–64, default 5. Excess requests immediately receive busy instead of waiting in an unbounded queue.",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 64
+        },
+        "search_timeout_seconds": {
+          "type": "integer",
+          "description": "Search deadline. Accepts 1–60 seconds, default 15. Covers all upstream pages and retries within one call.",
+          "default": 15,
+          "minimum": 1,
+          "maximum": 60
+        },
+        "open_timeout_seconds": {
+          "type": "integer",
+          "description": "Page download deadline. Accepts 1–60 seconds, default 20. Covers DNS, redirects and transfer.",
+          "default": 20,
+          "minimum": 1,
+          "maximum": 60
+        }
+      },
+      "required": [
+        "max_concurrent",
+        "search_timeout_seconds",
+        "open_timeout_seconds"
+      ],
+      "additionalProperties": false,
+      "description": "Request limits. Accepts concurrency and end-to-end deadlines. Higher limits increase memory and upstream load."
+    }
+  },
+  "required": [
+    "schema_version",
+    "business",
+    "control",
+    "clients",
+    "provider",
+    "cache",
+    "limits"
+  ],
+  "additionalProperties": false,
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

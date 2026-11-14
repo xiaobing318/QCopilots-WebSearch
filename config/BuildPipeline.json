@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "profiles": {
+    "windows-x64": {
+      "platform": "windows-x64",
+      "qtRoot": "C:/Softwares/Qt",
+      "buildDir": "build/windows-x64",
+      "installDir": "install/windows-x64",
+      "cacheDir": ".cache",
+      "buildType": "RelWithDebInfo",
+      "proxy": "",
+      "jobs": 5,
+      "cmakeArgs": [],
+      "packageGenerators": [
+        "ZIP",
+        "WIX"
+      ]
+    },
+    "ubuntu-x64": {
+      "platform": "ubuntu-x64",
+      "qtRoot": "~/.local/share/Qt",
+      "buildDir": "build/ubuntu-x64",
+      "installDir": "install/ubuntu-x64",
+      "cacheDir": ".cache",
+      "buildType": "RelWithDebInfo",
+      "proxy": "",
+      "jobs": 5,
+      "cmakeArgs": [],
+      "packageGenerators": [
+        "DEB"
+      ]
+    }
+  }
+}
