@@ -27,7 +27,7 @@ including all logs, JSON, SBOMs, original manifests and original checksums, are
 preserved byte-for-byte in [release-assets-audit.zip](release-assets-audit.zip).
 The three installation package bytes are unchanged. This is a download-display
 adjustment after successful publication, not a new build or a bypass of the
-original acceptance gates. A final display receipt will record the remote state.
+original acceptance gates. The completed [display receipt](display-result.json) records five uploaded assets. The source bundle was downloaded in full and every member verified before deletion. [Display audit](display-audit.zip) preserves the operation, checksum replacement and independent fact checks. GitHub-generated source ZIP/TAR links are separate from these five uploaded assets.
 
 [R4 review](council-r4-report.md), [raw R4 audit](review-r4-audit.zip) and
 [successful CheckOnly receipt](publication-checkonly.json) document the separately
