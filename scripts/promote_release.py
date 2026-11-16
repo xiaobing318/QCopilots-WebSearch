@@ -1,6 +1,5 @@
 """Retrieve, verify and promote an existing CI candidate without rebuilding it."""
 import argparse
-import base64
 import hashlib
 import json
 import os
@@ -22,6 +21,20 @@ def run(arguments, capture=False, **kwargs):
 
 def api(path):
     return json.loads(run(['gh','api',path],capture=True))
+
+
+def evidence_bytes(base, path, commit, digest):
+    endpoint = base+'/contents/'+quote(path,safe='/')+'?ref='+commit
+    # Full stability samples exceed the Contents API's 1 MB inline limit.
+    # Both requests use the immutable commit, and raw bytes preserve the digest
+    # across platforms without text-mode newline or encoding transformations.
+    content = json.loads(run(['gh','api',endpoint,'-H','Accept: application/vnd.github.object+json'],capture=True))
+    need(content.get('type') == 'file' and type(content.get('size')) is int
+         and 0 < content['size'] <= 100*1024**2,'Evidence is not a retrievable JSON file')
+    raw = subprocess.run(['gh','api',endpoint,'-H','Accept: application/vnd.github.raw+json'],
+                         check=True,capture_output=True,text=False).stdout
+    need(len(raw) == content['size'] and hashlib.sha256(raw).hexdigest() == digest,'Evidence digest mismatch')
+    return raw
 
 
 def attestation_match(verified, package_digest, repo_name, repository, commit, tag, run_id, attempt):
@@ -147,10 +160,7 @@ def main():
         need(origin['id'] == args.CandidateRunId and origin['head_sha'] == commit
              and origin['repository_id'] == repo['id'] == origin['head_repository_id'],'Artifact source mismatch')
         selected.append(item)
-    content = api(base+'/contents/'+quote(args.EvidencePath,safe='/')+'?ref='+args.EvidenceCommit)
-    need(content['type'] == 'file' and content.get('encoding') == 'base64','Evidence is not a retrievable JSON file')
-    raw = base64.b64decode(''.join(content['content'].split()),validate=True)
-    need(len(raw) == content['size'] and hashlib.sha256(raw).hexdigest() == args.EvidenceSHA256,'Evidence digest mismatch')
+    raw = evidence_bytes(base, args.EvidencePath, args.EvidenceCommit, args.EvidenceSHA256)
     with tempfile.TemporaryDirectory(prefix='qcws-promote-') as temporary:
         directory = Path(temporary)
         evidence = directory/'windows11-evidence.json'

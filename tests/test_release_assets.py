@@ -1,4 +1,5 @@
 import hashlib
+import json
 import io
 from pathlib import Path
 import stat
@@ -48,6 +49,38 @@ class ProcessCleanupTests(unittest.TestCase):
         process = types.SimpleNamespace(is_running=lambda: next(states), status=lambda: 'running')
         with patch('process_cleanup.time.sleep'), patch('process_cleanup.time.monotonic', side_effect=[0, 0, 0.1]):
             self.assertEqual(wait_owned([process], 1), [])
+
+
+class EvidenceDownloadTests(unittest.TestCase):
+    def download(self, raw, metadata, digest=None):
+        endpoint = 'repos/owner/project/contents/release-evidence/windows11.json?ref=' + 'a' * 40
+        def command(argv, **kwargs):
+            self.assertEqual(argv[:3], ['gh', 'api', endpoint])
+            if '-H' not in argv or 'Accept: application/vnd.github.object+json' in argv:
+                self.assertTrue(kwargs.get('text'))
+                return types.SimpleNamespace(stdout=json.dumps(metadata))
+            self.assertIn('Accept: application/vnd.github.raw+json', argv)
+            self.assertFalse(kwargs.get('text'))
+            return types.SimpleNamespace(stdout=raw)
+        with patch.object(promote_release.subprocess, 'run', command):
+            return promote_release.evidence_bytes('repos/owner/project', 'release-evidence/windows11.json',
+                                                  'a' * 40, digest or hashlib.sha256(raw).hexdigest())
+
+    def test_full_soak_evidence_above_contents_inline_limit(self):
+        raw = ('{"samples":"' + '中文\\n' * 200000 + '"}\r\n').encode('utf-8')
+        self.assertGreater(len(raw), 1024 * 1024)
+        metadata = {'type': 'file', 'size': len(raw), 'encoding': 'none', 'content': ''}
+        self.assertEqual(self.download(raw, metadata), raw)
+
+    def test_evidence_length_digest_and_metadata_fail_closed(self):
+        raw = b'{"passed":true}\r\n'
+        metadata = {'type': 'file', 'size': len(raw), 'encoding': 'base64', 'content': ''}
+        for changed in ({**metadata, 'size': len(raw) + 1}, {**metadata, 'type': 'dir'},
+                        {**metadata, 'size': 101 * 1024**2}):
+            with self.subTest(changed=changed), self.assertRaises(RuntimeError):
+                self.download(raw, changed)
+        with self.assertRaisesRegex(RuntimeError, 'digest'):
+            self.download(raw, metadata, '0' * 64)
 
 
 class PackageInventoryTests(unittest.TestCase):
