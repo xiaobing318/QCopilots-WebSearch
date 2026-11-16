@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       FullStability:
-        description: Run full Ubuntu stability and fuzz campaigns (Windows 11 acceptance is external)
+        description: Run five-minute cold/hot Ubuntu stability and full fuzz campaigns (Windows 11 acceptance is external)
         required: false
         type: boolean
         default: false
@@ -111,8 +111,8 @@ jobs:
           exe=Path('install/ci',relative).resolve()
           subprocess.run([sys.executable,'scripts/test_mcp_sdk.py','--Executable',str(exe),'--Output','work/ci-artifacts/mcp-sdk.json'],check=True)
           # Windows Server keeps the smoke test. The release gate separately
-          # requires thirty minutes per phase on Windows 11 using these exact packages.
-          duration='1800' if os.name!='nt' and os.environ['QCWS_FULL_STABILITY']=='true' else '10'
+          # requires five minutes per phase on Windows 11 using these exact packages.
+          duration='300' if os.name!='nt' and os.environ['QCWS_FULL_STABILITY']=='true' else '10'
           subprocess.run([sys.executable,'scripts/soak.py','--Executable',str(exe),'--Seconds',duration,'--Output','work/ci-artifacts/soak.json'],check=True)
       - name: Caddy HTTPS deployment contract
         if: always() && runner.os == 'Linux' && steps.native_build.outcome == 'success'

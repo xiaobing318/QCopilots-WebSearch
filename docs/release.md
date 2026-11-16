@@ -3,7 +3,11 @@
 `publish` in the build pipeline creates local packages. It does not upload a
 release. A `vMAJOR.MINOR.PATCH` tag triggers CI on that exact commit, including
 full stability and live public-search acceptance. Ordinary push/PR builds use
-short deterministic checks. Manual CI dispatch can enable the same long checks.
+short deterministic checks. Manual CI dispatch can enable the same release checks.
+The stability gate runs cold and hot caches for five minutes each on both target
+platforms, with five clients and a total load of two requests per second. Request
+success, latency, memory, health responsiveness and shutdown thresholds remain
+the same. This acceptance duration does not establish multi-hour endurance.
 
 Linux also builds an isolated Clang 21 configuration with ASan and UBSan, runs
 all discovered tests, analyzes every first-party C++ translation unit with

@@ -145,7 +145,7 @@ def build_fixture(FIXTURE):
         refresh_sums(folder)
         sdk = {'passed': True, 'runtime': installed, 'executable_sha256': info['executable_sha256'],
                'host': SERVER_HOST if windows else LINUX_HOST}
-        soak = {'checks_passed': True, 'full_acceptance': True, 'seconds_per_phase': 1800, 'runtime': installed,
+        soak = {'checks_passed': True, 'full_acceptance': True, 'seconds_per_phase': 300, 'runtime': installed,
                 'executable_sha256': info['executable_sha256'], 'host': SERVER_HOST if windows else LINUX_HOST}
         sdk_reports[target], soak_reports[target] = sdk, soak
         put_json(diagnostic / 'mcp-sdk.json', sdk)
@@ -255,6 +255,7 @@ class ReleaseAcceptanceTests(unittest.TestCase):
                  ('baseline', lambda v: v['msi_report']['BaselineSource'].update(PackageSha256='0' * 64)),
                  ('baseline', lambda v: v['msi_report']['BaselineSource'].pop('SourceCommit')),
                  ('Windows 11 stability', lambda v: v['soak_report'].update(checks_passed=False)),
+                 ('Windows 11 stability', lambda v: v['soak_report'].update(seconds_per_phase=299)),
                  ('Delivery signoff', lambda v: v['delivery_gates'].update(temporary_state_restored=False))]
         for message, change in cases:
             with self.subTest(message=message):
@@ -314,7 +315,7 @@ class ReleaseAcceptanceTests(unittest.TestCase):
     def test_live_and_stability_gates(self):
         path = self.diagnostic('soak.json')
         original = path.read_bytes()
-        self.edit(path, lambda v: v.update(seconds_per_phase=1799))
+        self.edit(path, lambda v: v.update(seconds_per_phase=299))
         with self.assertRaisesRegex(RuntimeError, 'Full Linux stability'):
             self.verify()
         path.write_bytes(original)

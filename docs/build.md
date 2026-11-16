@@ -114,7 +114,7 @@ python scripts/test_mcp_sdk.py --Executable <installed-binary> --Output <report.
 python scripts/soak.py --Executable <installed-binary> --Output <report.json>
 ```
 
-The soak default is 1,800 seconds per phase, cold then hot. `--Seconds 10` is a
+The soak default is 300 seconds (five minutes) per phase, cold then hot. `--Seconds 10` is a
 smoke test and cannot satisfy the full stability gate. It removes its temporary
 state and stops only child processes that it created.
 

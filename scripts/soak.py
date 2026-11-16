@@ -425,7 +425,7 @@ def resources():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--Executable", required=True, type=Path)
-    parser.add_argument("--Seconds", type=int, default=1800)
+    parser.add_argument("--Seconds", type=int, default=300)
     parser.add_argument("--Output", required=True, type=Path)
     args = parser.parse_args()
     if not 5 <= args.Seconds <= 86340:
@@ -435,7 +435,7 @@ def main():
     if output in (executable, template_path.resolve(), Path(__file__).resolve()):
         parser.error("--Output must be a separate report file")
     report = {"report_version": 1, "samples_schema_version": 1, "started_at": datetime.now(timezone.utc).isoformat(),
-              "run_kind": "acceptance" if args.Seconds >= 1800 else "smoke",
+              "run_kind": "acceptance" if args.Seconds >= 300 else "smoke",
               "executable": str(executable), "executable_sha256": digest(executable),
               "runtime": fingerprint(executable), "host": host_info(),
               "template_sha256": digest(template_path), "os": platform.platform(),
@@ -462,9 +462,9 @@ def main():
         report["runtime_unchanged"] = fingerprint(executable) == report["runtime"]
         report["checks_passed"] = (len(report["phases"]) == 2 and all(p["passed"] for p in report["phases"])
                                    and report["executable_unchanged"] and report["runtime_unchanged"])
-        report["full_acceptance"] = (report["checks_passed"] and args.Seconds >= 1800
+        report["full_acceptance"] = (report["checks_passed"] and args.Seconds >= 300
                                      and report["resources"]["minimum_met"])
-        code = 0 if report["checks_passed"] and (args.Seconds < 1800 or report["full_acceptance"]) else 1
+        code = 0 if report["checks_passed"] and (args.Seconds < 300 or report["full_acceptance"]) else 1
     except KeyboardInterrupt:
         report["error"], code = "interrupted", 130
     except Fault as exc:

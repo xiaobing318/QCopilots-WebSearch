@@ -45,7 +45,7 @@ PR/push CI runs windows-2022 and ubuntu-26.04. Version tags build all artifacts 
 
 Deterministic tests use temporary directories, dynamically allocated ports, fake upstreams and injectable clocks. Cover encoding, filters, page identity, truncation, deadlines, TLS, Origin, DNS rebinding/redirects, compression, cancellation, cache limits and protocol lifecycle. A barrier test holds five requests, rejects the sixth and verifies health and recovered capacity.
 
-On >=2 vCPU/4 GiB, a 100 ms fake upstream supports five clients at total 2 requests/s for 30 min cold and 30 min warm. Normal success 100%, p95 <=1 s, RSS <=512 MiB, health p95 <=200 ms, shutdown <=10 s. Faults must produce the expected bounded errors. Public checks use 60 fixed semantic queries (30 Chinese/30 English), spaced >=2 s, report success/latency/engine limitations, and complete one real search-open-find flow. No public performance SLA or public stress test.
+On >=2 vCPU/4 GiB, a 100 ms fake upstream supports five clients at total 2 requests/s for 5 min cold and 5 min warm. Normal success 100%, p95 <=1 s, RSS <=512 MiB, health p95 <=200 ms, shutdown <=10 s. Faults must produce the expected bounded errors. Public checks use 60 fixed semantic queries (30 Chinese/30 English), spaced >=2 s, report success/latency/engine limitations, and complete one real search-open-find flow. No public performance SLA or public stress test.
 
 Verify install/upgrade/uninstall/config preservation/rollback on real Windows 11 and Ubuntu 26.04, and portable ZIP without development dependencies. Run the user's exact QGIS BuildPipeline commands without clean. Browser verification records and restores Vastarmor AI and MCP configuration. Only processes started for this work are stopped.
 

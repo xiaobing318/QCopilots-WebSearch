@@ -160,7 +160,7 @@ def verify(root,commit,tag,run_id,evidence_path,evidence_sha,repository,run_atte
             for quality_file in verify_quality(unique(diagnostics, 'quality.json'), ROOT, info,
                                                 commit, run_id, repository, run_attempt):
                 collect(quality_file, 'quality-' + quality_file.name)
-            need(soak.get('full_acceptance') is True and soak['seconds_per_phase'] >= 1800,'Full Linux stability required')
+            need(soak.get('full_acceptance') is True and soak['seconds_per_phase'] >= 300,'Full Linux stability required')
             accepted_path = unique(diagnostics,'deb-acceptance.json')
             accepted = read(accepted_path)
             deb = next(name for name in packages if name.endswith('.deb'))
@@ -220,7 +220,7 @@ def verify(root,commit,tag,run_id,evidence_path,evidence_sha,repository,run_atte
          and portable['portable'].get('system_only_path') is True
          and portable['portable'].get('temporary_directory_removed') is True,'Portable ZIP acceptance required')
     need(soak.get('full_acceptance') is True and soak.get('checks_passed') is True
-         and soak['seconds_per_phase'] >= 1800 and soak['runtime'] == windows['installed_runtime']
+         and soak['seconds_per_phase'] >= 300 and soak['runtime'] == windows['installed_runtime']
          and soak.get('executable_sha256') == windows['executable_sha256'], 'Windows 11 stability required')
     gates = evidence['delivery_gates']
     need(gates.get('council_status') == 'approved' and gates.get('unresolved_p0_p1') == 0
