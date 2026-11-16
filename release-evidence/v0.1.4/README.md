@@ -34,3 +34,13 @@ original acceptance gates. The completed [display receipt](display-result.json) 
 reviewed publication-tool correction. The user authorized three independent
 Codex seats in R4 and requested no further Claude invocation. The accepted P2
 publication-response ambiguity and its operational handling are explicit there.
+
+## Archived standalone acceptance history
+
+The temporary `acceptance/v0.1.4-stdio` branch is preserved by the annotated tag
+[`archive/acceptance-v0.1.4-stdio`](https://github.com/xiaobing318/QCopilots-WebSearch/tree/archive/acceptance-v0.1.4-stdio),
+pointing to commit `b782d38550e966a22d300bf1eb0085d84bcff550`.
+Its three files are the historical one-time Linux stdio acceptance workflow and
+helpers. They remain available for reproducing that evidence, separately from
+the product source. Development and publication-tool history is consolidated
+on `main`. Existing release tags retain their original commits.
