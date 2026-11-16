@@ -1025,8 +1025,11 @@ int main(int argc, char **argv) {
   int failed = 0;
   for (auto [name, fn] : tests)
     try {
+      std::cout << "RUN " << name << std::endl;
+      const auto began = Clock::now();
       fn();
-      std::cout << "PASS " << name << '\n';
+      std::cout << "PASS " << name << " ("
+                << std::chrono::duration<double>(Clock::now() - began).count() << " s)" << std::endl;
     } catch (const std::exception &e) {
       ++failed;
       std::cerr << "FAIL " << name << ": " << e.what() << '\n';

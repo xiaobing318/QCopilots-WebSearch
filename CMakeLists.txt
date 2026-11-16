@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-set(QCWS_VERSION "0.1.2" CACHE STRING "Three-part release or isolated installer-test version")
+set(QCWS_VERSION "0.1.3" CACHE STRING "Three-part release or isolated installer-test version")
 project(QCopilotsWebSearch VERSION ${QCWS_VERSION} LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -78,7 +78,9 @@ if(QCWS_BUILD_TESTING)
     target_compile_options(qcws_tests PRIVATE /utf-8)
   endif()
   add_test(NAME core COMMAND qcws_tests)
-  set_tests_properties(core PROPERTIES TIMEOUT 60)
+  # The disk-backed cache pressure suite performs durable commits. Allow slower
+  # hosted disks without changing the per-operation deadlines asserted in tests.
+  set_tests_properties(core PROPERTIES TIMEOUT 180)
   add_executable(qcws_http_tests tests/test_http_limits.cpp)
   target_link_libraries(qcws_http_tests PRIVATE qcws_core httplib::httplib)
   add_test(NAME http-limits COMMAND qcws_http_tests "${PROJECT_SOURCE_DIR}/config/runtime.json")
