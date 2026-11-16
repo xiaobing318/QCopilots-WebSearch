@@ -73,7 +73,7 @@ class PackageGenerationTests(unittest.TestCase):
 
     def file_digest(self, path):
         if Path(path).name == 'httplib.h':
-            return '52e0092645062258a84fa52c7075de444118cbbb8e83413d271e5859d4ae8a9d'
+            return '533bd907cfb5e018a11bcc1bf0f87983015c0a8b8ee6677d1540265535f02414'
         return digest(path)
 
     def command(self, argv, capture=False):

@@ -323,7 +323,7 @@ class Pipeline:
         script = ROOT / "cmake/patches/httplib_input_lifetime.py"
         patch_hash = self.digest(script)
         destination = self.build / "dependencies" / ("httplib-" + patch_hash[:16])
-        expected = "52e0092645062258a84fa52c7075de444118cbbb8e83413d271e5859d4ae8a9d"
+        expected = "533bd907cfb5e018a11bcc1bf0f87983015c0a8b8ee6677d1540265535f02414"
         if not self.dry:
             if not destination.exists():
                 destination.parent.mkdir(parents=True, exist_ok=True)

@@ -86,11 +86,12 @@ inline void Server::close_accepted_socket(socket_t sock) noexcept {
 
 inline void Server::stop() noexcept {
   interrupt_accepted_sockets();""")
-    replace("""        [&](Stream &strm, bool close_connection, bool &connection_closed) {
-""", """        [&](Stream &strm, bool close_connection, bool &connection_closed) {
-          // shutdown() does not wake a Windows read blocked in WSAPoll.
-          strm.set_read_interrupt([this] { return accepted_stopping_.load(); });
-""", count=2)
+    replace("""  auto read_timeout_msec = read_timeout_sec_ * 1000 + read_timeout_usec_ / 1000;
+""", """  // Both native and TLS requests use this path. shutdown() alone does not
+  // wake a Windows read blocked in WSAPoll.
+  strm.set_read_interrupt([this] { return accepted_stopping_.load(); });
+  auto read_timeout_msec = read_timeout_sec_ * 1000 + read_timeout_usec_ / 1000;
+""")
     replace("""  req.body_consumed_ = true;
 
   if (req.is_multipart_form_data()) {""", """  req.body_consumed_ = true;
