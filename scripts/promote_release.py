@@ -197,23 +197,14 @@ def main():
             for path in sorted(args.Output.iterdir()) if path.is_file() and path.name != 'SHA256SUMS'),encoding='utf-8')
         if not args.Publish:
             return
-        need(tag_commit(base,args.Tag) == commit,'Tag changed during verification')
-        files = sorted(args.Output.iterdir())
+        from release_transport import GitHub, prepare, publish, tools_identity
+        identity = tools_identity(Path(__file__).resolve().parents[1])
+        physical = prepare(args.Output, args.Output.with_name(args.Output.name + '-publication'), identity)
         notes = directory/'release-notes.txt'
         notes.write_text('Source commit: '+commit+'\n\nUnsigned Windows and Ubuntu packages. '
             'Windows 11 acceptance was performed on these exact MSI and ZIP bytes. '
             'Public search performance is best effort. See the included acceptance reports.\n',encoding='utf-8')
-        run(['gh','release','create',args.Tag,'--repo',repo_name,'--draft','--verify-tag','--target',commit,
-             '--title',args.Tag,'--notes-file',str(notes),*[str(path) for path in files]])
-        state = json.loads(run(['gh','release','view',args.Tag,'--repo',repo_name,'--json','isDraft,assets'],capture=True))
-        need(state['isDraft'] and {item['name'] for item in state['assets']} == {path.name for path in files},'Draft assets differ')
-        downloaded = directory/'downloaded'
-        run(['gh','release','download',args.Tag,'--repo',repo_name,'--dir',str(downloaded)])
-        need({path.name for path in downloaded.iterdir()} == {path.name for path in files},'Downloaded assets differ')
-        for source in files:
-            need(sha(downloaded/source.name) == sha(source),'Uploaded bytes differ: '+source.name)
-        need(tag_commit(base,args.Tag) == commit,'Tag changed before publication')
-        run(['gh','release','edit',args.Tag,'--repo',repo_name,'--draft=false','--latest'])
+        publish(args.Output, physical, identity, GitHub(repo_name), notes)
 
 
 if __name__ == '__main__':

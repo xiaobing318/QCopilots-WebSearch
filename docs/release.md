@@ -84,6 +84,56 @@ The workflow checks the tag again before publication. `promotion-inputs.json`
 records the original artifact IDs/digests and external evidence commit. Packages
 remain explicitly unsigned until separate signing evidence is provided.
 
+### Empty logs and interrupted drafts
+
+Successful commands such as `git status --porcelain` can produce valid empty
+logs. GitHub rejected an empty release asset during v0.1.4 promotion. The upload
+layout therefore keeps all original quality files, including zero-byte members,
+inside `quality-evidence.zip`. Nonempty quality files remain available as separate
+assets. The ZIP also preserves the original verifier manifest and checksums.
+It uses sorted members, fixed timestamps and permissions, and uncompressed ZIP
+storage for reproducible bytes. No empty log is padded or silently discarded.
+
+The original verifier output stays intact in a separate directory. Physical
+`release-manifest.json` schema 2 lists uploaded assets and maps archived empty
+logs to their members. `publication-proof.json` binds the complete original
+logical inventory, archive members and tool commit. `SHA256SUMS` covers every
+physical asset except itself. Installation packages, matching source archives,
+SBOMs and acceptance reports retain their original bytes.
+
+The workflow checks out the selected publication tools and the candidate tag
+separately. It first runs the candidate's own `promote_release.py` without
+`--Publish`, including all original acceptance and Sigstore checks. Only after
+those pass does it transform the upload layout. This permits older immutable
+candidate tags to use corrected delivery tooling without rebuilding them.
+
+Use `CheckOnly=true` to verify inputs, prepare the layout and download/check any
+existing draft assets without creating, uploading, deleting or publishing remote
+objects. For an interrupted draft supply all four recovery fields:
+
+| Input | Purpose and allowed values |
+| --- | --- |
+| `ResumeDraftId` | Exact positive GitHub release ID owned by this delivery. Omit for a new release. A published or mismatched draft is rejected. |
+| `PreviousChecksumsAssetId` | Exact positive ID of the old SHA256SUMS asset authorized for replacement. Other assets cannot be overwritten. |
+| `PreviousChecksumsSHA256` | Lowercase 64-digit SHA-256 of those original checksum bytes. A mismatch stops before mutation. |
+| `PreviousChecksumsPath` | Tracked file below `release-evidence/` at the selected tool commit. Its immutable Git blob preserves the old bytes even after a previous upload attempt replaced the remote checksum. |
+
+The repository, draft ID, tag, source commit and unpublished state are checked.
+Asset enumeration is paginated. Existing files are downloaded by ID and hashed,
+not trusted from API metadata alone. Matching files are reused. Unknown assets
+or differing immutable files stop recovery. Only the named old checksum asset
+with the approved ID and digest may be replaced, and its complete bytes are
+retained in the publication proof. Repeated runs with the same inputs can reuse
+already uploaded new-layout files. Never use a blanket overwrite or silently
+switch to another draft after an error.
+
+All final assets are downloaded and hashed again. Archive members are compared
+against the unchanged verifier output, and the tag, draft identity and asset
+set are checked again before publication. A failed operation leaves a draft,
+and the workflow retains its available reports. The underlying endpoints are
+documented in the [GitHub Release API](https://docs.github.com/en/rest/releases/releases)
+and [asset API](https://docs.github.com/en/rest/releases/assets).
+
 Tag CI generates GitHub artifact attestations for the exact ZIP, MSI and DEB
 bytes in a separate job with OIDC permission. PR jobs do not receive signing
 permissions. Promotion runs `gh attestation verify` for each package and checks
