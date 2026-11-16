@@ -1,0 +1,756 @@
+{
+  "source_commit": "3e13f7bd930ffa495e14d50c3556028a21484204",
+  "release_id": 446672881,
+  "tag": "v0.1.4",
+  "reason": "User requested only usable downloads and chose one corresponding-source bundle.",
+  "original_publication_run": 43823293370,
+  "packages_unchanged": true,
+  "product_rebuilt": false,
+  "visible_assets": {
+    "QCopilots-WebSearch-0.1.4-win64.msi": "9b86db3a3f902cebcdf396e5d9326a7a6d15becf39033794a86e7c26c9f107c6",
+    "QCopilots-WebSearch-0.1.4-win64.zip": "412dc5082e7957533e9ab948d6f5e2dc3742e555465d5c34c12909e597e9b20b",
+    "qcopilots-websearch_0.1.4_amd64.deb": "ae04f0c40ed9ca5e159f7a86e28221366d7e870bb4dc223b01b7f5626921087c",
+    "QCopilots-WebSearch-0.1.4-corresponding-sources.zip": "5fa4e5f70a9ec7540d258fc3ce0a29d77fc29242308f89b5a4e623668dc38ca2",
+    "SHA256SUMS": "627d637614cc1adb2a92df49ca9664619ce9d713fa1e80d687e52ecb0f3324c1"
+  },
+  "corresponding_sources": {
+    "asset_name": "QCopilots-WebSearch-0.1.4-corresponding-sources.zip",
+    "bytes": 104818163,
+    "sha256": "5fa4e5f70a9ec7540d258fc3ce0a29d77fc29242308f89b5a4e623668dc38ca2",
+    "members": {
+      "QCopilots-WebSearch-3e13f7bd930ffa495e14d50c3556028a21484204-source.tar.gz": {
+        "bytes": 316592,
+        "sha256": "7c662bec1d9b5168eeb0ef0c99feb8fb0a15d0120ec23b794beffec3fcab2704"
+      },
+      "README.md": {
+        "bytes": 624,
+        "sha256": "628d97c3d2bc27f95b65a8f89b7c6c4dba2756487299912f9fe0b0e37470ef7c"
+      },
+      "SOURCE-SHA256SUMS": {
+        "bytes": 330,
+        "sha256": "36d1ffa1c5c5227d1ad7b49c464630a1bbe5d3c411e70cee757d59e2b4896976"
+      },
+      "openssl-3.5.9.tar.gz": {
+        "bytes": 53279637,
+        "sha256": "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a"
+      },
+      "qtbase-everywhere-src-6.12.0.tar.xz": {
+        "bytes": 51220268,
+        "sha256": "a951bd163c7b80fc6b8c88d7668fb56abf91c152373e13c10666763238131307"
+      }
+    }
+  },
+  "audit": {
+    "repository_path": "release-evidence/v0.1.4/release-assets-audit.zip",
+    "bytes": 1120831,
+    "sha256": "42bb54443b0bac087d89c50bd551ea800a8d5f991ac79c65471651eb10d266f9",
+    "members": {
+      "ORIGINAL-RELEASE-ASSETS.json": {
+        "bytes": 154298,
+        "sha256": "2542d4a6f6f4166bc435542015da66e3ae88e74f399ad9298df6d0e43035a447"
+      },
+      "QCopilots-WebSearch-0.1.4-win64.msi.cdx.json": {
+        "bytes": 117712,
+        "sha256": "0fc25a88a6ba8861e6d96b927c806f0a7c8d862c7eb2db91674aa069acbab504"
+      },
+      "QCopilots-WebSearch-0.1.4-win64.msi.sha256": {
+        "bytes": 103,
+        "sha256": "0a9356dfee72707c51b6d03cf636c18672e0dff455cb33ac1ad995a7ac1751c6"
+      },
+      "QCopilots-WebSearch-0.1.4-win64.msi.tables.json": {
+        "bytes": 102353,
+        "sha256": "f6a23a6c2243730b6579458a27bc513c37faf0898cf0c014d5f6341eb04e1900"
+      },
+      "QCopilots-WebSearch-0.1.4-win64.zip.cdx.json": {
+        "bytes": 85843,
+        "sha256": "447909b04e6352ad9802477b70023a95d729ea5721d8567f112f49766ccc6877"
+      },
+      "QCopilots-WebSearch-0.1.4-win64.zip.sha256": {
+        "bytes": 103,
+        "sha256": "13757775ff2097f486de60d8bbbd3f99da76f701e94a04cd0082fbbee4e7d28d"
+      },
+      "SHA256SUMS": {
+        "bytes": 7488,
+        "sha256": "8d5e3a02d4a9b451664c259537600b75f89f3710f230d06e03c87801788fb1ed"
+      },
+      "build-info-ubuntu-x64.json": {
+        "bytes": 5067,
+        "sha256": "94250463a5fb21b4e11bf8d4042e6444a5a632d6d8fa33d9ecc672c4aa5e9065"
+      },
+      "build-info-windows-x64.json": {
+        "bytes": 4868,
+        "sha256": "47994a30b88edf82d93cfc27d675327faeb71ccbdd86510b47f51078439c717b"
+      },
+      "caddy-contract.json": {
+        "bytes": 4821,
+        "sha256": "532010604db4d1c8ceac3b5893fe8a15a1f2f692c09b698a3079ab06470e4ea3"
+      },
+      "ci-run-ubuntu-x64.json": {
+        "bytes": 211,
+        "sha256": "2e3073dbb71f1a2278a929a71fffdfd02162d765cdc7243f9d3b6212652b8534"
+      },
+      "ci-run-windows-x64.json": {
+        "bytes": 219,
+        "sha256": "d469b6884c09c025b3d62bece8bd45ae0e7911305a4f46db4813043079a179b3"
+      },
+      "deb-acceptance.json": {
+        "bytes": 1152,
+        "sha256": "7807b35ae406e13974e138491521b52b771e35ab33b0ff932780e7a9b1abfc21"
+      },
+      "mcp-sdk-ubuntu-x64.json": {
+        "bytes": 4869,
+        "sha256": "9a2e5911b3ba323836563ba74a2d7ff135b60bcd234c0a566132318043106402"
+      },
+      "mcp-sdk-windows-x64.json": {
+        "bytes": 4286,
+        "sha256": "32003ca100fd42b05e2da8e9607cc691b19f7f935fee254e58b6aec2316fd676"
+      },
+      "promotion-inputs.json": {
+        "bytes": 1044,
+        "sha256": "93de4a5b2b93090e1f9a6b6048166db856ecc6d12a6d3debed3cc371c9b91213"
+      },
+      "public-compose.json": {
+        "bytes": 927,
+        "sha256": "50bcd5be66385851bd77fc239498a2bf8315ba562dc0d915ef0cd94e45931bb3"
+      },
+      "public-search.json": {
+        "bytes": 73919,
+        "sha256": "dcb100753c38a3c79b99412e09d1816b1bf8e70697276d4e1bc3a867766c650a"
+      },
+      "publication-proof.json": {
+        "bytes": 26225,
+        "sha256": "f305cfcdb76b40a7a894ce4253ae3cae73499934f183bb3456a3ba1a6854bbcb"
+      },
+      "publication-verification.json": {
+        "bytes": 1194,
+        "sha256": "adcf3e2479260aa7f412650736916922f8b452f05eb4edb5fcd7d35aa5e9a7fd"
+      },
+      "qcopilots-websearch_0.1.4_amd64.deb.cdx.json": {
+        "bytes": 81979,
+        "sha256": "f5d9f32978b9031215bde98c834e0041001b327b928a57950c95cf745e104bdb"
+      },
+      "qcopilots-websearch_0.1.4_amd64.deb.sha256": {
+        "bytes": 102,
+        "sha256": "07c33aaeefbbf50880fafe2e40cde5a412d720a78e2184de785415ac19a1a333"
+      },
+      "quality-000-git-head.log": {
+        "bytes": 41,
+        "sha256": "da212f97a8a135d3c1d740c12ecfc695d3f205859de2ba44916d3e0ef4b3c6f6"
+      },
+      "quality-002-apt-update.log": {
+        "bytes": 437,
+        "sha256": "78c7589f124ed5450e3cbc3cb5d0a983a5db2748e32aa823e5e06b905709f3e7"
+      },
+      "quality-003-apt-install.log": {
+        "bytes": 505,
+        "sha256": "335e11b1739dff3e178cb1305fa171bbdd3dc053435633e74f488379819a8373"
+      },
+      "quality-004-version-packages.log": {
+        "bytes": 122,
+        "sha256": "190681a2defab35b079ae24579d44e63cb6060643b3d4d97380ea4c89d8ce141"
+      },
+      "quality-005-version-clang.log": {
+        "bytes": 122,
+        "sha256": "77467400b91c4cebb6c3e29d8a611af518a2f4078c22baf276b0a1373e996bf5"
+      },
+      "quality-006-version-clang-tidy.log": {
+        "bytes": 46,
+        "sha256": "a6a1319a8940bb501c4b8413c97e0fa8648e8593f7fbdaedfd3a4ab41ee56092"
+      },
+      "quality-007-version-symbolizer.log": {
+        "bytes": 62,
+        "sha256": "f1c205f42ae3e6d5d7d2bcd3e6bb18e43cd1c91d7651055efb63075417dd1966"
+      },
+      "quality-008-pipeline-doctor.log": {
+        "bytes": 348,
+        "sha256": "cd4c39a05edf1ab5c78934fbe6a325f99b3fa0036fec72af9a261bfc829002bc"
+      },
+      "quality-009-pipeline-configure.log": {
+        "bytes": 33662,
+        "sha256": "bb227a3b2ec33566083f311297845297e09b313a8cc2f9e46167159dfc84ec42"
+      },
+      "quality-010-pipeline-build.log": {
+        "bytes": 67885,
+        "sha256": "59f9161b5aaa44b0691d44cd329b15950ab4633ced2ef94212787294fe57b262"
+      },
+      "quality-011-ctest-discovery.log": {
+        "bytes": 10605,
+        "sha256": "778d682a9ae567b7e9965ee2db49c750a9bbdeac51e96ed196c4087f3c09648e"
+      },
+      "quality-012-pipeline-test.log": {
+        "bytes": 1419,
+        "sha256": "80113fea6c0b72e47b780a7c135611c6e935c6bef6bfe7be3e8ee91aad88d958"
+      },
+      "quality-013-tidy-0.log": {
+        "bytes": 205,
+        "sha256": "8551b788e184b6962a82873f89b29f4a7ccf336bb5efefe33c225eee67f21932"
+      },
+      "quality-014-tidy-1.log": {
+        "bytes": 215,
+        "sha256": "c4822befb43798da8f470b448aa00996988c833d15259882de40fb4f0146acb1"
+      },
+      "quality-015-tidy-2.log": {
+        "bytes": 205,
+        "sha256": "42c0998cb253288d67e1b0f73e38d2acc6085cde71a59d6dd05f51401cd96b02"
+      },
+      "quality-016-tidy-3.log": {
+        "bytes": 205,
+        "sha256": "a12f11d98d8844785854799adc52d37d0ed44eaa17bf85c15edeb47cc6e234e4"
+      },
+      "quality-017-tidy-4.log": {
+        "bytes": 205,
+        "sha256": "a12f11d98d8844785854799adc52d37d0ed44eaa17bf85c15edeb47cc6e234e4"
+      },
+      "quality-018-tidy-5.log": {
+        "bytes": 205,
+        "sha256": "8551b788e184b6962a82873f89b29f4a7ccf336bb5efefe33c225eee67f21932"
+      },
+      "quality-019-tidy-6.log": {
+        "bytes": 205,
+        "sha256": "75116125e0bb28e56e5b180fd5744ded9ef1e0792ea5babc4b38faccd69a350f"
+      },
+      "quality-020-tidy-7.log": {
+        "bytes": 205,
+        "sha256": "42c0998cb253288d67e1b0f73e38d2acc6085cde71a59d6dd05f51401cd96b02"
+      },
+      "quality-021-tidy-8.log": {
+        "bytes": 202,
+        "sha256": "74d7d7189450ad1963d7619c3e9e308b59612233e5b43108a4626d8b0f224c74"
+      },
+      "quality-022-tidy-9.log": {
+        "bytes": 205,
+        "sha256": "d5e54a3e6e7efcaba1150451c12f8f724b85aa9a36619f42bb2c0976bfc9b370"
+      },
+      "quality-023-tidy-10.log": {
+        "bytes": 205,
+        "sha256": "a12f11d98d8844785854799adc52d37d0ed44eaa17bf85c15edeb47cc6e234e4"
+      },
+      "quality-024-tidy-11.log": {
+        "bytes": 250,
+        "sha256": "c37a17dbd6c6be0f7ff5f7379f410dd84b1abd776b16e25bc2f22dbddcb829a9"
+      },
+      "quality-025-tidy-12.log": {
+        "bytes": 205,
+        "sha256": "a12f11d98d8844785854799adc52d37d0ed44eaa17bf85c15edeb47cc6e234e4"
+      },
+      "quality-026-tidy-13.log": {
+        "bytes": 205,
+        "sha256": "da9956abcf6e52c15ea0a7383d991dd6b390d3a549733dc614a6a899bb60a309"
+      },
+      "quality-027-tidy-14.log": {
+        "bytes": 205,
+        "sha256": "346e97372f2ddaab4d4a7cd105d354e228ac8b64a55a90561652e06fee3d4fa8"
+      },
+      "quality-028-tidy-15.log": {
+        "bytes": 205,
+        "sha256": "8551b788e184b6962a82873f89b29f4a7ccf336bb5efefe33c225eee67f21932"
+      },
+      "quality-029-fuzz-html.log": {
+        "bytes": 315704,
+        "sha256": "a7545f32343a5ba382f2679b1d53c397a8f2315149fc46697a71c3664f4e107e"
+      },
+      "quality-030-fuzz-url.log": {
+        "bytes": 78639,
+        "sha256": "9bacab6f2f55e7efe6cf313c7cf73ad3924007a64a66ddda2d07c8fe76444f6f"
+      },
+      "quality-031-fuzz-jsonrpc.log": {
+        "bytes": 2109577,
+        "sha256": "0e59faa498809c8993302a230ebea6a072658a467feaccb3f1d9e1fa1064cd58"
+      },
+      "quality-CMakeCache.txt": {
+        "bytes": 90030,
+        "sha256": "0771b3270e05de3258e3a2ba4a8f7050e87650eea9be975fcecd53ca5c70fb9d"
+      },
+      "quality-CMakeConfigureLog.yaml": {
+        "bytes": 1294081,
+        "sha256": "cea025cf21d2f34321de58cebae32b09d723d110580cb2ab35d7096dc704fb48"
+      },
+      "quality-LastTest.log": {
+        "bytes": 33849,
+        "sha256": "42d4ffe56f4c562b0d4bb45bd23fe6407415dcbf4f3d76d9478f40beb0ca0705"
+      },
+      "quality-compile_commands.json": {
+        "bytes": 865549,
+        "sha256": "fc946568968e77c5b8e54368a3154c6a3442d1d8b1849dedde6befed2f4c8765"
+      },
+      "quality-discovered-tests.json": {
+        "bytes": 10605,
+        "sha256": "778d682a9ae567b7e9965ee2db49c750a9bbdeac51e96ed196c4087f3c09648e"
+      },
+      "quality-evidence.zip": {
+        "bytes": 5005525,
+        "sha256": "628e039578a03c1afc2a0cfb95d7caf24e6a0e38e8f31f0f7e32e70be4f75b4d"
+      },
+      "quality-quality-config.json": {
+        "bytes": 934,
+        "sha256": "7402c400a1ee7b29345aa6cadeb0bc5876fe24f11f82f34ff52808b5807481ea"
+      },
+      "quality-quality.json": {
+        "bytes": 37054,
+        "sha256": "c5063280eed6988d0d65ed49fa5e71ed87a2b2362417fde9d246aab8c321a567"
+      },
+      "quality-test-results.xml": {
+        "bytes": 7339,
+        "sha256": "33a7039ac6f65609b00414782e28d3bb808957b25f9e89bfdd68f264a7b00227"
+      },
+      "quality-zlib-CMakeCache.txt": {
+        "bytes": 22067,
+        "sha256": "96231dd0fdbaab542b54e4c3c62dff3645a66023cba1038adcc0463b54f7506a"
+      },
+      "release-manifest.json": {
+        "bytes": 8790,
+        "sha256": "803079dfdcd4a9c3e94b09d1fc51b2127c08782059fb96078da7ebd384e1ac8b"
+      },
+      "soak-ubuntu-x64.json": {
+        "bytes": 641607,
+        "sha256": "c26f2fd2e85610d84c6263e341691fac71e80300a5818fd56809138ae943d394"
+      },
+      "soak-windows-x64.json": {
+        "bytes": 28017,
+        "sha256": "f49108ea574c8456ceaf87ff96e5500b577f3344d5f6b2089ef06dbf7734e821"
+      },
+      "ubuntu-x64-build-receipt.json": {
+        "bytes": 13653,
+        "sha256": "224a25e5fc40d263dd52089ea69198b5d6b0659417237606e1f7a2dbbf82e0db"
+      },
+      "ubuntu-x64-install-receipt.json": {
+        "bytes": 17298,
+        "sha256": "c7c845cf080688ea0e47caf3c6026f43dc562981b2550a9060ee0c44254288e6"
+      },
+      "ubuntu-x64-test-receipt.json": {
+        "bytes": 13739,
+        "sha256": "d6604b5868c29618e12d392a316e40cfc93ecbcf8f8b2221459ea1b70c4ec108"
+      },
+      "ubuntu-x64-test-results.xml": {
+        "bytes": 3541,
+        "sha256": "0b86673947eeb77c2f9b290026f319b4c54ea006e0dd544ec51687f388f743f6"
+      },
+      "verified-build-provenance.json": {
+        "bytes": 57411,
+        "sha256": "8789a46589bd436d80824455f398db68c011bd1d4890156888cb4256f0563fe5"
+      },
+      "windows-x64-build-receipt.json": {
+        "bytes": 7790,
+        "sha256": "b510fa8adb00d305cdcb357bcc3891c119b6a59f4e5e84d542045386047d87f0"
+      },
+      "windows-x64-install-receipt.json": {
+        "bytes": 10757,
+        "sha256": "f6ffa23d2ab9d93c8179585058f95671b508a9020f6e7fe8be94cde929f695f8"
+      },
+      "windows-x64-test-receipt.json": {
+        "bytes": 7877,
+        "sha256": "178d2c5031dc7b8c1090c19fdbc2e30f97e38f547eb9b0dcdf79d6a6899f65be"
+      },
+      "windows-x64-test-results.xml": {
+        "bytes": 4436,
+        "sha256": "4160d1aaa07eab29a2f8ceccffc740b9b2d80e61eb051ac9438035c350b2fc9f"
+      },
+      "windows11-evidence.json": {
+        "bytes": 693650,
+        "sha256": "5f2d1d53f98cfcf55b0984da22d6f260ab78439da60fb324eeeedb67c0d598bf"
+      }
+    }
+  },
+  "original_assets": {
+    "QCopilots-WebSearch-0.1.4-win64.msi": {
+      "id": 753715155,
+      "sha256": "9b86db3a3f902cebcdf396e5d9326a7a6d15becf39033794a86e7c26c9f107c6",
+      "location": "release asset QCopilots-WebSearch-0.1.4-win64.msi"
+    },
+    "QCopilots-WebSearch-0.1.4-win64.msi.cdx.json": {
+      "id": 753715159,
+      "sha256": "0fc25a88a6ba8861e6d96b927c806f0a7c8d862c7eb2db91674aa069acbab504",
+      "location": "release-assets-audit.zip/QCopilots-WebSearch-0.1.4-win64.msi.cdx.json"
+    },
+    "QCopilots-WebSearch-0.1.4-win64.msi.sha256": {
+      "id": 753715160,
+      "sha256": "0a9356dfee72707c51b6d03cf636c18672e0dff455cb33ac1ad995a7ac1751c6",
+      "location": "release-assets-audit.zip/QCopilots-WebSearch-0.1.4-win64.msi.sha256"
+    },
+    "QCopilots-WebSearch-0.1.4-win64.msi.tables.json": {
+      "id": 753715158,
+      "sha256": "f6a23a6c2243730b6579458a27bc513c37faf0898cf0c014d5f6341eb04e1900",
+      "location": "release-assets-audit.zip/QCopilots-WebSearch-0.1.4-win64.msi.tables.json"
+    },
+    "QCopilots-WebSearch-0.1.4-win64.zip": {
+      "id": 753715157,
+      "sha256": "412dc5082e7957533e9ab948d6f5e2dc3742e555465d5c34c12909e597e9b20b",
+      "location": "release asset QCopilots-WebSearch-0.1.4-win64.zip"
+    },
+    "QCopilots-WebSearch-0.1.4-win64.zip.cdx.json": {
+      "id": 753715194,
+      "sha256": "447909b04e6352ad9802477b70023a95d729ea5721d8567f112f49766ccc6877",
+      "location": "release-assets-audit.zip/QCopilots-WebSearch-0.1.4-win64.zip.cdx.json"
+    },
+    "QCopilots-WebSearch-0.1.4-win64.zip.sha256": {
+      "id": 753715196,
+      "sha256": "13757775ff2097f486de60d8bbbd3f99da76f701e94a04cd0082fbbee4e7d28d",
+      "location": "release-assets-audit.zip/QCopilots-WebSearch-0.1.4-win64.zip.sha256"
+    },
+    "QCopilots-WebSearch-3e13f7bd930ffa495e14d50c3556028a21484204-source.tar.gz": {
+      "id": 753715198,
+      "sha256": "7c662bec1d9b5168eeb0ef0c99feb8fb0a15d0120ec23b794beffec3fcab2704",
+      "location": "QCopilots-WebSearch-0.1.4-corresponding-sources.zip/QCopilots-WebSearch-3e13f7bd930ffa495e14d50c3556028a21484204-source.tar.gz"
+    },
+    "SHA256SUMS": {
+      "id": 753886016,
+      "sha256": "8d5e3a02d4a9b451664c259537600b75f89f3710f230d06e03c87801788fb1ed",
+      "location": "release-assets-audit.zip/SHA256SUMS"
+    },
+    "build-info-ubuntu-x64.json": {
+      "id": 753715231,
+      "sha256": "94250463a5fb21b4e11bf8d4042e6444a5a632d6d8fa33d9ecc672c4aa5e9065",
+      "location": "release-assets-audit.zip/build-info-ubuntu-x64.json"
+    },
+    "build-info-windows-x64.json": {
+      "id": 753715232,
+      "sha256": "47994a30b88edf82d93cfc27d675327faeb71ccbdd86510b47f51078439c717b",
+      "location": "release-assets-audit.zip/build-info-windows-x64.json"
+    },
+    "caddy-contract.json": {
+      "id": 753715238,
+      "sha256": "532010604db4d1c8ceac3b5893fe8a15a1f2f692c09b698a3079ab06470e4ea3",
+      "location": "release-assets-audit.zip/caddy-contract.json"
+    },
+    "ci-run-ubuntu-x64.json": {
+      "id": 753715245,
+      "sha256": "2e3073dbb71f1a2278a929a71fffdfd02162d765cdc7243f9d3b6212652b8534",
+      "location": "release-assets-audit.zip/ci-run-ubuntu-x64.json"
+    },
+    "ci-run-windows-x64.json": {
+      "id": 753715258,
+      "sha256": "d469b6884c09c025b3d62bece8bd45ae0e7911305a4f46db4813043079a179b3",
+      "location": "release-assets-audit.zip/ci-run-windows-x64.json"
+    },
+    "deb-acceptance.json": {
+      "id": 753715262,
+      "sha256": "7807b35ae406e13974e138491521b52b771e35ab33b0ff932780e7a9b1abfc21",
+      "location": "release-assets-audit.zip/deb-acceptance.json"
+    },
+    "mcp-sdk-ubuntu-x64.json": {
+      "id": 753715265,
+      "sha256": "9a2e5911b3ba323836563ba74a2d7ff135b60bcd234c0a566132318043106402",
+      "location": "release-assets-audit.zip/mcp-sdk-ubuntu-x64.json"
+    },
+    "mcp-sdk-windows-x64.json": {
+      "id": 753715266,
+      "sha256": "32003ca100fd42b05e2da8e9607cc691b19f7f935fee254e58b6aec2316fd676",
+      "location": "release-assets-audit.zip/mcp-sdk-windows-x64.json"
+    },
+    "openssl-3.5.9.tar.gz": {
+      "id": 753715277,
+      "sha256": "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a",
+      "location": "QCopilots-WebSearch-0.1.4-corresponding-sources.zip/openssl-3.5.9.tar.gz"
+    },
+    "promotion-inputs.json": {
+      "id": 753715287,
+      "sha256": "93de4a5b2b93090e1f9a6b6048166db856ecc6d12a6d3debed3cc371c9b91213",
+      "location": "release-assets-audit.zip/promotion-inputs.json"
+    },
+    "public-compose.json": {
+      "id": 753715301,
+      "sha256": "50bcd5be66385851bd77fc239498a2bf8315ba562dc0d915ef0cd94e45931bb3",
+      "location": "release-assets-audit.zip/public-compose.json"
+    },
+    "public-search.json": {
+      "id": 753715295,
+      "sha256": "dcb100753c38a3c79b99412e09d1816b1bf8e70697276d4e1bc3a867766c650a",
+      "location": "release-assets-audit.zip/public-search.json"
+    },
+    "publication-proof.json": {
+      "id": 753886048,
+      "sha256": "f305cfcdb76b40a7a894ce4253ae3cae73499934f183bb3456a3ba1a6854bbcb",
+      "location": "release-assets-audit.zip/publication-proof.json"
+    },
+    "qcopilots-websearch_0.1.4_amd64.deb": {
+      "id": 753715300,
+      "sha256": "ae04f0c40ed9ca5e159f7a86e28221366d7e870bb4dc223b01b7f5626921087c",
+      "location": "release asset qcopilots-websearch_0.1.4_amd64.deb"
+    },
+    "qcopilots-websearch_0.1.4_amd64.deb.cdx.json": {
+      "id": 753715318,
+      "sha256": "f5d9f32978b9031215bde98c834e0041001b327b928a57950c95cf745e104bdb",
+      "location": "release-assets-audit.zip/qcopilots-websearch_0.1.4_amd64.deb.cdx.json"
+    },
+    "qcopilots-websearch_0.1.4_amd64.deb.sha256": {
+      "id": 753715319,
+      "sha256": "07c33aaeefbbf50880fafe2e40cde5a412d720a78e2184de785415ac19a1a333",
+      "location": "release-assets-audit.zip/qcopilots-websearch_0.1.4_amd64.deb.sha256"
+    },
+    "qtbase-everywhere-src-6.12.0.tar.xz": {
+      "id": 753886087,
+      "sha256": "a951bd163c7b80fc6b8c88d7668fb56abf91c152373e13c10666763238131307",
+      "location": "QCopilots-WebSearch-0.1.4-corresponding-sources.zip/qtbase-everywhere-src-6.12.0.tar.xz"
+    },
+    "quality-000-git-head.log": {
+      "id": 753715354,
+      "sha256": "da212f97a8a135d3c1d740c12ecfc695d3f205859de2ba44916d3e0ef4b3c6f6",
+      "location": "release-assets-audit.zip/quality-000-git-head.log"
+    },
+    "quality-002-apt-update.log": {
+      "id": 753886174,
+      "sha256": "78c7589f124ed5450e3cbc3cb5d0a983a5db2748e32aa823e5e06b905709f3e7",
+      "location": "release-assets-audit.zip/quality-002-apt-update.log"
+    },
+    "quality-003-apt-install.log": {
+      "id": 753886196,
+      "sha256": "335e11b1739dff3e178cb1305fa171bbdd3dc053435633e74f488379819a8373",
+      "location": "release-assets-audit.zip/quality-003-apt-install.log"
+    },
+    "quality-004-version-packages.log": {
+      "id": 753886218,
+      "sha256": "190681a2defab35b079ae24579d44e63cb6060643b3d4d97380ea4c89d8ce141",
+      "location": "release-assets-audit.zip/quality-004-version-packages.log"
+    },
+    "quality-005-version-clang.log": {
+      "id": 753886260,
+      "sha256": "77467400b91c4cebb6c3e29d8a611af518a2f4078c22baf276b0a1373e996bf5",
+      "location": "release-assets-audit.zip/quality-005-version-clang.log"
+    },
+    "quality-006-version-clang-tidy.log": {
+      "id": 753886285,
+      "sha256": "a6a1319a8940bb501c4b8413c97e0fa8648e8593f7fbdaedfd3a4ab41ee56092",
+      "location": "release-assets-audit.zip/quality-006-version-clang-tidy.log"
+    },
+    "quality-007-version-symbolizer.log": {
+      "id": 753886308,
+      "sha256": "f1c205f42ae3e6d5d7d2bcd3e6bb18e43cd1c91d7651055efb63075417dd1966",
+      "location": "release-assets-audit.zip/quality-007-version-symbolizer.log"
+    },
+    "quality-008-pipeline-doctor.log": {
+      "id": 753886339,
+      "sha256": "cd4c39a05edf1ab5c78934fbe6a325f99b3fa0036fec72af9a261bfc829002bc",
+      "location": "release-assets-audit.zip/quality-008-pipeline-doctor.log"
+    },
+    "quality-009-pipeline-configure.log": {
+      "id": 753886355,
+      "sha256": "bb227a3b2ec33566083f311297845297e09b313a8cc2f9e46167159dfc84ec42",
+      "location": "release-assets-audit.zip/quality-009-pipeline-configure.log"
+    },
+    "quality-010-pipeline-build.log": {
+      "id": 753886371,
+      "sha256": "59f9161b5aaa44b0691d44cd329b15950ab4633ced2ef94212787294fe57b262",
+      "location": "release-assets-audit.zip/quality-010-pipeline-build.log"
+    },
+    "quality-011-ctest-discovery.log": {
+      "id": 753886399,
+      "sha256": "778d682a9ae567b7e9965ee2db49c750a9bbdeac51e96ed196c4087f3c09648e",
+      "location": "release-assets-audit.zip/quality-011-ctest-discovery.log"
+    },
+    "quality-012-pipeline-test.log": {
+      "id": 753886421,
+      "sha256": "80113fea6c0b72e47b780a7c135611c6e935c6bef6bfe7be3e8ee91aad88d958",
+      "location": "release-assets-audit.zip/quality-012-pipeline-test.log"
+    },
+    "quality-013-tidy-0.log": {
+      "id": 753886440,
+      "sha256": "8551b788e184b6962a82873f89b29f4a7ccf336bb5efefe33c225eee67f21932",
+      "location": "release-assets-audit.zip/quality-013-tidy-0.log"
+    },
+    "quality-014-tidy-1.log": {
+      "id": 753886457,
+      "sha256": "c4822befb43798da8f470b448aa00996988c833d15259882de40fb4f0146acb1",
+      "location": "release-assets-audit.zip/quality-014-tidy-1.log"
+    },
+    "quality-015-tidy-2.log": {
+      "id": 753886472,
+      "sha256": "42c0998cb253288d67e1b0f73e38d2acc6085cde71a59d6dd05f51401cd96b02",
+      "location": "release-assets-audit.zip/quality-015-tidy-2.log"
+    },
+    "quality-016-tidy-3.log": {
+      "id": 753886503,
+      "sha256": "a12f11d98d8844785854799adc52d37d0ed44eaa17bf85c15edeb47cc6e234e4",
+      "location": "release-assets-audit.zip/quality-016-tidy-3.log"
+    },
+    "quality-017-tidy-4.log": {
+      "id": 753886522,
+      "sha256": "a12f11d98d8844785854799adc52d37d0ed44eaa17bf85c15edeb47cc6e234e4",
+      "location": "release-assets-audit.zip/quality-017-tidy-4.log"
+    },
+    "quality-018-tidy-5.log": {
+      "id": 753886543,
+      "sha256": "8551b788e184b6962a82873f89b29f4a7ccf336bb5efefe33c225eee67f21932",
+      "location": "release-assets-audit.zip/quality-018-tidy-5.log"
+    },
+    "quality-019-tidy-6.log": {
+      "id": 753886575,
+      "sha256": "75116125e0bb28e56e5b180fd5744ded9ef1e0792ea5babc4b38faccd69a350f",
+      "location": "release-assets-audit.zip/quality-019-tidy-6.log"
+    },
+    "quality-020-tidy-7.log": {
+      "id": 753886610,
+      "sha256": "42c0998cb253288d67e1b0f73e38d2acc6085cde71a59d6dd05f51401cd96b02",
+      "location": "release-assets-audit.zip/quality-020-tidy-7.log"
+    },
+    "quality-021-tidy-8.log": {
+      "id": 753886629,
+      "sha256": "74d7d7189450ad1963d7619c3e9e308b59612233e5b43108a4626d8b0f224c74",
+      "location": "release-assets-audit.zip/quality-021-tidy-8.log"
+    },
+    "quality-022-tidy-9.log": {
+      "id": 753886644,
+      "sha256": "d5e54a3e6e7efcaba1150451c12f8f724b85aa9a36619f42bb2c0976bfc9b370",
+      "location": "release-assets-audit.zip/quality-022-tidy-9.log"
+    },
+    "quality-023-tidy-10.log": {
+      "id": 753886660,
+      "sha256": "a12f11d98d8844785854799adc52d37d0ed44eaa17bf85c15edeb47cc6e234e4",
+      "location": "release-assets-audit.zip/quality-023-tidy-10.log"
+    },
+    "quality-024-tidy-11.log": {
+      "id": 753886674,
+      "sha256": "c37a17dbd6c6be0f7ff5f7379f410dd84b1abd776b16e25bc2f22dbddcb829a9",
+      "location": "release-assets-audit.zip/quality-024-tidy-11.log"
+    },
+    "quality-025-tidy-12.log": {
+      "id": 753886695,
+      "sha256": "a12f11d98d8844785854799adc52d37d0ed44eaa17bf85c15edeb47cc6e234e4",
+      "location": "release-assets-audit.zip/quality-025-tidy-12.log"
+    },
+    "quality-026-tidy-13.log": {
+      "id": 753886704,
+      "sha256": "da9956abcf6e52c15ea0a7383d991dd6b390d3a549733dc614a6a899bb60a309",
+      "location": "release-assets-audit.zip/quality-026-tidy-13.log"
+    },
+    "quality-027-tidy-14.log": {
+      "id": 753886755,
+      "sha256": "346e97372f2ddaab4d4a7cd105d354e228ac8b64a55a90561652e06fee3d4fa8",
+      "location": "release-assets-audit.zip/quality-027-tidy-14.log"
+    },
+    "quality-028-tidy-15.log": {
+      "id": 753886782,
+      "sha256": "8551b788e184b6962a82873f89b29f4a7ccf336bb5efefe33c225eee67f21932",
+      "location": "release-assets-audit.zip/quality-028-tidy-15.log"
+    },
+    "quality-029-fuzz-html.log": {
+      "id": 753886802,
+      "sha256": "a7545f32343a5ba382f2679b1d53c397a8f2315149fc46697a71c3664f4e107e",
+      "location": "release-assets-audit.zip/quality-029-fuzz-html.log"
+    },
+    "quality-030-fuzz-url.log": {
+      "id": 753886835,
+      "sha256": "9bacab6f2f55e7efe6cf313c7cf73ad3924007a64a66ddda2d07c8fe76444f6f",
+      "location": "release-assets-audit.zip/quality-030-fuzz-url.log"
+    },
+    "quality-031-fuzz-jsonrpc.log": {
+      "id": 753886859,
+      "sha256": "0e59faa498809c8993302a230ebea6a072658a467feaccb3f1d9e1fa1064cd58",
+      "location": "release-assets-audit.zip/quality-031-fuzz-jsonrpc.log"
+    },
+    "quality-CMakeCache.txt": {
+      "id": 753886885,
+      "sha256": "0771b3270e05de3258e3a2ba4a8f7050e87650eea9be975fcecd53ca5c70fb9d",
+      "location": "release-assets-audit.zip/quality-CMakeCache.txt"
+    },
+    "quality-CMakeConfigureLog.yaml": {
+      "id": 753886907,
+      "sha256": "cea025cf21d2f34321de58cebae32b09d723d110580cb2ab35d7096dc704fb48",
+      "location": "release-assets-audit.zip/quality-CMakeConfigureLog.yaml"
+    },
+    "quality-LastTest.log": {
+      "id": 753886961,
+      "sha256": "42d4ffe56f4c562b0d4bb45bd23fe6407415dcbf4f3d76d9478f40beb0ca0705",
+      "location": "release-assets-audit.zip/quality-LastTest.log"
+    },
+    "quality-compile_commands.json": {
+      "id": 753886994,
+      "sha256": "fc946568968e77c5b8e54368a3154c6a3442d1d8b1849dedde6befed2f4c8765",
+      "location": "release-assets-audit.zip/quality-compile_commands.json"
+    },
+    "quality-discovered-tests.json": {
+      "id": 753887019,
+      "sha256": "778d682a9ae567b7e9965ee2db49c750a9bbdeac51e96ed196c4087f3c09648e",
+      "location": "release-assets-audit.zip/quality-discovered-tests.json"
+    },
+    "quality-evidence.zip": {
+      "id": 753887033,
+      "sha256": "628e039578a03c1afc2a0cfb95d7caf24e6a0e38e8f31f0f7e32e70be4f75b4d",
+      "location": "release-assets-audit.zip/quality-evidence.zip"
+    },
+    "quality-quality-config.json": {
+      "id": 753887078,
+      "sha256": "7402c400a1ee7b29345aa6cadeb0bc5876fe24f11f82f34ff52808b5807481ea",
+      "location": "release-assets-audit.zip/quality-quality-config.json"
+    },
+    "quality-quality.json": {
+      "id": 753887093,
+      "sha256": "c5063280eed6988d0d65ed49fa5e71ed87a2b2362417fde9d246aab8c321a567",
+      "location": "release-assets-audit.zip/quality-quality.json"
+    },
+    "quality-test-results.xml": {
+      "id": 753887113,
+      "sha256": "33a7039ac6f65609b00414782e28d3bb808957b25f9e89bfdd68f264a7b00227",
+      "location": "release-assets-audit.zip/quality-test-results.xml"
+    },
+    "quality-zlib-CMakeCache.txt": {
+      "id": 753887124,
+      "sha256": "96231dd0fdbaab542b54e4c3c62dff3645a66023cba1038adcc0463b54f7506a",
+      "location": "release-assets-audit.zip/quality-zlib-CMakeCache.txt"
+    },
+    "release-manifest.json": {
+      "id": 753887142,
+      "sha256": "803079dfdcd4a9c3e94b09d1fc51b2127c08782059fb96078da7ebd384e1ac8b",
+      "location": "release-assets-audit.zip/release-manifest.json"
+    },
+    "soak-ubuntu-x64.json": {
+      "id": 753887165,
+      "sha256": "c26f2fd2e85610d84c6263e341691fac71e80300a5818fd56809138ae943d394",
+      "location": "release-assets-audit.zip/soak-ubuntu-x64.json"
+    },
+    "soak-windows-x64.json": {
+      "id": 753887187,
+      "sha256": "f49108ea574c8456ceaf87ff96e5500b577f3344d5f6b2089ef06dbf7734e821",
+      "location": "release-assets-audit.zip/soak-windows-x64.json"
+    },
+    "ubuntu-x64-build-receipt.json": {
+      "id": 753887200,
+      "sha256": "224a25e5fc40d263dd52089ea69198b5d6b0659417237606e1f7a2dbbf82e0db",
+      "location": "release-assets-audit.zip/ubuntu-x64-build-receipt.json"
+    },
+    "ubuntu-x64-install-receipt.json": {
+      "id": 753887222,
+      "sha256": "c7c845cf080688ea0e47caf3c6026f43dc562981b2550a9060ee0c44254288e6",
+      "location": "release-assets-audit.zip/ubuntu-x64-install-receipt.json"
+    },
+    "ubuntu-x64-test-receipt.json": {
+      "id": 753887243,
+      "sha256": "d6604b5868c29618e12d392a316e40cfc93ecbcf8f8b2221459ea1b70c4ec108",
+      "location": "release-assets-audit.zip/ubuntu-x64-test-receipt.json"
+    },
+    "ubuntu-x64-test-results.xml": {
+      "id": 753887273,
+      "sha256": "0b86673947eeb77c2f9b290026f319b4c54ea006e0dd544ec51687f388f743f6",
+      "location": "release-assets-audit.zip/ubuntu-x64-test-results.xml"
+    },
+    "verified-build-provenance.json": {
+      "id": 753887287,
+      "sha256": "8789a46589bd436d80824455f398db68c011bd1d4890156888cb4256f0563fe5",
+      "location": "release-assets-audit.zip/verified-build-provenance.json"
+    },
+    "windows-x64-build-receipt.json": {
+      "id": 753887310,
+      "sha256": "b510fa8adb00d305cdcb357bcc3891c119b6a59f4e5e84d542045386047d87f0",
+      "location": "release-assets-audit.zip/windows-x64-build-receipt.json"
+    },
+    "windows-x64-install-receipt.json": {
+      "id": 753887326,
+      "sha256": "f6ffa23d2ab9d93c8179585058f95671b508a9020f6e7fe8be94cde929f695f8",
+      "location": "release-assets-audit.zip/windows-x64-install-receipt.json"
+    },
+    "windows-x64-test-receipt.json": {
+      "id": 753887344,
+      "sha256": "178d2c5031dc7b8c1090c19fdbc2e30f97e38f547eb9b0dcdf79d6a6899f65be",
+      "location": "release-assets-audit.zip/windows-x64-test-receipt.json"
+    },
+    "windows-x64-test-results.xml": {
+      "id": 753887368,
+      "sha256": "4160d1aaa07eab29a2f8ceccffc740b9b2d80e61eb051ac9438035c350b2fc9f",
+      "location": "release-assets-audit.zip/windows-x64-test-results.xml"
+    },
+    "windows11-evidence.json": {
+      "id": 753887396,
+      "sha256": "5f2d1d53f98cfcf55b0984da22d6f260ab78439da60fb324eeeedb67c0d598bf",
+      "location": "release-assets-audit.zip/windows11-evidence.json"
+    }
+  }
+}

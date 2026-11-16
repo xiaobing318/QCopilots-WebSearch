@@ -1,0 +1,29 @@
+{
+  "release_id": 446672881,
+  "url": "https://github.com/xiaobing318/QCopilots-WebSearch/releases/tag/v0.1.4",
+  "published_at": "2026-11-16T07:23:23Z",
+  "tag": "v0.1.4",
+  "source_commit": "3e13f7bd930ffa495e14d50c3556028a21484204",
+  "tools_commit": "bead1999fbdb1200fdb8dec6f3c3df803898c0b3",
+  "candidate_ci_run": 43805306130,
+  "publication_run": 43823293370,
+  "publication_run_conclusion": "success",
+  "r4_evidence_commit": "ff47cada5228e9ac18a686f27fc5ab83fa004162",
+  "artifact_sha256": "8a35ce3d331cb310a1c3a7590dc651ee36161412025e4e718c4d08adc1e6b5b5",
+  "all_80_assets_downloaded_and_hashed_before_publication": true,
+  "public_api_all_80_names_sizes_states_digests_match_workflow_receipt": true,
+  "physical_inventory_equals_successful_checkonly": true,
+  "unchanged_uploaded_assets_reused_by_id": 24,
+  "quality_archive_members": 44,
+  "preserved_zero_byte_log_members": [
+    "quality-001-git-clean-before.log",
+    "quality-032-git-clean-after.log"
+  ],
+  "replaced_old_checksums_id": 753715225,
+  "replaced_recorded_starters": {
+    "qtbase-everywhere-src-6.12.0.tar.xz": 753715322
+  },
+  "product_rebuilt": false,
+  "tag_moved": false,
+  "signed_windows_packages": false
+}
