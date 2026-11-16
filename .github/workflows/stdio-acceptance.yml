@@ -1,0 +1,31 @@
+name: Original v0.1.4 stdio acceptance
+on:
+  push:
+    branches: [acceptance/v0.1.4-stdio]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  exact-runtime:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 3e13f7bd930ffa495e14d50c3556028a21484204
+          path: candidate-source
+          persist-credentials: false
+      - name: Test original package bytes
+        run: python3 run_acceptance.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: original-014-linux-stdio-evidence
+          path: evidence/
+          if-no-files-found: error
