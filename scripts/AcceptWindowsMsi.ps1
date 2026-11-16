@@ -61,6 +61,12 @@ function Registered([string]$code) {
     foreach ($product in $wi.ProductsEx($code, 'S-1-1-0', 7)) { return $true }
     return $false
 }
+function Read-ProductProperty($product, [string]$name, [object[]]$indices = @()) {
+    # ProductsEx can return IDispatch objects without PowerShell-visible type
+    # information. Invoke their documented properties through IDispatch.
+    return $product.GetType().InvokeMember($name, [Reflection.BindingFlags]::GetProperty,
+                                           $null, $product, $indices)
+}
 function Owned-Processes {
     @(Get-CimInstance Win32_Process -Filter "Name='qcopilots-websearch.exe'" |
         Where-Object { $_.ExecutablePath -eq $exe -and $_.CreationDate -ge $started })
@@ -136,7 +142,7 @@ function Assert-Running([hashtable]$metadata) {
     $leftovers = @(Get-ChildItem -LiteralPath $dataRoot -Force -File | Where-Object { $_.Name -like '.qcws-install-*' -or $_.Name -like '*.new' -or $_.Name -like '*.tmp' })
     Assert ($leftovers.Count -eq 0) 'Installer receipt/staging file remained.'
     $installed = @($wi.ProductsEx($metadata.ProductCode, '', 4))
-    Assert ($installed.Count -eq 1 -and $installed[0].InstallProperty('VersionString') -eq $metadata.ProductVersion) 'Registered version mismatch.'
+    Assert ($installed.Count -eq 1 -and (Read-ProductProperty $installed[0] 'InstallProperty' @('VersionString')) -eq $metadata.ProductVersion) 'Registered version mismatch.'
 }
 function Snapshot([string[]]$paths) {
     $result = @{}
@@ -189,8 +195,8 @@ foreach ($port in @(8088,8089)) {
     finally { $listener.Stop() }
 }
 foreach ($product in $wi.ProductsEx('', 'S-1-1-0', 7)) {
-    Assert ($product.ProductCode -notin @($candidate.ProductCode, $baseline.ProductCode)) 'Product already registered.'
-    Assert ($product.InstallProperty('ProductName') -ne $candidate.ProductName) 'Existing named product found.'
+    Assert ((Read-ProductProperty $product 'ProductCode') -notin @($candidate.ProductCode, $baseline.ProductCode)) 'Product already registered.'
+    Assert ((Read-ProductProperty $product 'InstallProperty' @('ProductName')) -ne $candidate.ProductName) 'Existing named product found.'
 }
 $output = [IO.Path]::GetFullPath($options['--OutputDir'])
 foreach ($path in @($candidate.Path, $baseline.Path, $output)) {

@@ -1,5 +1,6 @@
 #include <QCryptographicHash>
 #include <QDateTime>
+#include <QStringDecoder>
 #include <QStringList>
 #include <QUrl>
 #include <QUrlQuery>
@@ -11,6 +12,13 @@
 namespace qws {
 namespace {
 constexpr std::size_t PayloadLimit = 240 * 1024;
+QString contentText(const std::string &value) {
+  // These bytes are Unicode content from JSON or the extractor, not a new
+  // encoded file. An initial U+FEFF must remain part of text and find patterns.
+  QStringDecoder decoder(QStringDecoder::Utf8, QStringConverter::Flag::ConvertInitialBom |
+                                                  QStringConverter::Flag::Stateless);
+  return decoder(QByteArrayView(value.data(), qsizetype(value.size())));
+}
 std::string now() {
   return QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs).toStdString();
 }
@@ -461,7 +469,7 @@ Json Service::open(const Json &args, const std::string &principal,
     cache_.put(key("page", principal, document["page_id"]), document,
                config_.value["cache"]["page_ttl_seconds"]);
   }
-  const auto lines = QString::fromStdString(document["text"].get<std::string>()).split('\n');
+  const auto lines = contentText(document["text"].get<std::string>()).split('\n');
   const int first = args.value("start_line", 1), count = args.value("max_lines", 200);
   document.erase("text");
   document["lines"] = Json::array();
@@ -475,8 +483,8 @@ Json Service::open(const Json &args, const std::string &principal,
 }
 Json Service::find(const Json &args, const std::string &principal) {
   const auto document = page(principal, args["page_id"]);
-  const auto lines = QString::fromStdString(document["text"].get<std::string>()).split('\n');
-  const auto pattern = QString::fromStdString(args["pattern"]);
+  const auto lines = contentText(document["text"].get<std::string>()).split('\n');
+  const auto pattern = contentText(args["pattern"].get<std::string>());
   Json matches = Json::array();
   bool truncated = false;
   Json next = nullptr;

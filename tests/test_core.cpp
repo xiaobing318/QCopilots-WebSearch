@@ -669,6 +669,33 @@ void serviceTests() {
         [&] { s.call("web_open", {{"url", "https://example.com"}, {"page_id", id}}, "alice", token()); });
   REQUIRE(s.status()["active_calls"] == 0);
 }
+void unicodePageTests() {
+  QTemporaryDir dir;
+  auto t = transport();
+  int requests = 0;
+  const std::string marker("\xef\xbb\xbf", 3);
+  t.open = [&](auto url, auto) {
+    ++requests;
+    return HttpResponse{200, std::string("\x1c\0", 2) + marker + "word<p>word</p>",
+                        "text/html; charset=utf-8", url, {}};
+  };
+  Service service(config(dir), t);
+  auto opened = service.call("web_open", {{"url", "https://example.com/bom"}}, "alice", token());
+  REQUIRE(opened["lines"][0]["text"] == marker + "word");
+  const auto id = opened["page_id"];
+  auto cached = service.call("web_open", {{"page_id", id}}, "alice", token());
+  REQUIRE(cached["lines"] == opened["lines"]);
+  REQUIRE(requests == 1);
+  auto found = service.call("web_find", {{"page_id", id}, {"pattern", marker}}, "alice", token());
+  REQUIRE(found["matches"].size() == 1);
+  REQUIRE(found["matches"][0]["line"] == 1);
+  REQUIRE(found["matches"][0]["text"] == marker + "word");
+  found = service.call("web_find", {{"page_id", id}, {"pattern", marker + "WORD"}}, "alice", token());
+  REQUIRE(found["matches"].size() == 1);
+  found = service.call("web_find", {{"page_id", id}, {"pattern", marker + "WORD"},
+                                     {"case_sensitive", true}}, "alice", token());
+  REQUIRE(found["matches"].empty());
+}
 void concurrencyTests() {
   QTemporaryDir dir;
   auto t = transport();
@@ -863,6 +890,7 @@ int main(int argc, char **argv) {
                                                        {"html", htmlTests},
                                                        {"html-boundaries", htmlBoundaryTests},
                                                        {"service", serviceTests},
+                                                       {"unicode-page", unicodePageTests},
                                                        {"concurrency", concurrencyTests},
                                                        {"protocol", protocolTests},
                                                        {"json-and-deadlines", jsonAndDeadlineTests},
