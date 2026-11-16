@@ -1,0 +1,21 @@
+{
+  "run_id": 43821974116,
+  "conclusion": "success",
+  "artifact_sha256": "46ea01f00927d8c735e25ea684635d7c9afe383b5a2f48b7833ca5cb33b488a4",
+  "source_commit": "3e13f7bd930ffa495e14d50c3556028a21484204",
+  "tools_commit": "bead1999fbdb1200fdb8dec6f3c3df803898c0b3",
+  "existing_uploaded_assets_downloaded_and_verified": 25,
+  "starter_identified_separately": {
+    "qtbase-everywhere-src-6.12.0.tar.xz": 753715322
+  },
+  "uploaded_asset_identities_unchanged_from_failed_run": true,
+  "starter_identity_matches_fixed_record": true,
+  "physical_asset_count": 80,
+  "quality_archive_members": 44,
+  "exact_empty_log_members": [
+    "quality-001-git-clean-before.log",
+    "quality-032-git-clean-after.log"
+  ],
+  "published": false,
+  "product_rebuilt": false
+}
