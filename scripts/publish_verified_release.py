@@ -1,6 +1,7 @@
 """Run an unchanged candidate's gates, then upload or resume its verified assets."""
 import argparse
 import base64
+import json
 import os
 from pathlib import Path
 import re
@@ -59,6 +60,18 @@ def main():
         recovery = {'draft_id': args.ResumeDraftId, 'old_checksums_asset_id': args.PreviousChecksumsAssetId,
                     'old_checksums_sha256': args.PreviousChecksumsSHA256,
                     'old_checksums_base64': base64.b64encode(previous).decode('ascii')}
+        sidecar = path + '.starters.json'
+        listing = subprocess.check_output(['git', '-C', str(tools_root), 'ls-tree', args.ToolsCommit, '--', sidecar])
+        if listing:
+            transport.need(listing.startswith(b'100644 blob '), 'Incomplete-asset record must be a regular Git file')
+            raw = subprocess.check_output(['git', '-C', str(tools_root), 'cat-file', 'blob', args.ToolsCommit + ':' + sidecar])
+            record = json.loads(raw)
+            transport.need(record['schema_version'] == 1 and record['draft_id'] == args.ResumeDraftId
+                           and record['source_commit'] == commit and record['tag'] == args.Tag
+                           and record['old_checksums_asset_id'] == args.PreviousChecksumsAssetId
+                           and record['old_checksums_sha256'] == args.PreviousChecksumsSHA256,
+                           'Incomplete-asset record belongs to another recovery')
+            recovery['incomplete_assets'] = record['assets']
     identity['candidate_verifier_sha256'] = transport.sha(candidate / 'scripts/promote_release.py')
     physical = transport.prepare(original, output / 'publication', identity, recovery)
     notes = output / 'notes.md'

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "draft_id": 446672881,
+  "tag": "v0.1.4",
+  "source_commit": "3e13f7bd930ffa495e14d50c3556028a21484204",
+  "old_checksums_asset_id": 753715225,
+  "old_checksums_sha256": "b7fb7c70ddc0210e31d2509543a524acb183750074f77737f8643fdc6c796965",
+  "assets": [
+    {
+      "id": 753715322,
+      "name": "qtbase-everywhere-src-6.12.0.tar.xz",
+      "size": 51220268,
+      "state": "starter",
+      "digest": null
+    }
+  ]
+}

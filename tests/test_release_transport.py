@@ -255,6 +255,71 @@ class TransportTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'already exists'): github.create(TAG, COMMIT, self.notes)
             self.assertEqual(request.call_count, 1)
 
+    def test_exact_incomplete_source_is_recorded_replaced_and_retry_reuses_bytes(self):
+        resume = recovery()
+        starter = {'id': 95, 'name': 'source.tar.gz', 'size': (self.original / 'source.tar.gz').stat().st_size,
+                   'state': 'starter', 'digest': None}
+        resume['incomplete_assets'] = [starter]
+        output = self.prepare(resume)
+        github = FakeGitHub()
+        github.stored[starter['name']] = {**starter, 'raw': b'not retrievable'}
+        result = t.publish(self.original, output, IDENTITY, github, self.notes, resume, check_only=True)
+        self.assertEqual(result['incomplete_assets_identified'], {'source.tar.gz': 95})
+        self.assertNotIn('source.tar.gz', result['existing_assets_verified'])
+        self.assertEqual(github.calls, [])
+        github.fail_upload = 'source.tar.gz'
+        with self.assertRaises(RuntimeError): t.publish(self.original, output, IDENTITY, github, self.notes, resume)
+        self.assertEqual(github.calls.count(('delete', 95)), 1)
+        self.assertNotIn('source.tar.gz', github.stored)
+        github.fail_upload = None
+        result = t.publish(self.original, output, IDENTITY, github, self.notes, resume)
+        self.assertTrue(result['published'])
+        self.assertEqual(github.calls.count(('delete', 95)), 1)
+        self.assertEqual(github.stored['source.tar.gz']['raw'], (self.original / 'source.tar.gz').read_bytes())
+        github.state.update(draft=True, published_at=None)
+        github.calls.clear()
+        t.publish(self.original, output, IDENTITY, github, self.notes, resume)
+        self.assertFalse(any(c[0] in ('delete', 'upload') for c in github.calls))
+
+    def test_incomplete_source_identity_or_verified_size_mismatch_never_mutates(self):
+        starter = {'id': 95, 'name': 'source.tar.gz', 'size': (self.original / 'source.tar.gz').stat().st_size,
+                   'state': 'starter', 'digest': None}
+        for field, value in [('id', 96), ('name', 'package.zip'), ('size', 1), ('digest', 'sha256:' + 'a' * 64),
+                             ('state', 'uploaded'), ('allowed_size', 1)]:
+            with self.subTest(field=field):
+                resume = recovery()
+                resume['incomplete_assets'] = [copy.deepcopy(starter)]
+                actual = copy.deepcopy(starter)
+                if field == 'allowed_size':
+                    actual['size'] = resume['incomplete_assets'][0]['size'] = value
+                else:
+                    actual[field] = value
+                output = self.prepare(resume, name='mismatch-' + field)
+                github = FakeGitHub()
+                github.stored[actual['name']] = {**actual, 'raw': b'invalid uploaded bytes'}
+                with self.assertRaises(RuntimeError): t.publish(self.original, output, IDENTITY, github, self.notes, resume)
+                self.assertFalse(any(c[0] in ('delete', 'upload', 'publish') for c in github.calls))
+
+    def test_incomplete_asset_changes_during_validation_prevent_deletion(self):
+        resume = recovery()
+        starter = {'id': 95, 'name': 'source.tar.gz', 'size': (self.original / 'source.tar.gz').stat().st_size,
+                   'state': 'starter', 'digest': None}
+        resume['incomplete_assets'] = [starter]
+        output = self.prepare(resume)
+        github = FakeGitHub()
+        github.stored[starter['name']] = {**starter, 'raw': b'incomplete'}
+        original_assets = github.assets
+        calls = 0
+        def changed(release_id):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                github.stored['source.tar.gz']['state'] = 'uploaded'
+            return original_assets(release_id)
+        with patch.object(github, 'assets', side_effect=changed), self.assertRaises(RuntimeError):
+            t.publish(self.original, output, IDENTITY, github, self.notes, resume)
+        self.assertEqual(github.calls, [])
+
     def test_upload_targets_exact_release_id_with_raw_file(self):
         github = t.GitHub('owner/project')
         package = self.original / 'package.zip'

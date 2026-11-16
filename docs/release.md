@@ -127,6 +127,15 @@ retained in the publication proof. Repeated runs with the same inputs can reuse
 already uploaded new-layout files. Never use a blanket overwrite or silently
 switch to another draft after an error.
 
+An interrupted upload may also leave a `starter` asset that cannot be downloaded.
+Such assets are rejected unless a reviewed Git file at
+`PreviousChecksumsPath + .starters.json` explicitly binds their ID, name, size,
+`starter` state and null digest to this draft, tag, source and old checksum
+identity. Recovery records this identity in the publication proof, compares it
+again immediately before mutation, removes only the exact incomplete asset and
+uploads the original verified bytes. Any other incomplete asset stops recovery.
+CheckOnly reports these separately from assets whose bytes were downloaded.
+
 All final assets are downloaded and hashed again. Archive members are compared
 against the unchanged verifier output, and the tag, draft identity and asset
 set are checked again before publication. A failed operation leaves a draft,

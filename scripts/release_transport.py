@@ -97,6 +97,18 @@ def check_recovery(recovery):
          and re.fullmatch(r'[0-9a-f]{64}', recovery.get('old_checksums_sha256', '')), 'Invalid recovery identity')
     previous = base64.b64decode(recovery['old_checksums_base64'], validate=True)
     need(hashlib.sha256(previous).hexdigest() == recovery['old_checksums_sha256'], 'Previous checksum evidence differs')
+    ids, names = set(), set()
+    for asset in recovery.get('incomplete_assets', []):
+        need(set(asset) == {'id', 'name', 'size', 'state', 'digest'}
+             and type(asset['id']) is int and asset['id'] > 0
+             and asset['id'] != recovery['old_checksums_asset_id'] and asset['id'] not in ids
+             and type(asset['size']) is int and asset['size'] > 0
+             and asset['state'] == 'starter' and asset['digest'] is None,
+             'Invalid incomplete asset identity')
+        need(leaf(asset['name']) not in names and asset['name'] not in (SUMS, MANIFEST, PROOF, ARCHIVE),
+             'Invalid incomplete asset name')
+        ids.add(asset['id'])
+        names.add(asset['name'])
 
 
 def prepare(original, output, identity, recovery=None):
@@ -247,15 +259,17 @@ def draft_state(github, release_id, tag, commit):
     return state
 
 
-def asset_map(github, release_id):
+def asset_map(github, release_id, incomplete=()):
     result, ids = {}, set()
     for asset in github.assets(release_id):
         name = leaf(asset['name'])
+        entry = {key: asset.get(key) for key in ('id', 'name', 'size', 'state', 'digest')}
         need(type(asset['id']) is int and asset['id'] > 0 and type(asset['size']) is int and asset['size'] >= 0
-             and name not in result and asset['id'] not in ids and asset['state'] == 'uploaded',
+             and name not in result and asset['id'] not in ids
+             and (asset['state'] == 'uploaded' or entry in incomplete),
              'Ambiguous or unfinished draft asset')
         # Downloads change download_count. Compare content identity, not counters.
-        result[name] = {key: asset.get(key) for key in ('id', 'name', 'size', 'state', 'digest')}
+        result[name] = entry
         ids.add(asset['id'])
     return result
 
@@ -272,15 +286,22 @@ def publish(original, output, identity, github, notes, recovery=None, check_only
             return {'tag': tag, 'source_commit': commit, 'assets': expected, 'check_only': True, 'published': False}
         release_id = github.create(tag, commit, notes)
     draft_state(github, release_id, tag, commit)
-    initial = asset_map(github, release_id)
+    incomplete = recovery.get('incomplete_assets', []) if recovery else []
+    initial = asset_map(github, release_id, incomplete)
     need(set(initial) <= set(expected), 'Unexpected existing draft assets')
     print(f'Validating {len(initial)} existing assets for draft {release_id}', flush=True)
     replacement = None
+    starters = {}
     with tempfile.TemporaryDirectory(prefix='qcws-draft-verification-') as temporary:
         directory = Path(temporary)
         before = directory / 'before'
         before.mkdir()
         for name, asset in initial.items():
+            if asset['state'] == 'starter':
+                need(asset in incomplete and (Path(output) / name).stat().st_size == asset['size'],
+                     'Incomplete asset differs from verified source')
+                starters[name] = asset['id']
+                continue
             path = before / name
             github.download(asset, path)
             digest = sha(path)
@@ -292,15 +313,18 @@ def publish(original, output, identity, github, notes, recovery=None, check_only
                 replacement = asset['id']
         # Complete validation precedes any deletion or upload. No blanket clobber.
         draft_state(github, release_id, tag, commit)
-        need(asset_map(github, release_id) == initial, 'Draft assets changed during validation')
+        need(asset_map(github, release_id, incomplete) == initial, 'Draft assets changed during validation')
         if check_only:
             return {'release_id': release_id, 'tag': tag, 'source_commit': commit, 'assets': expected,
-                    'existing_assets_verified': sorted(initial), 'check_only': True, 'published': False}
+                    'existing_assets_verified': sorted(set(initial) - set(starters)),
+                    'incomplete_assets_identified': starters, 'check_only': True, 'published': False}
         if replacement is not None:
             github.delete(replacement)
+        for asset_id in starters.values():
+            github.delete(asset_id)
         print(f'Uploading verified missing assets, total physical inventory {len(expected)}', flush=True)
         for name in sorted(expected):
-            if name not in initial or (name == SUMS and replacement is not None):
+            if name not in initial or name in starters or (name == SUMS and replacement is not None):
                 github.upload(release_id, Path(output) / name)
         draft_state(github, release_id, tag, commit)
         uploaded = asset_map(github, release_id)
@@ -320,4 +344,4 @@ def publish(original, output, identity, github, notes, recovery=None, check_only
         need(final['draft'] is False and final['tag_name'] == tag and final['target_commitish'] == commit,
              'Publication did not complete')
     return {'release_id': release_id, 'tag': tag, 'source_commit': commit, 'assets': expected,
-            'replaced_checksum_asset_id': replacement, 'published': True}
+            'replaced_checksum_asset_id': replacement, 'replaced_incomplete_assets': starters, 'published': True}
