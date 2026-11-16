@@ -13,7 +13,7 @@ import warnings
 import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import package_inventory as assets
-import promote_release
+import publish_verified_release as publication
 import verify_release
 from process_cleanup import wait_owned
 import soak
@@ -49,38 +49,6 @@ class ProcessCleanupTests(unittest.TestCase):
         process = types.SimpleNamespace(is_running=lambda: next(states), status=lambda: 'running')
         with patch('process_cleanup.time.sleep'), patch('process_cleanup.time.monotonic', side_effect=[0, 0, 0.1]):
             self.assertEqual(wait_owned([process], 1), [])
-
-
-class EvidenceDownloadTests(unittest.TestCase):
-    def download(self, raw, metadata, digest=None):
-        endpoint = 'repos/owner/project/contents/release-evidence/windows11.json?ref=' + 'a' * 40
-        def command(argv, **kwargs):
-            self.assertEqual(argv[:3], ['gh', 'api', endpoint])
-            if '-H' not in argv or 'Accept: application/vnd.github.object+json' in argv:
-                self.assertTrue(kwargs.get('text'))
-                return types.SimpleNamespace(stdout=json.dumps(metadata))
-            self.assertIn('Accept: application/vnd.github.raw+json', argv)
-            self.assertFalse(kwargs.get('text'))
-            return types.SimpleNamespace(stdout=raw)
-        with patch.object(promote_release.subprocess, 'run', command):
-            return promote_release.evidence_bytes('repos/owner/project', 'release-evidence/windows11.json',
-                                                  'a' * 40, digest or hashlib.sha256(raw).hexdigest())
-
-    def test_full_soak_evidence_above_contents_inline_limit(self):
-        raw = ('{"samples":"' + '中文\\n' * 200000 + '"}\r\n').encode('utf-8')
-        self.assertGreater(len(raw), 1024 * 1024)
-        metadata = {'type': 'file', 'size': len(raw), 'encoding': 'none', 'content': ''}
-        self.assertEqual(self.download(raw, metadata), raw)
-
-    def test_evidence_length_digest_and_metadata_fail_closed(self):
-        raw = b'{"passed":true}\r\n'
-        metadata = {'type': 'file', 'size': len(raw), 'encoding': 'base64', 'content': ''}
-        for changed in ({**metadata, 'size': len(raw) + 1}, {**metadata, 'type': 'dir'},
-                        {**metadata, 'size': 101 * 1024**2}):
-            with self.subTest(changed=changed), self.assertRaises(RuntimeError):
-                self.download(raw, changed)
-        with self.assertRaisesRegex(RuntimeError, 'digest'):
-            self.download(raw, metadata, '0' * 64)
 
 
 class PackageInventoryTests(unittest.TestCase):
@@ -206,17 +174,8 @@ class PackageInventoryTests(unittest.TestCase):
                     entry.external_attr = mode << 16
                     output.writestr(entry,b'content')
                 with self.assertRaises(RuntimeError):
-                    promote_release.extract(archive,root/('output-'+str(number)))
+                    publication.extract(archive,root/('output-'+str(number)))
             self.assertFalse((root/'escape').exists())
-
-    def test_runtime_evidence_rejects_modified_library_hash(self):
-        import json
-        files = [{'path':'bin/library.dll','sha256':'a'*64}]
-        runtime = {'files':files,'sha256':hashlib.sha256(json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest()}
-        self.assertEqual(verify_release.checked_runtime(runtime),runtime)
-        files[0]['sha256'] = 'b'*64
-        with self.assertRaisesRegex(RuntimeError,'fingerprint mismatch'):
-            verify_release.checked_runtime(runtime)
 
     def test_attestation_requires_certificate_bound_candidate(self):
         import copy
@@ -228,10 +187,15 @@ class PackageInventoryTests(unittest.TestCase):
             'verifiedTimestamps': [{'type': 'timestamp'}],
             'statement': {'subject': [{'digest': {'sha256': 'b' * 64}}]}}}
         def validate(records):
-            return promote_release.attestation_match(records, 'b' * 64, 'owner/project', repository,
+            return publication.attestation_match(records, 'b' * 64, 'owner/project', repository,
                                                       'a' * 40, 'v0.1.0', 123, 2)
         self.assertEqual(validate([record]), [0])
-        for key, value in (('runInvocationURI', 'https://github.com/owner/project/actions/runs/123/attempts/1'),
+        previous = copy.deepcopy(record)
+        previous['verificationResult']['signature']['certificate']['runInvocationURI'] = 'https://github.com/owner/project/actions/runs/123/attempts/1'
+        self.assertEqual(validate([previous]), [0])
+        for key, value in (('runInvocationURI', 'https://github.com/owner/project/actions/runs/123/attempts/3'),
+                           ('runInvocationURI', 'https://github.com/owner/project/actions/runs/123/attempts/0'),
+                           ('runInvocationURI', 'https://github.com/owner/project/actions/runs/999/attempts/1'),
                            ('sourceRepositoryIdentifier', '303'), ('sourceRepositoryOwnerIdentifier', '303'),
                            ('sourceRepositoryDigest', 'c' * 40), ('sourceRepositoryRef', 'refs/heads/main')):
             altered = copy.deepcopy(record)
@@ -242,13 +206,170 @@ class PackageInventoryTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 validate([altered])
 
-    def test_windows11_gate_rejects_server_and_missing_host(self):
-        for host in ({}, {'system':'Windows','windows':{'product_type':3,'build':26100}},
-                     {'system':'Windows','windows':{'product_type':1,'build':19045}}):
-            with self.assertRaisesRegex(RuntimeError,'Windows 11'):
-                verify_release.require_windows11({'host':host})
-        verify_release.require_windows11({'host':{'system':'Windows',
-            'windows':{'product_type':1,'build':26100}}})
+class PublicationInputTests(unittest.TestCase):
+    commit, tag, run_id = 'a' * 40, 'v0.1.0', 123
+    repository = {'id': 101, 'owner': {'id': 202}}
+
+    def artifact_fixture(self):
+        values, raw = [], {}
+        for number, name in enumerate(publication.ARTIFACT_NAMES, 11):
+            archive = io.BytesIO()
+            with REAL_ZIP(archive, 'w') as target:
+                target.writestr('payload', name)
+            raw[number] = archive.getvalue()
+            values.append({'id': number, 'name': name, 'expired': False,
+                'digest': 'sha256:' + hashlib.sha256(raw[number]).hexdigest(),
+                'workflow_run': {'id': self.run_id, 'head_sha': self.commit,
+                                 'repository_id': 101, 'head_repository_id': 101}})
+        calls = []
+        def api(path):
+            self.assertEqual(path, '/actions/runs/123/artifacts?per_page=100&page=1')
+            return {'total_count': len(values), 'artifacts': values}
+        def command(args, **kwargs):
+            self.assertEqual(args[:2], ['api', '--allow-escape-sequences'])
+            artifact_id = int(args[2].split('/')[-2])
+            calls.append(artifact_id)
+            kwargs['stdout'].write(raw[artifact_id])
+        github = types.SimpleNamespace(base='repos/owner/project', api=api, command=command)
+        return values, raw, calls, github
+
+    def test_artifact_ids_and_digests_are_pinned_before_first_download(self):
+        values, raw, calls, github = self.artifact_fixture()
+        original = github.command
+        def replace_listing(args, **kwargs):
+            original(args, **kwargs)
+            values[1]['id'] = 999
+            values[1]['digest'] = 'sha256:' + '0' * 64
+        github.command = replace_listing
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / 'artifacts'
+            publication.download_artifacts(destination, github, self.repository, self.commit, self.run_id)
+            self.assertEqual(calls, [11, 12])
+            for name in publication.ARTIFACT_NAMES:
+                self.assertEqual((destination / name / 'payload').read_text(), name)
+
+    def test_invalid_artifact_origin_or_ambiguity_stops_before_download(self):
+        for change in (lambda v: v[0].update(expired=True),
+                       lambda v: v[0].update(digest='invalid'),
+                       lambda v: v[0]['workflow_run'].update(id=999),
+                       lambda v: v[0]['workflow_run'].update(head_sha='b' * 40),
+                       lambda v: v[0]['workflow_run'].update(repository_id=999),
+                       lambda v: v[0]['workflow_run'].update(head_repository_id=999),
+                       lambda v: v.append(v[0]),
+                       lambda v: v.pop()):
+            values, raw, calls, github = self.artifact_fixture()
+            change(values)
+            with tempfile.TemporaryDirectory() as temporary, self.assertRaises(RuntimeError):
+                publication.download_artifacts(Path(temporary) / 'artifacts', github, self.repository,
+                                               self.commit, self.run_id)
+            self.assertEqual(calls, [])
+
+    def test_download_hash_is_checked_before_extraction(self):
+        values, raw, calls, github = self.artifact_fixture()
+        raw[11] += b'changed'
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / 'artifacts'
+            with self.assertRaisesRegex(RuntimeError, 'digest mismatch'):
+                publication.download_artifacts(destination, github, self.repository, self.commit, self.run_id)
+            self.assertFalse((destination / publication.ARTIFACT_NAMES[0]).exists())
+
+    def test_same_run_in_progress_is_valid_but_foreign_sources_fail(self):
+        run = {'id': self.run_id, 'head_sha': self.commit, 'event': 'push', 'run_attempt': 2,
+               'status': 'in_progress', 'workflow_id': 77, 'repository': {'id': 101},
+               'head_repository': {'id': 101}}
+        data = {'': self.repository, '/actions/runs/123': run,
+                '/actions/workflows/77': {'path': '.github/workflows/ci.yml'}}
+        github = types.SimpleNamespace(api=lambda path: data[path], tag_commit=lambda tag: self.commit)
+        self.assertEqual(publication.run_identity(github, self.commit, self.tag, self.run_id, 2), self.repository)
+        for name, value in (('event', 'pull_request'), ('head_sha', 'b' * 40), ('run_attempt', 3)):
+            original = run[name]
+            run[name] = value
+            with self.assertRaises(RuntimeError):
+                publication.run_identity(github, self.commit, self.tag, self.run_id, 2)
+            run[name] = original
+        for attempt in (0, -1, True):
+            with self.assertRaises(RuntimeError):
+                publication.run_identity(github, self.commit, self.tag, self.run_id, attempt)
+
+    def test_attestation_cli_pins_workflow_signer_and_exact_package_digest(self):
+        import json
+        commands = []
+        def command(args, **kwargs):
+            commands.append(args)
+            path = Path(args[2])
+            certificate = {'runInvocationURI': 'https://github.com/owner/project/actions/runs/123/attempts/1',
+                'sourceRepositoryIdentifier': '101', 'sourceRepositoryOwnerIdentifier': '202',
+                'sourceRepositoryDigest': self.commit, 'sourceRepositoryRef': 'refs/tags/' + self.tag}
+            record = {'verificationResult': {'signature': {'certificate': certificate}, 'verifiedTimestamps': [1],
+                'statement': {'subject': [{'digest': {'sha256': verify_release.sha(path)}}]}}}
+            return types.SimpleNamespace(stdout=json.dumps([record]))
+        github = types.SimpleNamespace(repository='owner/project', command=command)
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            for suffix in ('.zip', '.msi', '.deb'):
+                (output / ('package' + suffix)).write_bytes(suffix.encode())
+            publication.verify_attestations(output, github, self.repository, self.commit, self.tag, self.run_id, 2)
+            self.assertEqual(len(list(output.iterdir())), 3)
+        self.assertEqual(len(commands), 3)
+        for args in commands:
+            self.assertIn('--deny-self-hosted-runners', args)
+            self.assertEqual(args[args.index('--cert-identity') + 1],
+                             'https://github.com/owner/project/.github/workflows/ci.yml@refs/tags/v0.1.0')
+            self.assertEqual(args[args.index('--signer-digest') + 1], self.commit)
+            self.assertEqual(args[args.index('--source-digest') + 1], self.commit)
+
+    def test_cli_verification_failure_never_calls_publication(self):
+        import os
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = root / 'checkout'
+            checkout.mkdir()
+            argv = ['publish_verified_release.py', '--ArtifactsRoot', str(root / 'artifacts'),
+                    '--Tag', self.tag, '--Commit', self.commit, '--Output', str(root / 'release'), '--CheckOnly']
+            env = {'GITHUB_RUN_ID': str(self.run_id), 'GITHUB_RUN_ATTEMPT': '2',
+                   'GITHUB_SHA': self.commit, 'GITHUB_REF': 'refs/tags/' + self.tag,
+                   'GITHUB_EVENT_NAME': 'push', 'GITHUB_REPOSITORY': 'owner/project'}
+            with patch.object(sys, 'argv', argv), patch.dict(os.environ, env), \
+                    patch.object(publication, 'ROOT', checkout), \
+                    patch.object(publication.subprocess, 'check_output', side_effect=[self.commit, b'']), \
+                    patch.object(publication, 'run_identity', return_value=self.repository), \
+                    patch.object(publication, 'download_artifacts'), \
+                    patch.object(publication, 'assemble', side_effect=RuntimeError('bad package')), \
+                    patch.object(publication, 'verify_attestations') as attestation, \
+                    patch.object(publication.transport, 'publish') as publish:
+                with self.assertRaisesRegex(RuntimeError, 'bad package'):
+                    publication.main()
+                attestation.assert_not_called()
+                publish.assert_not_called()
+
+    def test_cli_attestation_failure_stops_and_check_only_reaches_transport(self):
+        import os
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = root / 'checkout'
+            checkout.mkdir()
+            argv = ['publish_verified_release.py', '--ArtifactsRoot', str(root / 'artifacts'),
+                    '--Tag', self.tag, '--Commit', self.commit, '--Output', str(root / 'release'), '--CheckOnly']
+            env = {'GITHUB_RUN_ID': str(self.run_id), 'GITHUB_RUN_ATTEMPT': '2',
+                   'GITHUB_SHA': self.commit, 'GITHUB_REF': 'refs/tags/' + self.tag,
+                   'GITHUB_EVENT_NAME': 'push', 'GITHUB_REPOSITORY': 'owner/project'}
+            for failure in (RuntimeError('unsigned package'), None):
+                with patch.object(sys, 'argv', argv), patch.dict(os.environ, env), \
+                        patch.object(publication, 'ROOT', checkout), \
+                        patch.object(publication.subprocess, 'check_output', side_effect=[self.commit, b'']), \
+                        patch.object(publication, 'run_identity', return_value=self.repository), \
+                        patch.object(publication, 'download_artifacts'), \
+                        patch.object(publication, 'assemble'), \
+                        patch.object(publication, 'verify_attestations', side_effect=failure), \
+                        patch.object(publication.transport, 'publish', return_value={'tag': self.tag}) as publish, \
+                        patch('builtins.print'):
+                    if failure:
+                        with self.assertRaisesRegex(RuntimeError, 'unsigned package'):
+                            publication.main()
+                        publish.assert_not_called()
+                    else:
+                        publication.main()
+                        self.assertTrue(publish.call_args.kwargs['check_only'])
 
 
 if __name__ == '__main__':

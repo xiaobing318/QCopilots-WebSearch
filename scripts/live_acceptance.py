@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
 from soak import digest, environment, hidden_console, stop_process
 from runtime_evidence import fingerprint
-from public_evidence import load_queries, navigation_summary
+from public_evidence import load_queries, navigation_summary, verify_public_queries
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -301,6 +301,11 @@ def main():
         check(report.get('cleanup',{}).get('passed') is True,'local_cleanup')
         check(fingerprint(args.Executable) == report['runtime'],'local_runtime_changed')
         check(digest(args.Queries) == report['queries_sha256'],'local_queries_changed')
+        try:
+            report['navigation'] = navigation_summary(report['queries'])
+            verify_public_queries(report,args.Queries)
+        except (KeyError, TypeError, ValueError, RuntimeError):
+            raise Problem('local_public_queries') from None
         passed = len(report['queries']) == 60 and report['closure']['completed']
         report.update(minimum_live_evidence_passed=passed,outcome='completed' if passed else 'inconclusive')
         code = 0 if passed else 2
@@ -327,7 +332,12 @@ def main():
         report['summary'] = summary(rows)
         report['summary'].update(quality_threshold_applied=False,
             languages={lang:summary([row for row in rows if row['request']['language']==lang]) for lang in ('zh-CN','en')})
-        report['navigation'] = navigation_summary(rows)
+        if 'navigation' not in report:
+            try:
+                report['navigation'] = navigation_summary(rows)
+            except (KeyError, TypeError, ValueError, RuntimeError):
+                report.update(error='local_public_queries',outcome='local_failure',minimum_live_evidence_passed=False)
+                code = 1
         output.parent.mkdir(parents=True,exist_ok=True)
         text = json.dumps(report,ensure_ascii=False,indent=2,allow_nan=False).replace(token,'[REDACTED]')
         with tempfile.NamedTemporaryFile(mode='w',encoding='utf-8',dir=output.parent,

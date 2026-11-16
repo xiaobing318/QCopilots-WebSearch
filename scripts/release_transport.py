@@ -1,20 +1,13 @@
-"""Preserve logical evidence while transporting nonempty GitHub Release assets."""
+"""Publish verified distribution files without overwriting existing assets."""
 from __future__ import annotations
 import hashlib
-import base64
 import json
 from pathlib import Path
 import re
-import shutil
-import stat
 import subprocess
 import tempfile
 from urllib.parse import quote
-import zipfile
 
-ARCHIVE = 'quality-evidence.zip'
-PROOF = 'publication-proof.json'
-MANIFEST = 'release-manifest.json'
 SUMS = 'SHA256SUMS'
 
 
@@ -33,21 +26,19 @@ def leaf(name):
     return name
 
 
-def read(path):
-    return json.loads(Path(path).read_text('utf-8'))
-
-
-def write(path, value):
-    Path(path).write_text(json.dumps(value, sort_keys=True, indent=2) + '\n', encoding='utf-8', newline='\n')
-
-
 def inventory(folder):
-    paths = list(Path(folder).iterdir())
-    need(all(p.is_file() and not p.is_symlink() for p in paths), 'Unexpected asset directory or link')
+    folder = Path(folder)
+    need(folder.is_dir() and not folder.is_symlink(), 'Expected a distribution directory')
+    paths = list(folder.iterdir())
+    need(paths and all(p.is_file() and not p.is_symlink() and p.stat().st_size > 0 for p in paths),
+         'Distribution assets must be regular, nonempty files')
     return {leaf(p.name): sha(p) for p in sorted(paths)}
 
 
 def checksums(folder):
+    folder = Path(folder)
+    actual = inventory(folder)
+    need(SUMS in actual, 'Missing SHA256SUMS')
     result = {}
     for line in (folder / SUMS).read_text('utf-8').splitlines():
         match = re.fullmatch(r'([0-9a-f]{64})  (.+)', line)
@@ -55,136 +46,8 @@ def checksums(folder):
         name = leaf(match[2])
         need(name not in result and name != SUMS, 'Duplicate or self-referencing checksum')
         result[name] = match[1]
-    actual = inventory(folder)
-    need(result == {k: v for k, v in actual.items() if k != SUMS}, 'Checksum inventory mismatch')
+    need(result and result == {k: v for k, v in actual.items() if k != SUMS}, 'Checksum inventory mismatch')
     return actual
-
-
-def logical_inventory(original):
-    original = Path(original)
-    files = checksums(original)
-    manifest = read(original / MANIFEST)
-    need(manifest['assets'] == {k: v for k, v in files.items() if k not in (MANIFEST, SUMS)},
-         'Original manifest differs from verified files')
-    quality = read(original / 'quality-quality.json')
-    names = {'quality-quality.json'}
-    for member, digest in quality['files'].items():
-        name = 'quality-' + leaf(member)
-        need(name not in names and files.get(name) == digest, 'Quality member binding mismatch')
-        names.add(name)
-    need(names == {n for n in files if n.startswith('quality-')}, 'Unlisted quality asset')
-    empty = {name for name in files if (original / name).stat().st_size == 0}
-    need(empty <= names and all(name.endswith('.log') for name in empty), 'Unexpected empty non-log asset')
-    need(not ({ARCHIVE, PROOF} & set(files)), 'Reserved publication names already present')
-    return files, manifest, names, empty
-
-
-def tools_identity(root, expected=None):
-    root = Path(root)
-    commit = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
-    need(re.fullmatch(r'[0-9a-f]{40}', commit) and (expected is None or expected == commit), 'Tool commit differs')
-    need(not subprocess.check_output(['git', '-C', str(root), 'status', '--porcelain']), 'Tool checkout is dirty')
-    names = ('scripts/release_transport.py', 'scripts/publish_verified_release.py', 'scripts/promote_release.py',
-             '.github/workflows/release.yml')
-    return {'commit': commit, 'files': {name: sha(root / name) for name in names}}
-
-
-def check_recovery(recovery):
-    if recovery is None:
-        return
-    need(type(recovery.get('draft_id')) is int and recovery['draft_id'] > 0
-         and type(recovery.get('old_checksums_asset_id')) is int and recovery['old_checksums_asset_id'] > 0
-         and re.fullmatch(r'[0-9a-f]{64}', recovery.get('old_checksums_sha256', '')), 'Invalid recovery identity')
-    previous = base64.b64decode(recovery['old_checksums_base64'], validate=True)
-    need(hashlib.sha256(previous).hexdigest() == recovery['old_checksums_sha256'], 'Previous checksum evidence differs')
-    ids, names = set(), set()
-    for asset in recovery.get('incomplete_assets', []):
-        need(set(asset) == {'id', 'name', 'size', 'state', 'digest'}
-             and type(asset['id']) is int and asset['id'] > 0
-             and asset['id'] != recovery['old_checksums_asset_id'] and asset['id'] not in ids
-             and type(asset['size']) is int and asset['size'] > 0
-             and asset['state'] == 'starter' and asset['digest'] is None,
-             'Invalid incomplete asset identity')
-        need(leaf(asset['name']) not in names and asset['name'] not in (SUMS, MANIFEST, PROOF, ARCHIVE),
-             'Invalid incomplete asset name')
-        ids.add(asset['id'])
-        names.add(asset['name'])
-
-
-def prepare(original, output, identity, recovery=None):
-    """Keep the verifier output intact and create a separate physical layout."""
-    original, output = Path(original), Path(output)
-    check_recovery(recovery)
-    files, manifest, quality, empty = logical_inventory(original)
-    need(not output.exists(), 'Publication output must be new')
-    need(output.resolve() != original.resolve() and not output.resolve().is_relative_to(original.resolve()),
-         'Publication output must be outside the original directory')
-    output.mkdir(parents=True)
-    for name in files:
-        if name not in empty | {MANIFEST, SUMS}:
-            shutil.copyfile(original / name, output / name)
-    members = {name: (original / name).read_bytes() for name in sorted(quality | {MANIFEST, SUMS})}
-    with zipfile.ZipFile(output / ARCHIVE, 'x', compression=zipfile.ZIP_STORED) as archive:
-        for name, raw in sorted(members.items()):
-            item = zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0))
-            item.create_system = 3
-            item.external_attr = (stat.S_IFREG | 0o644) << 16
-            archive.writestr(item, raw)
-    proof = {'schema_version': 1, 'source_commit': manifest['source_commit'], 'tag': manifest['tag'],
-             'candidate_run_id': manifest['candidate_run_id'], 'tools': identity,
-             'recovery': recovery, 'logical_files': files, 'archive': ARCHIVE,
-             'archive_sha256': sha(output / ARCHIVE),
-             'archive_members': {name: {'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
-                                 for name, raw in sorted(members.items())},
-             'archived_empty_logs': sorted(empty)}
-    write(output / PROOF, proof)
-    physical = {**manifest, 'schema_version': 2, 'logical_manifest': {'archive': ARCHIVE, 'member': MANIFEST,
-                  'sha256': files[MANIFEST]}, 'archived_empty_logs': {n: ARCHIVE + '/' + n for n in sorted(empty)},
-                'assets': inventory(output)}
-    write(output / MANIFEST, physical)
-    (output / SUMS).write_text(''.join(f'{digest}  {name}\n' for name, digest in inventory(output).items()),
-                              encoding='utf-8', newline='\n')
-    verify(original, output, identity, recovery)
-    return output
-
-
-def verify(original, output, identity, recovery=None):
-    """Check every logical input byte, including empty archive members."""
-    original, output = Path(original), Path(output)
-    check_recovery(recovery)
-    files, original_manifest, quality, empty = logical_inventory(original)
-    physical = checksums(output)
-    expected = (set(files) - empty) | {ARCHIVE, PROOF}
-    need(set(physical) == expected and all((output / n).stat().st_size > 0 for n in physical),
-         'Physical asset set must be complete and nonempty')
-    for name in set(files) - empty - {MANIFEST, SUMS}:
-        need(physical[name] == files[name], 'Original asset changed: ' + name)
-    manifest, proof = read(output / MANIFEST), read(output / PROOF)
-    need(manifest['assets'] == {k: v for k, v in physical.items() if k not in (MANIFEST, SUMS)},
-         'Physical manifest mismatch')
-    need(manifest['schema_version'] == 2 and all(manifest[k] == v for k, v in original_manifest.items()
-         if k not in ('assets', 'schema_version')), 'Manifest identity changed')
-    need(manifest['logical_manifest'] == {'archive': ARCHIVE, 'member': MANIFEST, 'sha256': files[MANIFEST]}
-         and manifest['archived_empty_logs'] == {n: ARCHIVE + '/' + n for n in sorted(empty)}, 'Logical mapping mismatch')
-    need(proof['logical_files'] == files and proof['tools'] == identity and proof['recovery'] == recovery
-         and proof['archive'] == ARCHIVE and proof['archive_sha256'] == physical[ARCHIVE]
-         and proof['archived_empty_logs'] == sorted(empty), 'Publication proof mismatch')
-    for key in ('source_commit', 'tag', 'candidate_run_id'):
-        need(proof[key] == original_manifest[key], 'Publication identity mismatch')
-    expected_members = quality | {MANIFEST, SUMS}
-    need(set(proof['archive_members']) == expected_members, 'Archive proof member set differs')
-    with zipfile.ZipFile(output / ARCHIVE) as archive:
-        entries = archive.infolist()
-        need(len(entries) == len(expected_members) and {i.filename for i in entries} == expected_members,
-             'Archive has missing, duplicate or unexpected members')
-        for item in entries:
-            raw = (original / leaf(item.filename)).read_bytes()
-            need(stat.S_IFMT(item.external_attr >> 16) == stat.S_IFREG and item.file_size == len(raw)
-                 and item.compress_type == zipfile.ZIP_STORED and archive.read(item) == raw,
-                 'Archive member bytes or type changed')
-            need(proof['archive_members'][item.filename] == {'bytes': len(raw), 'sha256': files[item.filename]},
-                 'Archive member digest differs')
-    return physical
 
 
 class GitHub:
@@ -208,6 +71,16 @@ class GitHub:
             obj = self.api('/git/tags/' + obj['sha'])['object']
         raise RuntimeError('Tag nesting limit')
 
+    def find_release(self, tag):
+        found = []
+        for page in range(1, 101):
+            batch = self.api(f'/releases?per_page=100&page={page}')
+            found.extend(item for item in batch if item['tag_name'] == tag)
+            need(len(found) <= 1, 'Multiple releases use the requested tag')
+            if len(batch) < 100:
+                return found[0] if found else None
+        raise RuntimeError('Release pagination limit')
+
     def release(self, release_id):
         return self.api('/releases/' + str(release_id))
 
@@ -226,21 +99,13 @@ class GitHub:
                           '-H', 'Accept: application/octet-stream'], stdout=stream)
 
     def create(self, tag, commit, notes):
-        for page in range(1, 101):
-            existing = self.api(f'/releases?per_page=100&page={page}')
-            need(not any(r['tag_name'] == tag for r in existing), 'Release already exists, use explicit draft recovery')
-            if len(existing) < 100:
-                break
-        else:
-            raise RuntimeError('Release pagination limit')
+        need(self.find_release(tag) is None, 'Release appeared before draft creation, retry without overwriting')
         return self.api('/releases', '--method', 'POST', '-f', 'tag_name=' + tag,
                         '-f', 'target_commitish=' + commit, '-F', 'draft=true', '-f', 'name=' + tag,
                         '-f', 'body=' + Path(notes).read_text('utf-8'))['id']
 
-    def delete(self, asset_id):
-        self.command(['api', '--method', 'DELETE', self.base + '/releases/assets/' + str(asset_id)])
-
     def upload(self, release_id, path):
+        path = Path(path)
         url = (f'https://uploads.github.com/repos/{self.repository}/releases/{release_id}/assets?name='
                + quote(path.name, safe=''))
         uploaded = json.loads(self.command(['api', url, '--method', 'POST', '-H', 'Content-Type: application/octet-stream',
@@ -251,97 +116,102 @@ class GitHub:
         self.api('/releases/' + str(release_id), '--method', 'PATCH', '-F', 'draft=false', '-f', 'make_latest=true')
 
 
-def draft_state(github, release_id, tag, commit):
+def release_state(github, release_id, tag, commit, draft=None):
     state = github.release(release_id)
-    need(state['id'] == release_id and state['draft'] is True and state.get('published_at') is None
-         and state['tag_name'] == tag and state['target_commitish'] == commit, 'Draft identity changed')
+    need(type(release_id) is int and release_id > 0 and state['id'] == release_id
+         and type(state['draft']) is bool and state['tag_name'] == tag
+         and state['target_commitish'] == commit, 'Release identity changed')
+    need((state['draft'] and state.get('published_at') is None)
+         or (not state['draft'] and bool(state.get('published_at'))), 'Inconsistent publication state')
+    need(draft is None or state['draft'] is draft, 'Release publication state changed')
     need(github.tag_commit(tag) == commit, 'Tag changed')
     return state
 
 
-def asset_map(github, release_id, incomplete=()):
+def asset_map(github, release_id):
     result, ids = {}, set()
     for asset in github.assets(release_id):
         name = leaf(asset['name'])
-        entry = {key: asset.get(key) for key in ('id', 'name', 'size', 'state', 'digest')}
         need(type(asset['id']) is int and asset['id'] > 0 and type(asset['size']) is int and asset['size'] >= 0
-             and name not in result and asset['id'] not in ids
-             and (asset['state'] == 'uploaded' or entry in incomplete),
-             'Ambiguous or unfinished draft asset')
-        # Downloads change download_count. Compare content identity, not counters.
-        result[name] = entry
+             and name not in result and asset['id'] not in ids, f'Ambiguous asset in release {release_id}: {name}')
+        need(asset['state'] == 'uploaded',
+             f'Unfinished asset in release {release_id}: {asset["id"]} ({name}), state={asset["state"]}')
+        need(asset['size'] > 0, f'Empty asset in release {release_id}: {asset["id"]} ({name})')
+        # Download counters change while verifying. Compare content identity only.
+        result[name] = {key: asset.get(key) for key in ('id', 'name', 'size', 'state', 'digest')}
         ids.add(asset['id'])
     return result
 
 
-def publish(original, output, identity, github, notes, recovery=None, check_only=False):
-    expected = verify(original, output, identity, recovery)
-    manifest = read(Path(output) / MANIFEST)
-    tag, commit = manifest['tag'], manifest['source_commit']
-    need(github.tag_commit(tag) == commit, 'Tag changed before draft creation')
-    if recovery:
-        release_id = recovery['draft_id']
-    else:
+def verify_remote(github, assets, expected, folder):
+    folder = Path(folder)
+    folder.mkdir()
+    for name, asset in assets.items():
+        path = folder / name
+        github.download(asset, path)
+        need(path.stat().st_size == asset['size'] and sha(path) == expected[name],
+             'Remote asset bytes differ: ' + name)
+
+
+def publish(output, github, tag, commit, notes, check_only=False):
+    """Reuse matching assets, verify all bytes, and publish only a complete release."""
+    need(re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', tag), 'Invalid release tag')
+    need(re.fullmatch(r'[0-9a-f]{40}', commit), 'Invalid source commit')
+    output = Path(output)
+    expected = checksums(output)
+    need(github.tag_commit(tag) == commit, 'Tag changed before publication')
+    state = github.find_release(tag)
+    result = {'tag': tag, 'source_commit': commit, 'assets': expected, 'check_only': check_only, 'published': False}
+    if state is None:
         if check_only:
-            return {'tag': tag, 'source_commit': commit, 'assets': expected, 'check_only': True, 'published': False}
+            return result
         release_id = github.create(tag, commit, notes)
-    draft_state(github, release_id, tag, commit)
-    incomplete = recovery.get('incomplete_assets', []) if recovery else []
-    initial = asset_map(github, release_id, incomplete)
-    need(set(initial) <= set(expected), 'Unexpected existing draft assets')
-    print(f'Validating {len(initial)} existing assets for draft {release_id}', flush=True)
-    replacement = None
-    starters = {}
-    with tempfile.TemporaryDirectory(prefix='qcws-draft-verification-') as temporary:
+        state = release_state(github, release_id, tag, commit, draft=True)
+    else:
+        release_id = state['id']
+        state = release_state(github, release_id, tag, commit)
+    result['release_id'] = release_id
+    initial = asset_map(github, release_id)
+    need(set(initial) <= set(expected), 'Unexpected existing release assets')
+    if not state['draft']:
+        need(set(initial) == set(expected), 'Published release is incomplete')
+    with tempfile.TemporaryDirectory(prefix='qcws-release-verification-') as temporary:
         directory = Path(temporary)
-        before = directory / 'before'
-        before.mkdir()
-        for name, asset in initial.items():
-            if asset['state'] == 'starter':
-                need(asset in incomplete and (Path(output) / name).stat().st_size == asset['size'],
-                     'Incomplete asset differs from verified source')
-                starters[name] = asset['id']
-                continue
-            path = before / name
-            github.download(asset, path)
-            digest = sha(path)
-            need(path.stat().st_size == asset['size'], 'Existing asset size mismatch')
-            if digest != expected[name]:
-                need(recovery and name == SUMS and asset['id'] == recovery['old_checksums_asset_id']
-                     and digest == recovery['old_checksums_sha256'],
-                     'Existing asset bytes differ: ' + name)
-                replacement = asset['id']
-        # Complete validation precedes any deletion or upload. No blanket clobber.
-        draft_state(github, release_id, tag, commit)
-        need(asset_map(github, release_id, incomplete) == initial, 'Draft assets changed during validation')
-        if check_only:
-            return {'release_id': release_id, 'tag': tag, 'source_commit': commit, 'assets': expected,
-                    'existing_assets_verified': sorted(set(initial) - set(starters)),
-                    'incomplete_assets_identified': starters, 'check_only': True, 'published': False}
-        if replacement is not None:
-            github.delete(replacement)
-        for asset_id in starters.values():
-            github.delete(asset_id)
-        print(f'Uploading verified missing assets, total physical inventory {len(expected)}', flush=True)
-        for name in sorted(expected):
-            if name not in initial or name in starters or (name == SUMS and replacement is not None):
-                github.upload(release_id, Path(output) / name)
-        draft_state(github, release_id, tag, commit)
+        verify_remote(github, initial, expected, directory / 'existing')
+        release_state(github, release_id, tag, commit, draft=state['draft'])
+        need(asset_map(github, release_id) == initial, 'Release assets changed during validation')
+        result['reused_assets'] = sorted(initial)
+        if check_only or not state['draft']:
+            result['published'] = not state['draft']
+            return result
+        # Nothing may be overwritten. A mismatched or unfinished upload requires
+        # explicit operator repair, and cannot authorize deleting unrelated files.
+        for name in sorted(set(expected) - set(initial)):
+            need((output / name).is_file() and not (output / name).is_symlink()
+                 and sha(output / name) == expected[name], 'Local distribution changed: ' + name)
+            release_state(github, release_id, tag, commit, draft=True)
+            github.upload(release_id, output / name)
+        release_state(github, release_id, tag, commit, draft=True)
         uploaded = asset_map(github, release_id)
         need(set(uploaded) == set(expected), 'Uploaded asset set differs')
-        downloaded = directory / 'downloaded'
-        downloaded.mkdir()
-        print(f'Downloading and verifying all {len(uploaded)} draft assets', flush=True)
-        for name, asset in uploaded.items():
-            github.download(asset, downloaded / name)
-            need((downloaded / name).stat().st_size == asset['size'] and sha(downloaded / name) == expected[name],
-                 'Uploaded asset bytes differ: ' + name)
-        verify(original, downloaded, identity, recovery)
-        draft_state(github, release_id, tag, commit)
-        need(asset_map(github, release_id) == uploaded, 'Draft assets changed before publication')
-        github.publish(release_id)
-        final = github.release(release_id)
-        need(final['draft'] is False and final['tag_name'] == tag and final['target_commitish'] == commit,
-             'Publication did not complete')
-    return {'release_id': release_id, 'tag': tag, 'source_commit': commit, 'assets': expected,
-            'replaced_checksum_asset_id': replacement, 'replaced_incomplete_assets': starters, 'published': True}
+        verify_remote(github, uploaded, expected, directory / 'uploaded')
+        release_state(github, release_id, tag, commit, draft=True)
+        need(asset_map(github, release_id) == uploaded, 'Release assets changed before publication')
+        try:
+            github.publish(release_id)
+        except Exception:
+            # A timeout can follow a successful PATCH. Inspect remote state and
+            # bytes before deciding whether the operation actually failed.
+            final = release_state(github, release_id, tag, commit)
+            if final['draft']:
+                raise
+            current = asset_map(github, release_id)
+            need(current == uploaded, 'Release assets changed after publication')
+            verify_remote(github, current, expected, directory / 'recovered')
+            release_state(github, release_id, tag, commit, draft=False)
+            need(asset_map(github, release_id) == current, 'Release assets changed during recovery')
+        else:
+            release_state(github, release_id, tag, commit, draft=False)
+            need(asset_map(github, release_id) == uploaded, 'Release assets changed after publication')
+    result['published'] = True
+    return result

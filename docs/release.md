@@ -1,165 +1,124 @@
-# Release gates
+# Release workflow
 
-`publish` in the build pipeline creates local packages. It does not upload a
-release. A `vMAJOR.MINOR.PATCH` tag triggers CI on that exact commit, including
-full stability and live public-search acceptance. Ordinary push/PR builds use
-short deterministic checks. Manual CI dispatch can enable the same release checks.
-The stability gate runs cold and hot caches for five minutes each on both target
-platforms, with five clients and a total load of two requests per second. Request
-success, latency, memory, health responsiveness and shutdown thresholds remain
-the same. This acceptance duration does not establish multi-hour endurance.
+Pushing a `vMAJOR.MINOR.PATCH` tag runs the Windows and Ubuntu build matrix,
+automated tests, package checks and build attestations, then publishes a GitHub
+Release. The tag must match the project version. Branch and pull-request jobs
+do not publish. Manual dispatch runs checks only, even when a tag is selected.
+The local build pipeline's `publish` stage creates packages without uploading
+them.
 
-Linux also builds an isolated Clang 21 configuration with ASan and UBSan, runs
-all discovered tests, analyzes every first-party C++ translation unit with
-clang-tidy, and runs HTML, URL and JSON-RPC fuzz campaigns. Ordinary CI uses
-60 seconds per campaign. Full and tag candidates use 300 seconds. The retained
-logs, compiler flags, seed hashes and source snapshot are checked at promotion.
-Manual dispatch can select `FuzzSeconds: 300` independently to rerun a failed
-quality campaign without repeating an already completed stability workload.
-This does not turn the short stability evidence into full release acceptance.
-The minimal Ubuntu bootstrap check starts from a pinned image without Python.
+## Required checks
 
-Windows Server CI does not prove Windows 11 installation behavior. Download the
-candidate ZIP and MSI from the successful CI run. Keep their exact bytes. On a
-clean Windows 11 desktop, validate the portable ZIP in a fresh path containing
-spaces using `scripts/acceptance_windows_zip.py --Package <ZIP> --PackageSHA256
-<SHA256> --Output <report.json>`. This runs the official SDK from the moved tree
-with only Windows system directories on PATH. Run the full stability command
-on the same candidate runtime, and execute
-`AcceptWindowsMsi.ps1` from an elevated 64-bit PowerShell session. Supply a lower
-version baseline MSI using the same product upgrade identity. The script refuses
-pre-existing products, services, installation/data directories or occupied ports.
-It exercises installation, failed transactions, upgrade, retained configuration,
-service identity, shutdown and uninstall, and cleans only its own state.
-The baseline's `build-info-windows-x64.json` must be adjacent to its MSI, or
-provided with `--BaselineBuildInfo`. Reports bind the actual baseline package,
-source commit and dirty status, PowerShell version and edition, and SHA-256 of
-the acceptance script. Local upgrade fixtures may be dirty and are explicitly
-recorded as such. They are never promoted as release artifacts. The verifier
-requires the script from the tagged release source and a lower baseline version
-with the same upgrade identity.
+Both platform jobs build, run CTest and the official MCP SDK tests, and package
+the same source commit. Windows CI uses Windows Server 2022 and Ubuntu CI uses
+Ubuntu 26.04. The Windows job checks the final ZIP from a relocated directory
+with only system directories on PATH. It also tests MSI installation, failed
+transactions, upgrade, configuration preservation, service identity, shutdown
+and uninstall on the disposable runner. This is automated Windows Server
+coverage, not a claim that Windows 11 desktop behavior has been exercised.
 
-The external evidence JSON is maintained under `release-evidence/` in a later
-repository commit. It contains these fields:
+The Linux job tests DEB installation, upgrade and recovery by baseline reinstall,
+Caddy HTTPS behavior, and bootstrap in a minimal Ubuntu image without Python.
+Installer baselines use version `0.0.1` built from the same source. They are
+test fixtures rather than earlier supported releases.
 
-| Field | Meaning |
+Tags run cold and hot stability phases for 300 seconds each on both platforms.
+The controlled 100 ms upstream fixture serves five clients at a total of two
+requests per second. Each phase requires all normal requests to succeed,
+business p95 latency at most one second, health p95 at most 200 ms, RSS at most
+512 MiB and process shutdown within ten seconds. This duration does not establish
+multi-hour endurance. Ordinary jobs use ten-second smoke phases. Manual
+`FullStability` enables the full phases on both platforms.
+
+Linux quality checks build with Clang 21, ASan and UBSan, run all discovered
+tests, analyze every first-party C++ translation unit with clang-tidy, and fuzz
+HTML, URL and JSON-RPC parsing. Instrumentation, test coverage and actual fuzz
+duration are checked during execution. Ordinary CI uses 60 seconds per campaign.
+Tags and `FullStability` use 300 seconds. Manual dispatch can also select
+`FuzzSeconds: 300` without enabling the longer stability workload.
+
+Tags run the real public-search check through the pinned SearXNG deployment.
+Manual dispatch can enable it with `LivePublicSearch`. All 60 fixed queries
+(30 Chinese and 30 English) must be attempted, with at least one successful
+search/open/find flow. Engine failures and empty results remain visible without
+a minimum search-success-rate requirement. Service errors, invalid contracts
+or failed cleanup fail the check. Upstream availability can therefore prevent
+a tag's checks from completing successfully.
+
+The query corpus includes four navigation queries per language with official
+domains declared in advance and no domain or time filter. The check computes
+first matching domain rank, top-1/top-5 counts and MRR@5, with zero credit for
+empty or failed results. These observations are not human relevance judgments
+and impose no ranking-quality threshold. The Caddy test uses a controlled local
+provider and does not stand in for this public-search check.
+
+## Distribution files
+
+The public Release contains ten assets:
+
+| Contents | Count |
 | --- | --- |
-| `schema_version` | `1` |
-| `source_commit`, `candidate_run_id` | Exact tagged source and successful CI run |
-| `package_sha256` | Complete Windows ZIP/MSI map copied from candidate build-info |
-| `msi_report` | Original `AcceptWindowsMsi.ps1` result JSON |
-| `portable_report` | Original `acceptance_windows_zip.py` report, including the official SDK results |
-| `soak_report` | Original full cold/hot Windows 11 stability report |
-| `delivery_gates` | Recorded human review and QGIS integration signoff |
+| Windows ZIP and MSI, Ubuntu DEB | 3 |
+| CycloneDX SBOM for each package | 3 |
+| Project source, matching Qt source and Windows OpenSSL source archives | 3 |
+| Combined `SHA256SUMS` | 1 |
 
-`delivery_gates` records `council_status: "approved"`, `unresolved_p0_p1: 0`,
-the frozen `qgis_commit`, `qgis_launch_stage: "launch4Release"`,
-`qgis_release_passed: true`, and `temporary_state_restored: true`.
-Final QGIS acceptance uses the published package through the prescribed
-`launch4Release` command. Development-launch results are retained separately
-as diagnostic history and do not gate release. A recorded development failure
-must remain a failure rather than being replaced with a successful startup or
-an older page test. These are explicit delivery attestations. They do
-not replace the council's original reports, scoring, issue arbitration or QGIS
-test records. Preserve those underlying records with the delivery evidence.
+Package names and matching source archive names are retained. Licenses,
+third-party notices and Qt shared-library replacement instructions remain in
+the installation packages. Windows packages are unsigned. GitHub build
+attestations establish build origin and do not provide Authenticode signing.
 
-Run the **Promote verified release** workflow with the tag, candidate run ID,
-evidence commit, evidence path and exact evidence-file SHA-256. It verifies the
-run and artifact repository, source commit, workflow identity, artifact digests,
-package hashes, per-package inventories, matching sources, CTest receipts, SDK,
-full Linux/Windows stability, DEB/MSI acceptance, real Caddy HTTPS behavior,
-public search/read/find evidence and delivery signoff.
-Each Windows 11 SDK/stability report records its own kernel build and workstation
-product type. CI diagnostics must come from the same repository and run attempt.
-`FullStability` runs the full Ubuntu cold/hot workload and five-minute fuzz
-campaigns. The Windows Server CI job retains its smoke workload, then makes the
-candidate available for the required cold/hot Windows 11 desktop acceptance.
-Use **Re-run all jobs** if repeating a candidate run, rather than mixing artifacts
-from successful and retried matrix jobs.
+Build and test receipts remain useful locally for rejecting stale source,
+profile or installation state before packaging. Internal package metadata also
+passes between CI jobs. Neither those files nor test reports, screenshots,
+review records and audit archives are public Release assets or committed source.
+CI uses temporary directories for test output and cleans up its owned processes,
+containers and temporary state. Normal console logs remain subject to GitHub
+Actions retention. Platform package artifacts are retained for 14 days for
+cross-job transfer and retries.
 
-Promotion never rebuilds the candidate. All required assets are uploaded to a
-draft release, downloaded and hashed again, then published together. A failure
-leaves the release unpublished. Existing releases are not overwritten or deleted.
-The workflow checks the tag again before publication. `promotion-inputs.json`
-records the original artifact IDs/digests and external evidence commit. Packages
-remain explicitly unsigned until separate signing evidence is provided.
+## Verification and publication
 
-### Empty logs and interrupted drafts
+The publishing job depends on both platform jobs and the attestation job.
+It resolves the two platform artifacts in the current workflow run, fixes their
+immutable IDs and digests, and downloads those exact artifacts. Verification
+checks the repository, source commit, tag version, package formats, checksums,
+SBOM bindings, package inventories and matching dependency sources. Windows
+ZIP and MSI payloads must agree. Local dirty builds cannot be published.
 
-Successful commands such as `git status --porcelain` can produce valid empty
-logs. GitHub rejected an empty release asset during v0.1.4 promotion. The upload
-layout therefore keeps all original quality files, including zero-byte members,
-inside `quality-evidence.zip`. Nonempty quality files remain available as separate
-assets. The ZIP also preserves the original verifier manifest and checksums.
-It uses sorted members, fixed timestamps and permissions, and uncompressed ZIP
-storage for reproducible bytes. No empty log is padded or silently discarded.
+`gh attestation verify` checks each distribution package against its exact
+SHA-256, repository identity, source commit, tag and CI workflow identity.
+The attestation must belong to the same workflow run. Successful jobs from an
+earlier attempt of that run can be reused when only failed jobs are retried.
+The publishing job does not rebuild packages.
 
-The original verifier output stays intact in a separate directory. Physical
-`release-manifest.json` schema 2 lists uploaded assets and maps archived empty
-logs to their members. `publication-proof.json` binds the complete original
-logical inventory, archive members and tool commit. `SHA256SUMS` covers every
-physical asset except itself. Installation packages, matching source archives,
-SBOMs and acceptance reports retain their original bytes.
+The publisher creates a draft or reuses a draft with the same tag and exact
+source commit. Existing assets are downloaded and hashed before any upload.
+Matching files are reused and only missing files are uploaded. Unexpected assets,
+different bytes, a changed tag or incomplete `starter` uploads stop the operation.
+Existing Release assets are never overwritten or deleted by the publisher.
 
-The workflow checks out the selected publication tools and the candidate tag
-separately. It first runs the candidate's own `promote_release.py` without
-`--Publish`, including all original acceptance and Sigstore checks. Only after
-those pass does it transform the upload layout. This permits older immutable
-candidate tags to use corrected delivery tooling without rebuilding them.
+After uploading, the publisher downloads and verifies the complete asset set
+again before making the draft public. Failures before publication leave a draft
+for inspection or a safe retry. A retry against an already published Release
+succeeds only when the full asset set and bytes match. If a publication response
+is lost, the publisher checks the remote state before reporting its outcome.
+This flow applies to tags containing the current workflow. Older tags and
+existing Releases are not migrated.
 
-Use `CheckOnly=true` to verify inputs, prepare the layout and download/check any
-existing draft assets without creating, uploading, deleting or publishing remote
-objects. For an interrupted draft supply all four recovery fields:
+## Publisher command
 
-| Input | Purpose and allowed values |
-| --- | --- |
-| `ResumeDraftId` | Exact positive GitHub release ID owned by this delivery. Omit for a new release. A published or mismatched draft is rejected. |
-| `PreviousChecksumsAssetId` | Exact positive ID of the old SHA256SUMS asset authorized for replacement. Other assets cannot be overwritten. |
-| `PreviousChecksumsSHA256` | Lowercase 64-digit SHA-256 of those original checksum bytes. A mismatch stops before mutation. |
-| `PreviousChecksumsPath` | Tracked file below `release-evidence/` at the selected tool commit. Its immutable Git blob preserves the old bytes even after a previous upload attempt replaced the remote checksum. |
+The CI job invokes:
 
-The repository, draft ID, tag, source commit and unpublished state are checked.
-Asset enumeration is paginated. Existing files are downloaded by ID and hashed,
-not trusted from API metadata alone. Matching files are reused. Unknown assets
-or differing immutable files stop recovery. Only the named old checksum asset
-with the approved ID and digest may be replaced, and its complete bytes are
-retained in the publication proof. Repeated runs with the same inputs can reuse
-already uploaded new-layout files. Never use a blanket overwrite or silently
-switch to another draft after an error.
+```text
+python scripts/publish_verified_release.py --ArtifactsRoot <new-download-directory> --Tag vX.Y.Z --Commit <40-character-commit> --Output <new-release-directory>
+```
 
-An interrupted upload may also leave a `starter` asset that cannot be downloaded.
-Such assets are rejected unless a reviewed Git file at
-`PreviousChecksumsPath + .starters.json` explicitly binds their ID, name, size,
-`starter` state and null digest to this draft, tag, source and old checksum
-identity. Recovery records this identity in the publication proof, compares it
-again immediately before mutation, removes only the exact incomplete asset and
-uploads the original verified bytes. Any other incomplete asset stops recovery.
-CheckOnly reports these separately from assets whose bytes were downloaded.
+Both directories must be new and separate. The publisher downloads artifacts
+itself. It requires `GH_TOKEN`, `GITHUB_REPOSITORY`, `GITHUB_RUN_ID`,
+`GITHUB_RUN_ATTEMPT`, `GITHUB_SHA` and `GITHUB_REF`, plus a clean checkout of the
+tagged commit. `--CheckOnly` verifies inputs and any existing remote assets
+without creating, uploading, deleting or publishing remote objects.
 
-All final assets are downloaded and hashed again. Archive members are compared
-against the unchanged verifier output, and the tag, draft identity and asset
-set are checked again before publication. A failed operation leaves a draft,
-and the workflow retains its available reports. The underlying endpoints are
-documented in the [GitHub Release API](https://docs.github.com/en/rest/releases/releases)
+The release and asset operations use the [GitHub Release API](https://docs.github.com/en/rest/releases/releases)
 and [asset API](https://docs.github.com/en/rest/releases/assets).
-
-Tag CI generates GitHub artifact attestations for the exact ZIP, MSI and DEB
-bytes in a separate job with OIDC permission. PR jobs do not receive signing
-permissions. Promotion runs `gh attestation verify` for each package and checks
-the certificate's repository identity, source commit, tag, workflow, run ID and
-attempt. It preserves the verified bundles in `verified-build-provenance.json`.
-This proves build origin. It does not provide Windows Authenticode signing.
-
-Public tests report engine failures and zero results without imposing a minimum
-search-success rate. They still require all 60 representative attempts and at
-least one real search/open/find closure. Service errors, invalid contracts or
-failed cleanup block acceptance. The reference Caddy check uses a synthetic
-search provider and is labelled separately from the real SearXNG public report.
-
-The 60-query corpus includes four navigation queries per language with official
-domains declared before execution. These requests have no domain or time filter.
-Reports retain their first matching official-domain rank, top-1/top-5 counts and
-MRR@5, including zero credit for empty/error results. These are domain-level
-navigation observations, not a human relevance judgment or a coverage guarantee.
-Promotion verifies the exact query corpus and recomputes the recorded metrics.
-No ranking-quality threshold is imposed on the best-effort public backend.

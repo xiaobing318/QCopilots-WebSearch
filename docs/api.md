@@ -53,6 +53,28 @@ or another client's page ID returns `page_unavailable`.
 Reading does not run JavaScript, follow instructions embedded in pages, extract
 PDFs or generate an LLM answer. Treat returned text as untrusted evidence.
 
+Text decoding selects a BOM first, then the HTTP charset, an early HTML meta
+declaration, and finally UTF-8. Lexbor supports UTF-8/UTF-16, Windows-1252,
+GBK/GB18030 and Big5 among its encodings. Unsupported encodings and malformed
+encoded text return `unsupported_content` rather than silently replacing bytes.
+
+| Resource | Limit |
+| --- | --- |
+| Compressed transfer and decoded body | 5 MiB each |
+| HTML response bytes before decoding | 1 MiB |
+| HTML markup tokens and visited nodes | 50,000 each |
+| HTML traversal depth | 512 |
+| Extracted text | 200,000 Unicode characters, 10,000 lines |
+| Line length | 1,000 Unicode characters |
+| Extracted links | 200 |
+| Service payload | 240 KiB |
+| Complete REST or MCP response | 1 MiB |
+
+HTML input, extracted text and response truncation are disclosed. Exceeding
+transfer or HTML complexity budgets returns `response_too_large`. Open/find
+reduce returned lines and links to fit the payload budget. `next_start_line`
+continues omitted lines or matches, not omitted links.
+
 ## Results and errors
 
 Successful tool payloads include `contract_version: 1`. MCP returns the same
@@ -87,7 +109,9 @@ HTTP status or MCP error type before parsing successful content.
 | `destination_blocked` | 403 | Public fetch policy rejected a target |
 | `page_unavailable` | 404 | Snapshot is unavailable to this identity |
 | `request_too_large` | 413 | Incoming request exceeds the limit |
+| `unsupported_content` | 415 | Unsupported media type, charset or malformed encoded text |
 | `busy` | 429 | No business/upstream capacity available |
+| `cancelled` | 499 | Request work was cancelled |
 | `response_too_large` | 502 | Upstream transfer exceeded bounded limits |
 | `provider_unavailable` | 502 | Search dependency could not supply results |
 | `cache_unavailable` | 503 | Private cache cannot be used safely |
@@ -99,7 +123,12 @@ tools. DELETE terminates the session. GET returns 405 because no unsolicited
 SSE stream is provided. Cancelling a request cancels its work without affecting
 another coalesced caller that is still waiting.
 
-HTTP sessions have bounded idle lifetime, principal quotas and request history.
-An expired/retired session returns 404 and the client reinitializes. Stdio follows
-the child-process lifetime and uses bounded recent request history. Clients must
-still use unique request IDs throughout a session.
+HTTP sessions expire after 30 idle minutes, with a maximum of 100 globally and
+20 per caller identity. At capacity, only the requesting identity's oldest idle
+session without active requests can be evicted. If none is eligible,
+initialization returns 503. Request history is limited to 4,096 IDs and 1 MiB.
+An expired or retired session returns 404 and the client reinitializes.
+
+Stdio follows the child-process lifetime and retains a bounded recent ID window
+plus all active IDs, without a lifetime request-count quota. Clients must still
+use unique request IDs throughout a session.

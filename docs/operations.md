@@ -34,6 +34,11 @@ cache budget is 256 MiB and 10,000 entries. SQLite is owned by a dedicated threa
 and the cache directory is locked against a second process. Corrupt, inaccessible
 or unsupported cache state fails explicitly rather than silently discarding data.
 
+Use healthy local storage for the cache. Shutdown timing cannot cover an
+indefinitely stalled operating-system filesystem. Forced termination can leave
+temporary state behind. Remove such state only after confirming its owning
+process has exited and the directory belongs to that instance.
+
 Cache hits record their latest access order in bounded memory. The next content
 write applies those updates in its existing SQLite transaction before choosing
 an eviction victim. Normal shutdown checkpoints the remaining access metadata.
@@ -53,6 +58,10 @@ Run `--CheckConfig`, restart and verify health. Do not automatically overwrite a
 corrupt or locked cache. Repair filesystem permissions or disk capacity first.
 
 ## Upgrades
+
+Runtime configuration uses `schema_version: 1` and rejects unknown fields.
+Back up configuration before upgrading and check version compatibility before
+restoring an older package. There is no automatic configuration downgrade.
 
 Windows packages dynamically link OpenSSL using the matched `libssl-3-x64.dll`
 and `libcrypto-3-x64.dll` pair beside the executable. Prefer updating the complete
@@ -81,9 +90,8 @@ Debian package operations are not an automatic transactional snapshot. If a
 maintainer script fails, dpkg can report `half-configured`. Correct the cause and
 configure the package again, or reinstall the exact known-good baseline package
 with `--allow-downgrades`. Validate configuration compatibility before downgrading.
-The acceptance report labels this as recovery by baseline reinstall.
 
-The Windows acceptance-only `QCWS_TEST_FAILPOINT` MSI property deliberately fails
+The Windows test-only `QCWS_TEST_FAILPOINT` MSI property deliberately fails
 after initialization or after service start. It is inert by default and requires
 an administrator explicitly passing the test value. Never set it in deployment
 automation. It permits rollback tests using exactly the candidate MSI bytes.

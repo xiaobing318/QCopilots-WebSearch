@@ -18,7 +18,9 @@ $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.Wind
 Assert ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) 'Run elevated.'
 Assert ([Environment]::Is64BitProcess) 'Run 64-bit PowerShell.'
 $osInfo = Get-CimInstance Win32_OperatingSystem
-Assert ($osInfo.ProductType -eq 1 -and [int]$osInfo.BuildNumber -ge 22000) 'Windows 11 desktop acceptance is required.'
+$supportedDesktop = $osInfo.ProductType -eq 1 -and [int]$osInfo.BuildNumber -ge 22000
+$supportedServer = $osInfo.ProductType -in @(2,3) -and [int]$osInfo.BuildNumber -ge 20348
+Assert ($supportedDesktop -or $supportedServer) 'Use Windows 11 or Windows Server 2022 or newer.'
 $ServiceName = 'QCopilotsWebSearch'
 $started = Get-Date
 $installRoot = [IO.Path]::GetFullPath((Join-Path $env:ProgramFiles 'QCopilots-WebSearch'))
@@ -117,6 +119,11 @@ function Invoke-Msi([hashtable]$metadata, [string]$mode, [string]$label, [int]$e
         $code = $process.ExitCode
     } finally { $process.Dispose() }
     foreach ($root in @($installRoot, $dataRoot)) { if (Test-Path -LiteralPath $root) { [void]$trackedRoots.Add($root) } }
+    if ($code -ne $expected -and (Test-Path -LiteralPath $log)) {
+        $tail = (Get-Content -LiteralPath $log -Tail 120) -join [Environment]::NewLine
+        if ($tail.Length -gt 32768) { $tail = $tail.Substring($tail.Length - 32768) }
+        Write-Host $tail
+    }
     Assert ($code -eq $expected) "$label exited $code, expected $expected. See $log."
     if ($failpoint) {
         $action = if ($failpoint -eq 'afterInitialize') { 'QcwsFailAfterInitialize' } else { 'QcwsFailAfterStartServices' }
@@ -280,4 +287,4 @@ finally {
 }
 if ($failure) { throw $failure }
 if ($cleanupFailures.Count) { throw ($cleanupFailures -join [Environment]::NewLine) }
-Write-Host "PASS. Evidence: $runDir"
+Write-Host "PASS. Temporary test results: $runDir"

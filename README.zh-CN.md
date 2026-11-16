@@ -4,7 +4,7 @@
 
 使用 C++20 和 Qt 6.12 实现的独立网页搜索服务，通过自部署 SearXNG 搜索公网，提供网页阅读、页内查找、REST、MCP HTTP 和 MCP stdio。QGIS 通过独立 Python MCP 适配插件接入，同一原生服务也可用于其他项目。
 
-Windows 和 Ubuntu 的编译、打包与自动验证已实现。Ubuntu 已实测 SDK、DEB 生命周期、Caddy HTTPS、60 条公网查询、sanitizer、静态分析和有界 fuzz。正式交付仍需完整的候选版本稳定性证据、Windows 11 生产 MSI 验收及独立委员会评审。版本标签生成候选包，只有经验证并晋级的正式 Release 才代表已验收的分发版本。详见[发布门禁](docs/release.md)。
+CI 构建并测试 Windows 和 Ubuntu 安装包。推送 `vMAJOR.MINOR.PATCH` 标签后，流水线执行完整自动检查，核对安装包和构建来源，然后发布 GitHub Release。Windows CI 使用 Windows Server 2022。平台覆盖范围与必需检查详见[发布流程](docs/release.md)。
 
 ## 能力与边界
 
@@ -33,7 +33,7 @@ bash scripts/BuildPipeline.sh --Profile ubuntu-x64 --Stages bootstrap,doctor,con
 
 复制 `config/BuildPipeline.json` 为机器专属的 `*.local.json` 后，通过 `--ConfigPath` 指定。`proxy` 可设为 `http://127.0.0.1:7897`。下载代理只影响构建依赖，运行时网页请求不会继承代理。`--CheckOnly` 仅检查环境，`--DryRun` 仅显示计划命令。
 
-`publish` 阶段只生成本地安装包。Windows MSI 另需官方 WiX 7.0.1、同版本 UI 扩展和 .NET 10，请阅读其官方包的维护费条件。正式 GitHub Release 需要两平台的完整产物和绑定到原始安装包字节的验收证据。
+`publish` 阶段只生成本地安装包。Windows MSI 另需官方 WiX 7.0.1、同版本 UI 扩展和 .NET 10，请阅读其官方包的维护费条件。正式 GitHub Release 由标签触发的 CI 自动发布，包含两平台安装包、SBOM、匹配源码和校验和。
 
 ```text
 qcopilots-websearch --InitializeConfig --ConfigPath 私有目录/service.json
@@ -47,8 +47,8 @@ REST 提供 `POST /v1/search`、`/v1/open`、`/v1/find` 和 `GET /v1/status`，�
 
 网页内容属于不可信外部资料。客户端应将返回内容用于引用与分析。公共抓取会检查真实连接地址及每次重定向，阻止内网和云元数据目标，不继承系统代理。
 
-详细约束见[架构与验收方案](docs/design.md)。原生仓库采用 Apache-2.0，第三方依赖保留各自许可。Qt 动态链接，正式发行须附匹配源码及共享库替换说明。QGIS 适配代码留在 QGIS 仓库中并遵循 GPL 许可。
+原生仓库采用 Apache-2.0，第三方依赖保留各自许可。Qt 动态链接，正式发行附匹配源码及共享库替换说明。QGIS 适配代码留在 QGIS 仓库中并遵循 GPL 许可。
 
-进一步阅读[开源调研](docs/research.md)、[运行架构](docs/architecture.md)、
+进一步阅读[开源调研](docs/research.md)、[运行架构](docs/architecture.md)、[接口说明](docs/api.md)、
 [构建说明](docs/build.md)、[团队部署](docs/deployment.md)、
-[运维指南](docs/operations.md)、[发布门禁](docs/release.md)及[许可说明](docs/licensing.md)。
+[运维指南](docs/operations.md)、[发布流程](docs/release.md)及[许可说明](docs/licensing.md)。

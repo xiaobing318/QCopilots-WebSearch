@@ -4,7 +4,7 @@
 
 An Apache-2.0 C++20 / Qt 6.12 service for self-hosted web search, HTML reading and literal page search. SearXNG supplies search results. REST, MCP HTTP and MCP stdio share the same versioned tools. A separate GPL adapter connects QGIS QCopilots to the service.
 
-Windows and Ubuntu compilation, packaging and automated validation are implemented. Ubuntu acceptance has exercised the SDK, DEB lifecycle, Caddy HTTPS, 60 public queries, sanitizers, static analysis and bounded fuzzing. Final delivery still requires complete candidate-specific stability evidence, Windows 11 production MSI acceptance and the independent review council. A version tag creates candidates. Only a verified, promoted Release represents an accepted distribution. See [release gates](docs/release.md).
+CI builds and tests Windows and Ubuntu packages. Pushing a `vMAJOR.MINOR.PATCH` tag runs the full automated checks, verifies the resulting packages and their build origin, then publishes a GitHub Release. Windows CI runs on Windows Server 2022. See [the release workflow](docs/release.md) for platform coverage and required checks.
 
 ## Tools
 
@@ -56,10 +56,11 @@ Web content is untrusted source material. Tools return provenance and bounded te
 - `config`: build/runtime examples, schemas and fixed dependency hashes
 - `scripts`, `cmake`: shared build and distribution tooling
 - `tests`: deterministic tests with temporary state and dynamically allocated ports
-- `docs`: architecture, acceptance and review records
+- `docs`: architecture, interfaces, building, deployment and operations
 
-See [the design and acceptance contract](docs/design.md). Native source uses Apache-2.0. Third-party libraries retain their own licenses. Qt is dynamically linked and release artifacts must include its matching source and replacement instructions. QGIS adaptation code remains in the QGIS GPL repository.
+Native source uses Apache-2.0. Third-party libraries retain their own licenses. Qt is dynamically linked and release artifacts include its matching source and replacement instructions. QGIS adaptation code remains in the QGIS GPL repository.
 
 Read the [research](docs/research.md), [runtime architecture](docs/architecture.md),
+[API reference](docs/api.md),
 [build instructions](docs/build.md), [team deployment](docs/deployment.md),
-[operations guide](docs/operations.md), [release gates](docs/release.md) and [license details](docs/licensing.md).
+[operations guide](docs/operations.md), [release workflow](docs/release.md) and [license details](docs/licensing.md).

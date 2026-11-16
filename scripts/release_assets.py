@@ -1,16 +1,14 @@
-"""Generate source, provenance and actual package-file SBOMs without publishing."""
+"""Generate source archives, package metadata and SBOMs without publishing."""
 from __future__ import annotations
 from datetime import datetime, timezone
-import hashlib
 import json
 import os
 from pathlib import Path
-import platform
 import re
 import shutil
 import subprocess
-import tarfile
 import uuid
+import xml.etree.ElementTree as ET
 from package_inventory import package_files, require_windows_payload_match
 from msi_inventory import inventory_msi
 from build_evidence import identity, require_receipt
@@ -25,11 +23,26 @@ LIBRARIES = {
 }
 
 
-def stream_sha(stream):
-    result = hashlib.sha256()
-    for block in iter(lambda: stream.read(1024 * 1024), b""):
-        result.update(block)
-    return result.hexdigest()
+def validated_install(pipeline, root):
+    """Check local build stages before exporting the package metadata."""
+    current = identity(root, pipeline.profile)
+    built = require_receipt(pipeline.build / 'build-receipt.json', current)
+    tested = require_receipt(pipeline.build / 'test-receipt.json', current)
+    installed = require_receipt(pipeline.build / 'install-receipt.json', current)
+    if (not built['artifacts'] or built['artifacts'] != tested['artifacts']
+            or tested['artifacts'] != installed['tested_artifacts']):
+        raise RuntimeError('Build, test and install artifacts differ')
+    junit = pipeline.build / 'test-results.xml'
+    if pipeline.digest(junit) != tested['junit_sha256']:
+        raise RuntimeError('CTest results changed after the test stage')
+    cases = ET.parse(junit).getroot().findall('.//testcase')
+    expected = {'core', 'http-limits', 'tls', 'stdio-process', 'release-assets', 'build-pipeline'}
+    if os.name == 'nt':
+        expected.add('windows-security')
+    if (len(cases) != len(expected) or {case.get('name') for case in cases} != expected
+            or any(case.find(kind) is not None for case in cases for kind in ('failure', 'error', 'skipped'))):
+        raise RuntimeError('Incomplete or failed CTest results')
+    return installed
 
 
 def generate(pipeline, destination, packages):
@@ -42,12 +55,7 @@ def generate(pipeline, destination, packages):
     now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     package_hashes = {p.name: pipeline.digest(p) for p in packages}
     primary = next(p for p in packages if p.suffix in (".zip", ".deb"))
-    installed = require_receipt(pipeline.build / "install-receipt.json", identity(root, pipeline.profile))
-    tested = require_receipt(pipeline.build / "test-receipt.json", installed['identity'])
-    if installed['tested_artifacts'] != tested['artifacts']:
-        raise RuntimeError('Installation does not refer to the completed test artifacts')
-    if pipeline.digest(pipeline.build / "test-results.xml") != tested['junit_sha256']:
-        raise RuntimeError("CTest evidence changed after the test stage")
+    installed = validated_install(pipeline, root)
     components = [{"type": "library", "bom-ref": "library:qt", "name": "Qt",
                    "version": "6.12.0", "licenses": [{"license": {"id": "LGPL-3.0-only"}}],
                    "properties": [{"name": "qcws:linkage", "value": "dynamic"},
@@ -94,13 +102,10 @@ def generate(pipeline, destination, packages):
         components.append({"type": "library", "bom-ref": "library:msvc-runtime", "name": "Microsoft Visual C++ Runtime",
                            "version": runtime_version,
                            "licenses": [{"license": {"name": "LicenseRef-Microsoft-Visual-Studio-2022-Redistributable"}}]})
-    inventories, sboms, metadata_files = {}, {}, []
+    inventories, sboms = {}, {}
     for package in packages:
         if package.suffix == '.msi':
-            entries, tables = inventory_msi(package, pipeline.tool_paths.get('wix') or 'wix', pipeline.env)
-            metadata = destination / (package.name + '.tables.json')
-            metadata.write_text(json.dumps(tables, indent=2) + '\n', encoding='utf-8')
-            metadata_files.append(metadata.name)
+            entries, _ = inventory_msi(package, pipeline.tool_paths.get('wix') or 'wix', pipeline.env)
         else:
             entries = package_files(package)
         inventories[package.name] = entries
@@ -115,10 +120,9 @@ def generate(pipeline, destination, packages):
         sbom = destination / (package.name + '.cdx.json')
         sbom.write_text(json.dumps(document, indent=2) + '\n', encoding='utf-8')
         sboms[package.name] = sbom.name
-    consistency = None
     if os.name == 'nt' and any(p.suffix == '.msi' for p in packages):
         msi = next(p for p in packages if p.suffix == '.msi')
-        consistency = require_windows_payload_match(inventories[primary.name], inventories[msi.name])
+        require_windows_payload_match(inventories[primary.name], inventories[msi.name])
     executable_suffix = '/bin/qcopilots-websearch.exe' if os.name == 'nt' else '/bin/qcopilots-websearch'
     packaged_exes = [entry for entry in inventories[primary.name]
                     if ('/' + entry['name']).endswith(executable_suffix)]
@@ -161,18 +165,12 @@ def generate(pipeline, destination, packages):
     source = destination / f"QCopilots-WebSearch-{commit}-source.tar.gz"
     pipeline.run(["git", "archive", "--format=tar.gz", "--prefix=QCopilots-WebSearch/", "-o", source, commit])
     info = {"schema_version": 1, "project_version": version, "source_commit": commit,
-            "working_tree_dirty": dirty, "target": target, "build_os": platform.platform(),
-            "created_at": now, "signed": False, "package_sha256": package_hashes,
+            "working_tree_dirty": dirty, "target": target, "package_sha256": package_hashes,
             "sboms": sboms, "inventory_files": {name:len(entries) for name,entries in inventories.items()},
-            "metadata_files": metadata_files, "payload_consistency": consistency,
-            "installed_runtime": installed['runtime'], "build_identity": installed['identity'],
-            "junit_sha256": tested['junit_sha256'], "executable_sha256": installed_exe['sha256'],
+            "executable_sha256": installed_exe['sha256'],
             "project_source": source.name, "qt_source": qt_name,
-            "qt_source_sha256": pipeline.lock["qt_source"]["sha256"], "extra_sources": extra_sources,
-            "source_scope": "Git commit only. Dirty builds are local test artifacts and cannot be promoted."}
+            "qt_source_sha256": pipeline.lock["qt_source"]["sha256"], "extra_sources": extra_sources}
     (destination / f"build-info-{target}.json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
-    for name in ('build-receipt.json', 'test-receipt.json', 'install-receipt.json', 'test-results.xml'):
-        shutil.copyfile(pipeline.build / name, destination / (target + '-' + name))
     assets = sorted(p for p in destination.iterdir() if p.is_file() and p.name != "SHA256SUMS")
     (destination / "SHA256SUMS").write_text(
         "".join(f"{pipeline.digest(p)}  {p.name}\n" for p in assets), encoding="utf-8")

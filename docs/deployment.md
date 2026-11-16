@@ -116,7 +116,3 @@ the local MCP entry.
 The adapter remains discoverable when its backend is offline. Initialization,
 tool listing and local health do not depend on a successful public search. Calls
 return explicit backend errors and recover when the backend becomes available.
-
-For temporary WebUI testing, record the original MCP configuration, temporarily
-disable Vastarmor AI, add the test MCP entry, and restore the original state after
-testing. Remove test entries and stop only processes created for that test.

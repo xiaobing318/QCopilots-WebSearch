@@ -295,7 +295,7 @@ class Pipeline:
             self.run([tool, "--version"])
         if WIN:
             self.native_perl()
-        print("Host:", platform.platform(), "(CI build evidence is not desktop acceptance)")
+        print("Host:", platform.platform())
         self.verify_qt()
 
     def source(self, artifact):

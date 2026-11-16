@@ -1,7 +1,8 @@
 # Build and package
 
-Supported runtime targets are Windows 11 amd64 and Ubuntu 26.04 amd64. Windows
-Server 2022 CI is build evidence, not a substitute for Windows 11 acceptance.
+Supported runtime targets are Windows 11 amd64 and Ubuntu 26.04 amd64. Automated
+Windows build and installer tests run on Windows Server 2022. That CI coverage
+does not establish Windows 11 desktop-specific behavior.
 Use C++20, Qt 6.12.0 shared libraries, CMake and Ninja.
 
 ## One entry point on each platform
@@ -39,7 +40,7 @@ Ubuntu bootstrap uses apt to install GCC, CMake, Ninja, Git, Python and runtime
 development dependencies, then installs the same fixed Qt version from its
 verified archive. Root or noninteractive sudo is required for missing system
 packages. Linux does not use MSVC. Qt's vendor platform table is distinct from
-the Ubuntu 26.04 build/runtime evidence produced by this project.
+this project's Ubuntu 26.04 build and runtime checks.
 
 On a minimal Ubuntu image without Python, the Bash entry point uses the bundled
 JSON::PP parser and the Essential `perl-base` package to read the selected profile.
@@ -106,7 +107,7 @@ Packages are unsigned unless a release explicitly supplies signing evidence.
 The core CTest suite uses temporary storage, dynamic ports, local HTTP/TLS
 fixtures and injected clocks. It does not require public search engines.
 
-For additional installed-binary acceptance, create an isolated Python environment
+For additional installed-binary tests, create an isolated Python environment
 and install `tests/requirements.lock` with `pip --require-hashes`. Then run:
 
 ```text
@@ -117,6 +118,14 @@ python scripts/soak.py --Executable <installed-binary> --Output <report.json>
 The soak default is 300 seconds (five minutes) per phase, cold then hot. `--Seconds 10` is a
 smoke test and cannot satisfy the full stability gate. It removes its temporary
 state and stops only child processes that it created.
+
+Windows CI also tests the final portable ZIP with a clean system PATH and runs
+the MSI install, failed-upgrade rollback, upgrade and uninstall checks on its
+disposable runner. Run `scripts/AcceptWindowsMsi.ps1` only in a clean disposable
+environment with elevated 64-bit PowerShell. It refuses pre-existing products,
+service state, installation/data directories or occupied ports. Local test
+reports may be written to an ignored working directory. They are not source
+files or release attachments.
 
 The low-version installer baseline is a test artifact built from the same source
 with `-DQCWS_VERSION=0.0.1`. It is not an earlier supported public release.

@@ -1,49 +1,33 @@
-"""Transport-only fixtures, not claims of product installation or acceptance."""
-import base64
+"""Exercise publication with in-memory GitHub assets, never remote writes."""
 import copy
-import hashlib
 import json
 from pathlib import Path
-import stat
 import sys
 import tempfile
-import unittest
 import types
+import unittest
 from unittest.mock import patch
-import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import release_transport as t
-import publish_verified_release as runner
 
 COMMIT, TAG = '1' * 40, 'v0.1.4'
-IDENTITY = {'commit': '2' * 40, 'files': {'transport.py': '3' * 64}}
 
 
-def original(folder):
+def distribution(folder):
     folder.mkdir()
-    content = {'package.zip': b'original zip bytes', 'package.msi': b'original msi bytes',
-               'package.deb': b'original deb bytes', 'source.tar.gz': b'original source bytes',
-               'quality-001-clean.log': b'', 'quality-032-clean.log': b'', 'quality-002-build.log': b'build OK\r\n'}
-    for name, raw in content.items():
-        (folder / name).write_bytes(raw)
-    t.write(folder / 'quality-quality.json', {'files': {n.removeprefix('quality-'): t.sha(folder / n)
-                                                    for n in content if n.startswith('quality-')}})
-    t.write(folder / t.MANIFEST, {'schema_version': 1, 'source_commit': COMMIT, 'tag': TAG,
-                                'candidate_run_id': 12, 'signed': False, 'assets': t.inventory(folder)})
-    (folder / t.SUMS).write_text(''.join(f'{v}  {k}\n' for k, v in t.inventory(folder).items()), encoding='ascii')
+    files = {'package.zip': b'original zip bytes', 'package.msi': b'original msi bytes',
+             'package.deb': b'original deb bytes', 'source.tar.gz': b'original source bytes'}
+    for name, content in files.items():
+        (folder / name).write_bytes(content)
+    (folder / t.SUMS).write_text(''.join(f'{digest}  {name}\n' for name, digest in t.inventory(folder).items()),
+                               encoding='ascii')
     return folder
 
 
-def recovery():
-    previous = b'original draft checksum inventory\n'
-    return {'draft_id': 77, 'old_checksums_asset_id': 91,
-            'old_checksums_sha256': hashlib.sha256(previous).hexdigest(),
-            'old_checksums_base64': base64.b64encode(previous).decode()}
-
-
 class FakeGitHub:
-    def __init__(self):
+    def __init__(self, exists=False):
+        self.exists = exists
         self.state = {'id': 77, 'draft': True, 'published_at': None, 'tag_name': TAG, 'target_commitish': COMMIT}
         self.tag = COMMIT
         self.stored = {}
@@ -54,21 +38,29 @@ class FakeGitHub:
         self.after_upload = False
         self.change_tag_after_upload = False
         self.omit_uploaded = False
+        self.publish_error = None
         self.download_counts = {}
 
-    def add(self, name, raw, asset_id=None):
+    def add(self, name, raw):
         self.next_id += 1
-        self.stored[name] = {'id': asset_id or self.next_id, 'name': name, 'size': len(raw), 'state': 'uploaded', 'raw': raw}
+        self.stored[name] = {'id': self.next_id, 'name': name, 'size': len(raw), 'state': 'uploaded', 'raw': raw}
 
     def tag_commit(self, tag):
         return 'f' * 40 if self.change_tag_after_upload and self.after_upload else self.tag
 
+    def find_release(self, tag):
+        return copy.deepcopy(self.state) if self.exists else None
+
     def release(self, release_id):
+        assert release_id == self.state['id']
         return copy.deepcopy(self.state)
 
     def assets(self, release_id):
-        return [{**{k: v for k, v in a.items() if k != 'raw'}, 'download_count': self.download_counts.get(a['name'], 0)}
-                for a in self.stored.values() if not (self.omit_uploaded and self.after_upload and a['name'] == 'package.zip')]
+        assert release_id == self.state['id']
+        return [{**{k: v for k, v in item.items() if k != 'raw'},
+                 'download_count': self.download_counts.get(item['name'], 0)}
+                for item in self.stored.values()
+                if not (self.omit_uploaded and self.after_upload and item['name'] == 'package.zip')]
 
     def download(self, asset, target):
         self.calls.append(('download', asset['name']))
@@ -80,14 +72,12 @@ class FakeGitHub:
 
     def create(self, tag, commit, notes):
         self.calls.append(('create', tag))
+        assert not self.exists
+        self.exists = True
         return self.state['id']
 
-    def delete(self, asset_id):
-        self.calls.append(('delete', asset_id))
-        name, = [n for n, a in self.stored.items() if a['id'] == asset_id]
-        del self.stored[name]
-
-    def upload(self, tag, path):
+    def upload(self, release_id, path):
+        assert release_id == self.state['id']
         self.calls.append(('upload', path.name))
         if self.fail_upload == path.name:
             raise RuntimeError('injected upload failure')
@@ -98,8 +88,11 @@ class FakeGitHub:
 
     def publish(self, release_id):
         self.calls.append(('publish', release_id))
-        self.state['draft'] = False
-        self.state['published_at'] = 'published'
+        if self.publish_error == 'before':
+            raise RuntimeError('injected publication failure')
+        self.state.update(draft=False, published_at='published')
+        if self.publish_error == 'after':
+            raise TimeoutError('publication response was lost')
 
 
 class TransportTests(unittest.TestCase):
@@ -107,222 +100,185 @@ class TransportTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.original = original(self.root / 'original')
+        self.output = distribution(self.root / 'distribution')
         self.notes = self.root / 'notes.md'
-        self.notes.write_text('reviewed notes')
+        self.notes.write_text('Source commit: ' + COMMIT)
 
-    def prepare(self, resume=None, name='physical'):
-        return t.prepare(self.original, self.root / name, IDENTITY, resume)
+    def publish(self, github, **options):
+        return t.publish(self.output, github, TAG, COMMIT, self.notes, **options)
 
-    def refresh_sums(self, folder):
-        (folder / t.SUMS).write_text(''.join(f'{v}  {k}\n' for k, v in t.inventory(folder).items() if k != t.SUMS),
-                                   encoding='ascii')
+    def assert_read_only(self, github):
+        self.assertFalse(any(call[0] in ('create', 'upload', 'delete', 'publish') for call in github.calls))
 
-    def test_empty_logs_are_real_empty_members_with_original_bytes_and_deterministic_archive(self):
-        before = t.inventory(self.original)
-        output = self.prepare()
-        second = self.prepare(name='second')
-        self.assertEqual(t.inventory(self.original), before)
-        self.assertEqual(t.inventory(output), t.inventory(second))
-        self.assertTrue(all(p.stat().st_size > 0 for p in output.iterdir()))
-        self.assertFalse((output / 'quality-001-clean.log').exists())
-        self.assertEqual((output / 'quality-002-build.log').read_bytes(), b'build OK\r\n')
-        with zipfile.ZipFile(output / t.ARCHIVE) as archive:
-            self.assertEqual(archive.read('quality-001-clean.log'), b'')
-            self.assertEqual(archive.read('quality-032-clean.log'), b'')
-            self.assertEqual(archive.read(t.MANIFEST), (self.original / t.MANIFEST).read_bytes())
-            self.assertEqual(archive.read(t.SUMS), (self.original / t.SUMS).read_bytes())
-        self.assertEqual(t.verify(self.original, output, IDENTITY), t.inventory(output))
+    def copy_all(self, github):
+        for path in self.output.iterdir():
+            github.add(path.name, path.read_bytes())
 
-    def test_original_mismatch_extra_or_unexpected_empty_are_rejected(self):
-        for mutation in ('tamper', 'extra', 'empty-package'):
-            with self.subTest(mutation=mutation):
-                folder = original(self.root / mutation)
-                if mutation == 'extra':
-                    (folder / 'extra.txt').write_text('unverified')
-                else:
-                    (folder / 'package.zip').write_bytes(b'changed' if mutation == 'tamper' else b'')
-                with self.assertRaises(RuntimeError):
-                    t.prepare(folder, self.root / (mutation + '-out'), IDENTITY)
-                self.assertFalse((self.root / (mutation + '-out')).exists())
-
-    def test_coherently_rehashed_archive_tamper_and_duplicate_are_rejected(self):
-        for mode in ('changed', 'duplicate', 'extra', 'link'):
-            with self.subTest(mode=mode):
-                output = self.prepare(name=mode)
-                with zipfile.ZipFile(output / t.ARCHIVE) as archive:
-                    entries = [(x, archive.read(x)) for x in archive.infolist()]
-                with zipfile.ZipFile(output / t.ARCHIVE, 'w') as archive:
-                    for item, raw in entries:
-                        if item.filename == 'quality-001-clean.log':
-                            if mode == 'changed': raw = b'not empty'
-                            if mode == 'link': item.external_attr = (stat.S_IFLNK | 0o777) << 16
-                        archive.writestr(item, raw)
-                    if mode == 'extra': archive.writestr('../escape', b'bad')
-                    if mode == 'duplicate': archive.writestr('quality-001-clean.log', b'')
-                proof = t.read(output / t.PROOF)
-                proof['archive_sha256'] = t.sha(output / t.ARCHIVE)
-                t.write(output / t.PROOF, proof)
-                manifest = t.read(output / t.MANIFEST)
-                for name in (t.ARCHIVE, t.PROOF): manifest['assets'][name] = t.sha(output / name)
-                t.write(output / t.MANIFEST, manifest)
-                self.refresh_sums(output)
-                with self.assertRaises(RuntimeError): t.verify(self.original, output, IDENTITY)
-
-    def test_new_release_uploads_only_nonempty_and_verifies_before_publish(self):
-        output = self.prepare()
+    def test_new_release_uploads_and_downloads_complete_set_before_publish(self):
         github = FakeGitHub()
-        result = t.publish(self.original, output, IDENTITY, github, self.notes)
+        result = self.publish(github)
         self.assertTrue(result['published'])
+        self.assertEqual(github.calls[0], ('create', TAG))
         self.assertEqual(github.calls[-1], ('publish', 77))
-        self.assertEqual(set(github.stored), set(t.inventory(output)))
-        self.assertTrue(all(a['size'] > 0 for a in github.stored.values()))
+        self.assertEqual(set(github.stored), set(t.checksums(self.output)))
+        self.assertEqual({call[1] for call in github.calls if call[0] == 'download'}, set(github.stored))
 
-    def test_check_only_validates_existing_bytes_without_any_remote_mutation(self):
+    def test_check_only_never_creates_uploads_or_publishes(self):
         for existing in (False, True):
             with self.subTest(existing=existing):
-                resume = recovery() if existing else None
-                output = self.prepare(resume, 'check-' + str(existing))
-                github = FakeGitHub()
+                github = FakeGitHub(existing)
                 if existing:
-                    github.add('package.zip', (output / 'package.zip').read_bytes(), 90)
-                    github.add(t.SUMS, base64.b64decode(resume['old_checksums_base64']), 91)
-                result = t.publish(self.original, output, IDENTITY, github, self.notes, resume, check_only=True)
-                self.assertFalse(result['published'])
+                    github.add('package.zip', (self.output / 'package.zip').read_bytes())
+                result = self.publish(github, check_only=True)
                 self.assertTrue(result['check_only'])
-                self.assertFalse(any(c[0] in ('create', 'upload', 'delete', 'publish') for c in github.calls))
-                if existing: self.assertIn(('download', 'package.zip'), github.calls)
+                self.assertFalse(result['published'])
+                self.assert_read_only(github)
+                if existing:
+                    self.assertIn(('download', 'package.zip'), github.calls)
 
-    def test_resume_reuses_package_and_only_replaces_authorized_checksum_id(self):
-        resume = recovery()
-        output = self.prepare(resume)
-        github = FakeGitHub()
-        github.add('package.zip', (output / 'package.zip').read_bytes(), 90)
-        github.add(t.SUMS, base64.b64decode(resume['old_checksums_base64']), 91)
-        result = t.publish(self.original, output, IDENTITY, github, self.notes, resume)
+    def test_existing_draft_reuses_matching_files_and_adds_only_missing(self):
+        github = FakeGitHub(True)
+        github.add('package.zip', (self.output / 'package.zip').read_bytes())
+        existing_id = github.stored['package.zip']['id']
+        result = self.publish(github)
         self.assertTrue(result['published'])
+        self.assertEqual(result['reused_assets'], ['package.zip'])
         self.assertNotIn(('upload', 'package.zip'), github.calls)
-        self.assertEqual([c for c in github.calls if c[0] == 'delete'], [('delete', 91)])
-        self.assertEqual(github.stored['package.zip']['id'], 90)
+        self.assertNotIn(('create', TAG), github.calls)
+        self.assertEqual(github.stored['package.zip']['id'], existing_id)
 
-    def test_unknown_or_mismatched_existing_assets_never_mutate(self):
-        for mode in ('extra', 'package', 'wrong-checksum-id', 'wrong-checksum-hash', 'published', 'wrong-tag', 'wrong-target'):
+    def test_existing_unknown_mismatched_or_unfinished_assets_never_mutate(self):
+        for mode in ('extra', 'package', 'checksum', 'starter', 'tag', 'target'):
             with self.subTest(mode=mode):
-                resume = recovery()
-                output = self.prepare(resume, mode)
-                github = FakeGitHub()
-                if mode == 'extra': github.add('unrelated.bin', b'other')
-                if mode == 'package': github.add('package.zip', b'wrong')
-                if mode.startswith('wrong-checksum'):
-                    github.add(t.SUMS, b'wrong' if mode.endswith('hash') else base64.b64decode(resume['old_checksums_base64']),
-                               92 if mode.endswith('id') else 91)
-                if mode == 'published': github.state.update(draft=False, published_at='already')
-                if mode == 'wrong-tag': github.tag = 'f' * 40
-                if mode == 'wrong-target': github.state['target_commitish'] = 'main'
-                with self.assertRaises(RuntimeError): t.publish(self.original, output, IDENTITY, github, self.notes, resume)
-                self.assertFalse(any(c[0] in ('upload', 'delete', 'publish') for c in github.calls))
+                github = FakeGitHub(True)
+                if mode == 'extra':
+                    github.add('unrelated.bin', b'other')
+                if mode == 'package':
+                    github.add('package.zip', b'wrong')
+                if mode == 'checksum':
+                    github.add(t.SUMS, b'old checksum bytes')
+                if mode == 'starter':
+                    github.add('package.zip', b'incomplete')
+                    github.stored['package.zip']['state'] = 'starter'
+                if mode == 'tag':
+                    github.tag = 'f' * 40
+                if mode == 'target':
+                    github.state['target_commitish'] = 'main'
+                with self.assertRaises(RuntimeError):
+                    self.publish(github)
+                self.assert_read_only(github)
 
-    def test_failures_after_partial_upload_remain_draft(self):
+    def test_published_matching_release_is_idempotent_including_check_only(self):
+        for check_only in (False, True):
+            with self.subTest(check_only=check_only):
+                github = FakeGitHub(True)
+                github.state.update(draft=False, published_at='already')
+                self.copy_all(github)
+                result = self.publish(github, check_only=check_only)
+                self.assertTrue(result['published'])
+                self.assertEqual(result['check_only'], check_only)
+                self.assert_read_only(github)
+                self.assertEqual(len(github.calls), len(github.stored))
+
+    def test_published_incomplete_or_changed_release_is_never_repaired(self):
+        for mode in ('missing', 'changed', 'extra'):
+            with self.subTest(mode=mode):
+                github = FakeGitHub(True)
+                github.state.update(draft=False, published_at='already')
+                self.copy_all(github)
+                if mode == 'missing':
+                    del github.stored['package.zip']
+                if mode == 'changed':
+                    github.add('package.zip', b'different')
+                if mode == 'extra':
+                    github.add('unknown.bin', b'unknown')
+                with self.assertRaises(RuntimeError):
+                    self.publish(github)
+                self.assert_read_only(github)
+
+    def test_failures_after_upload_leave_draft(self):
         for mode in ('upload', 'download', 'tag-change', 'missing'):
             with self.subTest(mode=mode):
-                output = self.prepare(name=mode)
                 github = FakeGitHub()
-                if mode == 'upload': github.fail_upload = t.PROOF
-                if mode == 'download': github.bad_download = 'package.zip'
-                if mode == 'tag-change': github.change_tag_after_upload = True
-                if mode == 'missing': github.omit_uploaded = True
-                with self.assertRaises(RuntimeError): t.publish(self.original, output, IDENTITY, github, self.notes)
+                if mode == 'upload':
+                    github.fail_upload = 'package.zip'
+                if mode == 'download':
+                    github.bad_download = 'package.zip'
+                if mode == 'tag-change':
+                    github.change_tag_after_upload = True
+                if mode == 'missing':
+                    github.omit_uploaded = True
+                with self.assertRaises(RuntimeError):
+                    self.publish(github)
                 self.assertTrue(github.state['draft'])
-                self.assertFalse(any(c[0] == 'publish' for c in github.calls))
+                self.assertFalse(any(call[0] == 'publish' for call in github.calls))
 
-    def test_same_recovery_inputs_can_resume_after_partial_upload_replaced_checksums(self):
-        resume = recovery()
-        output = self.prepare(resume)
+    def test_retry_after_partial_upload_reuses_exact_original_assets(self):
         github = FakeGitHub()
-        github.add(t.SUMS, base64.b64decode(resume['old_checksums_base64']), 91)
-        github.fail_upload = t.PROOF
-        with self.assertRaises(RuntimeError): t.publish(self.original, output, IDENTITY, github, self.notes, resume)
-        self.assertNotEqual(github.stored[t.SUMS]['id'], 91)
-        prior_uploads = [c for c in github.calls if c[0] == 'upload' and c[1] == 'package.zip']
+        github.fail_upload = 'package.zip'
+        with self.assertRaisesRegex(RuntimeError, 'upload failure'):
+            self.publish(github)
+        original_ids = {name: item['id'] for name, item in github.stored.items()}
+        self.assertTrue(original_ids)
         github.fail_upload = None
-        result = t.publish(self.original, output, IDENTITY, github, self.notes, resume)
+        result = self.publish(github)
         self.assertTrue(result['published'])
-        self.assertEqual(prior_uploads, [c for c in github.calls if c[0] == 'upload' and c[1] == 'package.zip'])
+        self.assertTrue(all(github.stored[name]['id'] == asset_id for name, asset_id in original_ids.items()))
+        self.assertEqual(github.calls.count(('create', TAG)), 1)
 
-    def test_create_refuses_an_existing_draft_without_mutating(self):
-        github = t.GitHub('owner/project')
-        with patch.object(github, 'api', return_value=[{'tag_name': TAG, 'draft': True}]) as request:
-            with self.assertRaisesRegex(RuntimeError, 'already exists'): github.create(TAG, COMMIT, self.notes)
-            self.assertEqual(request.call_count, 1)
-
-    def test_exact_incomplete_source_is_recorded_replaced_and_retry_reuses_bytes(self):
-        resume = recovery()
-        starter = {'id': 95, 'name': 'source.tar.gz', 'size': (self.original / 'source.tar.gz').stat().st_size,
-                   'state': 'starter', 'digest': None}
-        resume['incomplete_assets'] = [starter]
-        output = self.prepare(resume)
+    def test_publication_response_loss_recovers_only_after_remote_confirmation(self):
         github = FakeGitHub()
-        github.stored[starter['name']] = {**starter, 'raw': b'not retrievable'}
-        result = t.publish(self.original, output, IDENTITY, github, self.notes, resume, check_only=True)
-        self.assertEqual(result['incomplete_assets_identified'], {'source.tar.gz': 95})
-        self.assertNotIn('source.tar.gz', result['existing_assets_verified'])
-        self.assertEqual(github.calls, [])
-        github.fail_upload = 'source.tar.gz'
-        with self.assertRaises(RuntimeError): t.publish(self.original, output, IDENTITY, github, self.notes, resume)
-        self.assertEqual(github.calls.count(('delete', 95)), 1)
-        self.assertNotIn('source.tar.gz', github.stored)
-        github.fail_upload = None
-        result = t.publish(self.original, output, IDENTITY, github, self.notes, resume)
+        github.publish_error = 'after'
+        result = self.publish(github)
         self.assertTrue(result['published'])
-        self.assertEqual(github.calls.count(('delete', 95)), 1)
-        self.assertEqual(github.stored['source.tar.gz']['raw'], (self.original / 'source.tar.gz').read_bytes())
-        github.state.update(draft=True, published_at=None)
-        github.calls.clear()
-        t.publish(self.original, output, IDENTITY, github, self.notes, resume)
-        self.assertFalse(any(c[0] in ('delete', 'upload') for c in github.calls))
-
-    def test_incomplete_source_identity_or_verified_size_mismatch_never_mutates(self):
-        starter = {'id': 95, 'name': 'source.tar.gz', 'size': (self.original / 'source.tar.gz').stat().st_size,
-                   'state': 'starter', 'digest': None}
-        for field, value in [('id', 96), ('name', 'package.zip'), ('size', 1), ('digest', 'sha256:' + 'a' * 64),
-                             ('state', 'uploaded'), ('allowed_size', 1)]:
-            with self.subTest(field=field):
-                resume = recovery()
-                resume['incomplete_assets'] = [copy.deepcopy(starter)]
-                actual = copy.deepcopy(starter)
-                if field == 'allowed_size':
-                    actual['size'] = resume['incomplete_assets'][0]['size'] = value
-                else:
-                    actual[field] = value
-                output = self.prepare(resume, name='mismatch-' + field)
-                github = FakeGitHub()
-                github.stored[actual['name']] = {**actual, 'raw': b'invalid uploaded bytes'}
-                with self.assertRaises(RuntimeError): t.publish(self.original, output, IDENTITY, github, self.notes, resume)
-                self.assertFalse(any(c[0] in ('delete', 'upload', 'publish') for c in github.calls))
-
-    def test_incomplete_asset_changes_during_validation_prevent_deletion(self):
-        resume = recovery()
-        starter = {'id': 95, 'name': 'source.tar.gz', 'size': (self.original / 'source.tar.gz').stat().st_size,
-                   'state': 'starter', 'digest': None}
-        resume['incomplete_assets'] = [starter]
-        output = self.prepare(resume)
+        self.assertTrue(all(count == 2 for count in github.download_counts.values()))
         github = FakeGitHub()
-        github.stored[starter['name']] = {**starter, 'raw': b'incomplete'}
+        github.publish_error = 'before'
+        with self.assertRaisesRegex(RuntimeError, 'publication failure'):
+            self.publish(github)
+        self.assertTrue(github.state['draft'])
+
+    def test_asset_changes_during_existing_validation_prevent_upload(self):
+        github = FakeGitHub(True)
+        github.add('package.zip', (self.output / 'package.zip').read_bytes())
         original_assets = github.assets
         calls = 0
         def changed(release_id):
             nonlocal calls
             calls += 1
             if calls == 2:
-                github.stored['source.tar.gz']['state'] = 'uploaded'
+                github.stored['package.zip']['id'] += 1
             return original_assets(release_id)
-        with patch.object(github, 'assets', side_effect=changed), self.assertRaises(RuntimeError):
-            t.publish(self.original, output, IDENTITY, github, self.notes, resume)
-        self.assertEqual(github.calls, [])
+        with patch.object(github, 'assets', side_effect=changed), self.assertRaisesRegex(RuntimeError, 'changed'):
+            self.publish(github)
+        self.assert_read_only(github)
 
-    def test_upload_targets_exact_release_id_with_raw_file(self):
+    def test_local_checksum_missing_extra_empty_and_tampered_assets_fail_before_github(self):
+        for mode in ('missing', 'extra', 'empty', 'tampered'):
+            with self.subTest(mode=mode):
+                output = distribution(self.root / mode)
+                if mode == 'missing':
+                    (output / t.SUMS).unlink()
+                elif mode == 'extra':
+                    (output / 'extra.bin').write_bytes(b'extra')
+                else:
+                    (output / 'package.zip').write_bytes(b'' if mode == 'empty' else b'changed')
+                with patch.object(t, 'GitHub') as github, self.assertRaises(RuntimeError):
+                    t.publish(output, github, TAG, COMMIT, self.notes)
+                self.assertEqual(github.mock_calls, [])
+
+    def test_duplicate_or_self_referencing_checksum_rejected(self):
+        for duplicate in ('package.zip', t.SUMS):
+            with self.subTest(duplicate=duplicate):
+                output = distribution(self.root / ('duplicate-' + duplicate))
+                with (output / t.SUMS).open('a') as sums:
+                    sums.write('a' * 64 + '  ' + duplicate + '\n')
+                with self.assertRaisesRegex(RuntimeError, 'Duplicate or self-referencing'):
+                    t.checksums(output)
+
+    def test_upload_uses_exact_release_id_and_raw_file(self):
         github = t.GitHub('owner/project')
-        package = self.original / 'package.zip'
+        package = self.output / 'package.zip'
         with patch.object(github, 'command', return_value=types.SimpleNamespace(stdout=json.dumps(
                 {'name': package.name, 'size': package.stat().st_size}).encode())) as command:
             github.upload(77, package)
@@ -330,41 +286,37 @@ class TransportTests(unittest.TestCase):
             self.assertIn('/releases/77/assets?name=package.zip', argv[1])
             self.assertEqual(argv[argv.index('--input') + 1], str(package))
 
-    def test_runner_uses_original_verifier_without_publish_and_stops_on_failure(self):
-        candidate = self.root / 'candidate'
-        candidate.mkdir()
-        calls = []
-        def git(argv, **kwargs):
-            return COMMIT + '\n' if argv[-2:] == ['rev-parse', 'HEAD'] else b''
-        def execute(argv, **kwargs):
-            calls.append((argv, kwargs))
-            raise RuntimeError('injected original gate failure')
-        argv = ['publish_verified_release.py', '--Tag', TAG, '--CandidateRunId', '12', '--EvidenceCommit', '4' * 40,
-                '--EvidencePath', 'release-evidence/windows.json', '--EvidenceSHA256', '5' * 64,
-                '--ToolsCommit', '2' * 40, '--CandidateSource', str(candidate), '--Output', str(self.root / 'runner-out')]
-        with patch.object(sys, 'argv', argv), patch.object(t, 'tools_identity', return_value=IDENTITY), \
-                patch.object(runner.subprocess, 'check_output', side_effect=git), \
-                patch.object(runner.subprocess, 'run', side_effect=execute), patch.object(t, 'GitHub') as github:
-            with self.assertRaisesRegex(RuntimeError, 'original gate failure'): runner.main()
-            github.assert_not_called()
-        command, options = calls[0]
-        self.assertEqual(command[1], str(candidate / 'scripts/promote_release.py'))
-        self.assertNotIn('--Publish', command)
-        self.assertEqual(options['cwd'], candidate)
-
-    def test_pagination_collects_more_than_one_hundred_assets(self):
+    def test_asset_and_release_pagination(self):
         github = t.GitHub('owner/project')
         with patch.object(github, 'api', side_effect=[list(range(100)), list(range(100, 125))]) as request:
             self.assertEqual(github.assets(77), list(range(125)))
             self.assertIn('page=2', request.call_args.args[0])
+        wanted = {'id': 77, 'tag_name': TAG}
+        with patch.object(github, 'api', side_effect=[[{'tag_name': 'old'}] * 100, [wanted]]) as request:
+            self.assertEqual(github.find_release(TAG), wanted)
+            self.assertIn('page=2', request.call_args.args[0])
+        with patch.object(github, 'api', return_value=[wanted, wanted]), self.assertRaisesRegex(RuntimeError, 'Multiple'):
+            github.find_release(TAG)
 
-    def test_ambiguous_or_incomplete_remote_assets_rejected(self):
-        github = FakeGitHub()
-        github.add('a.log', b'a')
+    def test_create_checks_for_racing_release_without_writing(self):
+        github = t.GitHub('owner/project')
+        with patch.object(github, 'api', return_value=[{'tag_name': TAG}]) as request:
+            with self.assertRaisesRegex(RuntimeError, 'appeared'):
+                github.create(TAG, COMMIT, self.notes)
+            self.assertEqual(request.call_count, 1)
+
+    def test_ambiguous_unsafe_and_unfinished_remote_assets_rejected(self):
+        github = FakeGitHub(True)
+        github.add('package.zip', b'content')
         item = github.assets(77)[0]
-        for entries in ([item, item], [{**item, 'state': 'starter'}], [{**item, 'name': '../escape'}]):
+        for entries in ([item, item], [{**item, 'state': 'starter'}], [{**item, 'name': '../escape'}],
+                        [{**item, 'size': 0}], [{**item, 'id': True}]):
             with patch.object(github, 'assets', return_value=entries), self.assertRaises(RuntimeError):
                 t.asset_map(github, 77)
+        starter = {**item, 'state': 'starter', 'size': 0}
+        with patch.object(github, 'assets', return_value=[starter]), \
+                self.assertRaisesRegex(RuntimeError, 'Unfinished asset in release 77: 101'):
+            t.asset_map(github, 77)
 
 
 if __name__ == '__main__':

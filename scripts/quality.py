@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -53,6 +54,53 @@ def first_party(database, source):
                 result.add(relative.as_posix())
     need(result, 'No first-party translation units')
     return sorted(result)
+
+
+def check_instrumentation(build, database):
+    """Check the generated build settings before trusting instrumented tests."""
+    required_flags = set(FLAGS.split())
+    for relative, languages in (('CMakeCache.txt', ('C', 'CXX')),
+                                ('dependencies/zlib-build/CMakeCache.txt', ('C',))):
+        cache = dict(line.split('=', 1) for line in (build / relative).read_text().splitlines()
+                     if '=' in line and not line.startswith(('//', '#')))
+        for language in languages:
+            compiler = '/usr/bin/clang++-21' if language == 'CXX' else '/usr/bin/clang-21'
+            key = 'CMAKE_' + language + '_COMPILER'
+            need(cache.get(key + ':FILEPATH', cache.get(key + ':STRING')) == compiler,
+                 f'Unexpected {language} compiler in {relative}')
+            flags = shlex.split(cache.get('CMAKE_' + language + '_FLAGS:STRING', ''))
+            need(required_flags <= set(flags), f'Sanitizer compiler flags missing in {relative}')
+        if relative == 'CMakeCache.txt':
+            need(cache.get('QCWS_SANITIZERS:BOOL') == 'ON' and cache.get('QCWS_FUZZING:BOOL') == 'ON',
+                 'Quality CMake options disabled')
+    lexbor = []
+    for item in database:
+        command = item.get('arguments') or shlex.split(item.get('command', ''))
+        if any('lexbor_static.dir' in argument for argument in command):
+            lexbor.append(command)
+    need(lexbor and all({'-fsanitize=address,undefined', '-fsanitize=fuzzer-no-link'} <= set(command)
+                        for command in lexbor), 'Lexbor fuzz/sanitizer instrumentation missing')
+
+
+def check_tests(names, junit):
+    need(len(names) == len(set(names)) and REQUIRED <= set(names), 'Missing or duplicate discovered tests')
+    cases = ET.parse(junit).getroot().findall('.//testcase')
+    need(sorted(case.get('name') for case in cases) == sorted(names)
+         and not any(case.find(key) is not None for case in cases for key in ('failure', 'error', 'skipped')),
+         'CTest discovery and successful JUnit cases differ')
+
+
+def check_tidy(database, source, completed):
+    need(first_party(database, source) == sorted(completed), 'Not all translation units passed clang-tidy')
+
+
+def fuzz_result(text, duration, seconds):
+    need(duration >= seconds - 1, 'Fuzz campaign ended before its required duration')
+    counts = re.findall(r'stat::number_of_executed_units:\s*(\d+)', text)
+    coverage = re.findall(r'(?m)^#\d+\s+DONE\s+cov:\s*(\d+)\b', text)
+    need(counts and coverage and int(counts[-1]) >= 100 and int(coverage[-1]) > 0,
+         'Insufficient fuzz execution/coverage')
+    return {'executed_units': int(counts[-1]), 'done_cov': int(coverage[-1])}
 
 
 def stop_group(pid):
@@ -108,13 +156,17 @@ def main():
             row['duration_seconds'] = round(time.monotonic() - started, 3)
             if log.is_file():
                 row['log_sha256'] = sha(log)
+        if (row['exit_code'] != 0 or row['timed_out']) and log.is_file():
+            with log.open('rb') as stream:
+                stream.seek(max(0, log.stat().st_size - 32768))
+                print(stream.read().decode('utf-8', errors='replace'), file=sys.stderr, flush=True)
         need(row['exit_code'] == 0 and not row['timed_out'], f'Command failed: {label}')
         return log
 
     try:
         report['source_commit'] = run('git-head', ['git', 'rev-parse', 'HEAD']).read_text().strip()
         report['clean_before'] = not run('git-clean-before', ['git', 'status', '--porcelain=v1']).read_text().strip()
-        need(report['clean_before'], 'Quality evidence requires a clean checkout')
+        need(report['clean_before'], 'Quality checks require a clean checkout')
         report.update(repository=env.get('GITHUB_REPOSITORY'), run_id=env.get('GITHUB_RUN_ID'),
                       run_attempt=env.get('GITHUB_RUN_ATTEMPT'), github_sha=env.get('GITHUB_SHA'))
         if report['github_sha']:
@@ -148,23 +200,23 @@ def main():
         shutil.copyfile(discovery, out / 'discovered-tests.json')
         names = [item['name'] for item in json.loads(discovery.read_text())['tests']]
         need(len(names) == len(set(names)) and REQUIRED <= set(names), 'Missing or duplicate discovered tests')
+        database = json.loads((build / 'compile_commands.json').read_text())
+        check_instrumentation(build, database)
         run('pipeline-test', [*base, 'test'])
         shutil.copyfile(build / 'test-results.xml', out / 'test-results.xml')
-        cases = ET.parse(out / 'test-results.xml').getroot().findall('.//testcase')
-        need(sorted(case.get('name') for case in cases) == sorted(names)
-             and not any(case.find(key) is not None for case in cases for key in ('failure', 'error', 'skipped')),
-             'CTest discovery and successful JUnit cases differ')
+        check_tests(names, out / 'test-results.xml')
         report['test_names'] = sorted(names)
         for name in ('compile_commands.json', 'CMakeCache.txt'):
             shutil.copyfile(build / name, out / name)
         shutil.copyfile(build / 'dependencies/zlib-build/CMakeCache.txt', out / 'zlib-CMakeCache.txt')
-        units = first_party(json.loads((out / 'compile_commands.json').read_text()), ROOT)
+        units = first_party(database, ROOT)
         report['expected_tidy_files'] = units
         for unit in units:
             run('tidy-' + str(len(report['tidy_files'])), ['clang-tidy-21', '-p', build, ROOT / unit,
                 '--config-file=' + str(ROOT / '.clang-tidy'), '--warnings-as-errors=*',
                 '--header-filter=^' + re.escape(str(ROOT)) + '/(include/qws|src|app|tests)/'], timeout=600)
             report['tidy_files'].append(unit)
+        check_tidy(database, ROOT, report['tidy_files'])
         for name, max_len in FUZZERS.items():
             executable, seed_dir = build / f'qcws_{name}_fuzz', ROOT / 'tests/fuzz/corpus' / name
             corpus = out / 'corpus' / name
@@ -177,11 +229,9 @@ def main():
                 f'-max_len={max_len}', '-timeout=5', '-rss_limit_mb=1024', '-print_final_stats=1',
                 '-artifact_prefix=' + artifacts.as_posix() + '/'], timeout=args.Seconds + 60)
             text = log.read_text(encoding='utf-8', errors='replace')
-            counts = re.findall(r'stat::number_of_executed_units:\s*(\d+)', text)
-            coverage = re.findall(r'(?m)^#\d+\s+DONE\s+cov:\s*(\d+)\b', text)
-            need(counts and coverage and int(counts[-1]) >= 100 and int(coverage[-1]) > 0, 'Insufficient fuzz execution/coverage')
+            result = fuzz_result(text, report['commands'][-1]['duration_seconds'], args.Seconds)
             need(item['executable_sha256'] == sha(executable) and item['seeds'] == seeds(seed_dir), 'Fuzz inputs changed')
-            item.update(log=log.name, executed_units=int(counts[-1]), done_cov=int(coverage[-1]))
+            item.update(log=log.name, **result)
         report['source_after'] = source_snapshot(ROOT)
         report['clean_after'] = not run('git-clean-after', ['git', 'status', '--porcelain=v1']).read_text().strip()
         need(report['clean_after'] and report['source_after'] == report['build_identity']['source_sha256'], 'Source changed during quality checks')
@@ -190,8 +240,8 @@ def main():
         report['error'] = f'{type(error).__name__}: {error}'
         print(report['error'], file=sys.stderr)
     finally:
-        # Preserve actual failed compiler/test diagnostics as well as successful
-        # evidence. Failed runs must never need a rerun just to retrieve a crash.
+        # Keep diagnostics in the caller's output directory. CI uses a temporary
+        # directory and exposes failures through its normal console log.
         for relative, name in (
             ('test-results.xml', 'test-results.xml'),
             ('compile_commands.json', 'compile_commands.json'),
