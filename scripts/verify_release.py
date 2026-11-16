@@ -197,6 +197,22 @@ def verify(root,commit,tag,run_id,evidence_path,evidence_sha,repository,run_atte
     msi_hash = next(value for name,value in windows['package_sha256'].items() if name.endswith('.msi'))
     zip_hash = next(value for name,value in windows['package_sha256'].items() if name.endswith('.zip'))
     need(msi['Candidate']['Sha256'].lower() == msi_hash,'MSI report hash mismatch')
+    need(msi.get('ScriptSha256') == sha(ROOT/'scripts/AcceptWindowsMsi.ps1'),'MSI script does not match release source')
+    need(msi.get('PowerShellEdition') in ('Desktop','Core')
+         and re.fullmatch(r'\d+\.\d+(?:\.\d+){0,2}',msi.get('PowerShellVersion','')) is not None,
+         'PowerShell execution identity missing')
+    baseline,source = msi.get('Baseline',{}),msi.get('BaselineSource',{})
+    baseline_version = baseline.get('ProductVersion','')
+    need(re.fullmatch(r'\d+\.\d+\.\d+',baseline_version) is not None
+         and tuple(map(int,baseline_version.split('.'))) < tuple(map(int,tag[1:].split('.')))
+         and msi['Candidate'].get('ProductVersion') == tag[1:]
+         and baseline.get('UpgradeCode') and baseline['UpgradeCode'] == msi['Candidate'].get('UpgradeCode'),
+         'MSI baseline upgrade identity mismatch')
+    need(re.fullmatch(r'[0-9a-f]{40}',source.get('SourceCommit','')) is not None
+         and isinstance(source.get('WorkingTreeDirty'),bool)
+         and re.fullmatch(r'[0-9a-f]{64}',source.get('BuildInfoSha256','')) is not None
+         and re.fullmatch(r'[0-9a-f]{64}',source.get('PackageSha256','')) is not None
+         and source['PackageSha256'] == baseline.get('Sha256','').lower(),'MSI baseline source identity missing or mismatched')
     need(portable.get('passed') is True and portable['runtime'] == windows['installed_runtime']
          and portable['executable_sha256'] == windows['executable_sha256']
          and portable.get('portable', {}).get('package_sha256') == zip_hash

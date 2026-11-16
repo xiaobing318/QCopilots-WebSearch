@@ -175,6 +175,11 @@ def hidden_console():
 
 def stop_process(proc):
     started, error, forced, children = time.monotonic(), None, False, []
+    # A reaped Popen no longer owns its numeric PID. Never reopen that PID to
+    # enumerate or signal descendants belonging to a replacement process.
+    if proc.poll() is not None:
+        return {"seconds": round(time.monotonic() - started, 3), "returncode": proc.returncode,
+                "forced": False, "error": "early_exit", "passed": False}
     try:
         children = psutil.Process(proc.pid).children(recursive=True)
     except psutil.Error:

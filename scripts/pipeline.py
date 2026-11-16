@@ -26,6 +26,18 @@ PLATFORM = "windows-x64" if WIN else "ubuntu-x64"
 STAGES = ("doctor", "bootstrap", "configure", "build", "test", "install", "publish")
 
 
+class ConfiguredProxyHandler(urllib.request.ProxyHandler):
+    def proxy_open(self, request, proxy, protocol):
+        # The profile is authoritative. urllib's default ProxyHandler consults
+        # process/system bypass rules even when given an explicit proxy map.
+        parsed = urllib.parse.urlsplit(proxy)
+        original = request.type
+        request.set_proxy(parsed.netloc, parsed.scheme)
+        if original != parsed.scheme and original != 'https':
+            return self.parent.open(request, timeout=request.timeout)
+        return None
+
+
 def apt_command(proxy, root):
     if not isinstance(proxy, str) or not re.fullmatch(r"(?:|https?://[^\s@\x00-\x1f\x7f]+)", proxy):
         raise RuntimeError("Invalid bootstrap download proxy.")
@@ -47,8 +59,14 @@ class Pipeline:
         self.profile = self.config["profiles"][args.Profile]
         self.lock = json.loads((ROOT / "config/dependencies.lock.json").read_text(encoding="utf-8"))
         self.env = dict(os.environ)
+        for key in ("ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy", "PIP_PROXY"):
+            self.env.pop(key, None)
+        # Also suppress pip proxy settings in machine/user configuration files.
+        self.env["PIP_CONFIG_FILE"] = os.devnull
         for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
             self.env[key] = self.profile.get("proxy", "")
+        for key in ("NO_PROXY", "no_proxy"):
+            self.env[key] = "" if self.profile.get("proxy") else "*"
         self.env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
         self.dry = args.DryRun
         self.build = self.path("buildDir")
@@ -191,7 +209,7 @@ class Pipeline:
             return target
         target.parent.mkdir(parents=True, exist_ok=True)
         proxy = self.profile.get("proxy", "")
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy, "https": proxy} if proxy else {}))
+        opener = urllib.request.build_opener(ConfiguredProxyHandler({"http": proxy, "https": proxy} if proxy else {}))
         for attempt in range(3):
             temporary = None
             try:

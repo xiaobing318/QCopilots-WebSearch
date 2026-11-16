@@ -2,8 +2,8 @@
 $options = @{}
 for ($n = 0; $n -lt $args.Count; $n += 2) {
     $key = [string]$args[$n]
-    if ($key -notin @('--CandidateMsi','--BaselineMsi','--OutputDir') -or $n + 1 -ge $args.Count -or $options.ContainsKey($key)) {
-        throw 'Use --CandidateMsi FILE --BaselineMsi FILE --OutputDir DIR.'
+    if ($key -notin @('--CandidateMsi','--BaselineMsi','--BaselineBuildInfo','--OutputDir') -or $n + 1 -ge $args.Count -or $options.ContainsKey($key)) {
+        throw 'Use --CandidateMsi FILE --BaselineMsi FILE --OutputDir DIR [--BaselineBuildInfo FILE].'
     }
     $options[$key] = [string]$args[$n + 1]
 }
@@ -12,6 +12,7 @@ foreach ($key in @('--CandidateMsi','--BaselineMsi','--OutputDir')) {
 }
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$scriptSha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
 function Assert([bool]$ok, [string]$message) { if (!$ok) { throw $message } }
 $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
 Assert ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) 'Run elevated.'
@@ -175,6 +176,16 @@ function Remove-OwnedTree([string]$root) {
 }
 $candidate = Read-Msi $options['--CandidateMsi']
 $baseline = Read-Msi $options['--BaselineMsi']
+$baselineInfoPath = if ($options.ContainsKey('--BaselineBuildInfo')) { $options['--BaselineBuildInfo'] }
+                    else { Join-Path ([IO.Path]::GetDirectoryName($baseline.Path)) 'build-info-windows-x64.json' }
+$baselineInfo = Get-Content -LiteralPath $baselineInfoPath -Raw | ConvertFrom-Json
+$baselinePackageHash = $baselineInfo.package_sha256.([IO.Path]::GetFileName($baseline.Path))
+Assert ($baselineInfo.target -eq 'windows-x64' -and $baselineInfo.project_version -eq $baseline.ProductVersion) 'Baseline build metadata mismatch.'
+Assert ($baselineInfo.source_commit -match '^[0-9a-f]{40}$' -and $baselineInfo.working_tree_dirty -is [bool]) 'Baseline source identity missing.'
+Assert ($baselinePackageHash -eq $baseline.Sha256) 'Baseline build metadata does not match MSI bytes.'
+$baselineSource = @{ SourceCommit = $baselineInfo.source_commit; WorkingTreeDirty = $baselineInfo.working_tree_dirty;
+                     BuildInfoSha256 = (Get-FileHash -LiteralPath $baselineInfoPath -Algorithm SHA256).Hash.ToLowerInvariant();
+                     PackageSha256 = $baselinePackageHash.ToLowerInvariant() }
 foreach ($metadata in @($candidate, $baseline)) {
     [void][guid]::Parse($metadata.ProductCode)
     [void][guid]::Parse($metadata.UpgradeCode)
@@ -260,6 +271,8 @@ finally {
         Assert (@(Owned-Processes).Count -eq 0) 'Cleanup left a process.'
     } catch { $cleanupFailures.Add($_.Exception.Message) }
     @{ Passed = (!$failure -and !$cleanupFailures.Count); Candidate = $candidate; Baseline = $baseline;
+       ScriptSha256 = $scriptSha256; PowerShellVersion = $PSVersionTable.PSVersion.ToString();
+       PowerShellEdition = $PSVersionTable.PSEdition; BaselineSource = $baselineSource;
        StopSeconds = $stopSeconds; WindowsBuild = $osInfo.BuildNumber; WindowsProductType = $osInfo.ProductType;
        CleanupErrors = @($cleanupFailures); Error = "$failure" } |
         ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $runDir 'result.json') -Encoding UTF8

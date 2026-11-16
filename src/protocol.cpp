@@ -97,8 +97,29 @@ ProtocolReply Protocol::finishCall(const std::shared_ptr<Session> &s, const std:
 }
 ProtocolReply Protocol::handle(const std::string &principal, const std::string &sid, const Json &m,
                                std::shared_ptr<CancelToken> cancellation) {
+  auto reply = handleRequest(principal, sid, m, std::move(cancellation));
+  if (reply.message && reply.message->dump().size() > 1024 * 1024) {
+    // Bound the complete envelope, including future status/tool-list growth.
+    // Do not leave an initialization session behind when its reply was rejected.
+    if (m.value("method", Json()) == "initialize" && sid.empty() && !reply.sessionId.empty()) {
+      deleteSession(principal, reply.sessionId);
+      reply.sessionId.clear();
+    }
+    return rpcError(reply.httpStatus, reply.message->value("id", Json()), -32603, "Response exceeds protocol budget",
+                    reply.sessionId);
+  }
+  return reply;
+}
+ProtocolReply Protocol::handleRequest(const std::string &principal, const std::string &sid, const Json &m,
+                                      std::shared_ptr<CancelToken> cancellation) {
   if (principal.empty())
     return {401, std::nullopt, {}};
+  if (m.is_object() && m.contains("id") && m["id"].dump().size() > 65536) {
+    // Client responses still require the usual session and principal checks.
+    // Never echo an unvalidated HTTP session ID.
+    if (m.contains("method") || validateJsonRpc(m))
+      return rpcError(400, nullptr, -32600, "Serialized request id exceeds 64 KiB");
+  }
   if (auto error = validateJsonRpc(m)) {
     const Json id = m.is_object() && m.contains("id") && validId(m["id"]) ? m["id"] : Json(nullptr);
     return rpcError(400, id, -32600, *error);

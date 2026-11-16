@@ -1,4 +1,5 @@
 #include <QSet>
+#include <QStringDecoder>
 #include <QStringList>
 #include <QUrl>
 #include <algorithm>
@@ -23,7 +24,11 @@ using Document = std::unique_ptr<lxb_html_document_t, decltype(&lxb_html_documen
   throw Error("response_too_large", "Page exceeds extraction complexity limits.", 502);
 }
 QString utf8(const lxb_char_t *p, size_t n) {
-  return p ? QString::fromUtf8(reinterpret_cast<const char *>(p), qsizetype(n)) : QString();
+  // Encoding detection already consumed a document BOM. A leading U+FEFF in
+  // a decoded DOM fragment (including a character reference) is content.
+  QStringDecoder decoder(QStringDecoder::Utf8,
+                         QStringConverter::Flag::ConvertInitialBom | QStringConverter::Flag::Stateless);
+  return p ? QString(decoder(QByteArrayView(reinterpret_cast<const char *>(p), qsizetype(n)))) : QString();
 }
 QString attribute(Node *n, const char *name) {
   size_t len = 0;

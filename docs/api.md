@@ -61,7 +61,12 @@ failures use `isError: true`. Invalid tool names or input shapes use JSON-RPC
 invalid-params errors. No `outputSchema` is advertised in this version.
 
 JSON input is limited to 1 MiB and 64 nested containers. Excessive nesting is
-rejected before building the JSON tree. Stdio responses share the 1 MiB response
+rejected before building the JSON tree. Serialized request IDs (including JSON
+quotes and escapes) are limited to 64 KiB. Larger IDs are outside this service's
+accepted MCP profile and receive Invalid Request with `id: null`, without creating
+a session or running a tool. Clients must keep IDs within the limit for request
+correlation. Responses to accepted IDs preserve the ID and use a JSON-RPC error
+if the complete reply exceeds 1 MiB. Stdio responses share the 1 MiB response
 budget and use a bounded queue of at most 32 messages and 4 MiB, including the
 active write. Closing stdin cancels a blocked stdout writer after a short drain
 period, so a client that stops reading cannot prevent process cleanup.

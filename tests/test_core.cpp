@@ -526,6 +526,38 @@ void cacheFailureTests() {
   QLockFile lock(corrupt + ".lock");
   REQUIRE(lock.tryLock(0));
 }
+void cachePhysicalPressureTests() {
+  QTemporaryDir dir;
+  REQUIRE(dir.isValid());
+  const auto path = dir.filePath("physical.sqlite");
+  Cache cache(path.toStdString(), 16 * 1024 * 1024, 10000, [] { return std::int64_t(100); });
+  const Json payload{{"data", std::string(2100, 'x')}};
+  cache.put("hot", payload, 60);
+  for (int i = 0; i < 2000; ++i) {
+    if (i == 970)
+      for (int j = 0; j < i; ++j)
+        if (auto entry = cache.get("item-" + std::to_string(j)))
+          REQUIRE(*entry == payload);
+    REQUIRE(cache.get("hot") == payload);
+    cache.put("item-" + std::to_string(i), payload, 60);
+  }
+  REQUIRE(cache.get("hot") == payload);
+  REQUIRE(cache.get("item-1999") == payload);
+  REQUIRE(!cache.get("item-0"));
+  REQUIRE(cache.stats()["storage_bytes"].get<long long>() <= 16 * 1024 * 1024);
+  cache.close();
+  Cache reopened(path.toStdString(), 16 * 1024 * 1024, 10000, [] { return std::int64_t(100); });
+  REQUIRE(reopened.get("hot") == payload);
+  REQUIRE(reopened.get("item-1999") == payload);
+  reopened.close();
+  Cache reduced(path.toStdString(), 16 * 1024 * 1024, 1, [] { return std::int64_t(100); });
+  for (int i = 0; i < 2000; ++i)
+    reduced.get("item-" + std::to_string(i));
+  REQUIRE(reduced.get("hot") == payload);
+  reduced.put("replacement", payload, 60);
+  REQUIRE(reduced.get("replacement") == payload);
+  REQUIRE(reduced.stats()["entries"] == 1);
+}
 void htmlTests() {
   auto p = parseHtml("<title>T &amp; T</title><nav>omit</nav><main><p>A &amp; B</p><p "
                      "hidden>secret</p><p>中文</p><script>bad</script><a href='/x'>Link</a></main>",
@@ -575,18 +607,18 @@ void htmlBoundaryTests() {
   };
   // Regression from the HTML fuzz campaign: control removal moves a valid
   // embedded U+FEFF to the first output scalar. Default Qt decoding strips it.
-  const auto bom = read(std::string("\x1c\0\xef\xbb\xbf", 5) +
-                        "eta charset=\"unknown-charset\"><p>x</p>", "text/html; charset=utf-8");
+  const auto bom = read(std::string("\x1c\0\xef\xbb\xbf", 5) + "eta charset=\"unknown-charset\"><p>x</p>",
+                        "text/html; charset=utf-8");
   REQUIRE(bom.text == std::string("\xef\xbb\xbf", 3) + "eta charset=\"unknown-charset\">\nx");
   REQUIRE(QString::fromUtf8(bom.text.data(), qsizetype(bom.text.size())).toUtf8().toStdString() != bom.text);
-  QStringDecoder decoder(QStringDecoder::Utf8, QStringConverter::Flag::ConvertInitialBom |
-                                                  QStringConverter::Flag::Stateless);
+  QStringDecoder decoder(QStringDecoder::Utf8,
+                         QStringConverter::Flag::ConvertInitialBom | QStringConverter::Flag::Stateless);
   const QString preserved = decoder(QByteArrayView(bom.text.data(), qsizetype(bom.text.size())));
   REQUIRE(!decoder.hasError());
   REQUIRE(preserved.front().unicode() == 0xfeff);
   REQUIRE(preserved.toUtf8().toStdString() == bom.text);
-  QStringDecoder invalid(QStringDecoder::Utf8, QStringConverter::Flag::ConvertInitialBom |
-                                                  QStringConverter::Flag::Stateless);
+  QStringDecoder invalid(QStringDecoder::Utf8,
+                         QStringConverter::Flag::ConvertInitialBom | QStringConverter::Flag::Stateless);
   const QString truncated = invalid(QByteArrayView("\xf0\x9f", 2));
   REQUIRE(invalid.hasError());
   REQUIRE(!truncated.isEmpty());
@@ -676,8 +708,8 @@ void unicodePageTests() {
   const std::string marker("\xef\xbb\xbf", 3);
   t.open = [&](auto url, auto) {
     ++requests;
-    return HttpResponse{200, std::string("\x1c\0", 2) + marker + "word<p>word</p>",
-                        "text/html; charset=utf-8", url, {}};
+    return HttpResponse{
+        200, std::string("\x1c\0", 2) + marker + "word<p>word</p>", "text/html; charset=utf-8", url, {}};
   };
   Service service(config(dir), t);
   auto opened = service.call("web_open", {{"url", "https://example.com/bom"}}, "alice", token());
@@ -692,9 +724,26 @@ void unicodePageTests() {
   REQUIRE(found["matches"][0]["text"] == marker + "word");
   found = service.call("web_find", {{"page_id", id}, {"pattern", marker + "WORD"}}, "alice", token());
   REQUIRE(found["matches"].size() == 1);
-  found = service.call("web_find", {{"page_id", id}, {"pattern", marker + "WORD"},
-                                     {"case_sensitive", true}}, "alice", token());
+  found = service.call("web_find", {{"page_id", id}, {"pattern", marker + "WORD"}, {"case_sensitive", true}},
+                       "alice", token());
   REQUIRE(found["matches"].empty());
+  for (const auto &body : {std::string("<p>&#xfeff;word</p>"), "<p>" + marker + "word</p>",
+                           "<p><span>" + marker + "word</span></p>"}) {
+    QTemporaryDir fragmentDir;
+    auto fragmentTransport = transport();
+    fragmentTransport.open = [&](auto url, auto) {
+      return HttpResponse{200, body, "text/html; charset=utf-8", url, {}};
+    };
+    Service fragmentService(config(fragmentDir), fragmentTransport);
+    auto fragment =
+        fragmentService.call("web_open", {{"url", "https://example.com/fragment"}}, "alice", token());
+    REQUIRE(fragment["lines"][0]["text"] == marker + "word");
+    auto read = fragmentService.call("web_open", {{"page_id", fragment["page_id"]}}, "alice", token());
+    REQUIRE(read["lines"] == fragment["lines"]);
+    auto match = fragmentService.call("web_find", {{"page_id", fragment["page_id"]}, {"pattern", marker}},
+                                      "alice", token());
+    REQUIRE(match["matches"].size() == 1);
+  }
 }
 void concurrencyTests() {
   QTemporaryDir dir;
@@ -727,7 +776,14 @@ void concurrencyTests() {
 }
 void protocolTests() {
   QTemporaryDir dir;
-  Service s(config(dir), transport());
+  auto wide = transport();
+  wide.open = [](auto url, auto) {
+    std::string body;
+    for (int i = 0; i < 200; ++i)
+      body += std::string(800, '"') + '\n';
+    return HttpResponse{200, body, "text/plain; charset=utf-8", url, {}};
+  };
+  Service s(config(dir), wide);
   Protocol p(s);
   Json init = {{"jsonrpc", "2.0"},
                {"id", "1"},
@@ -761,6 +817,61 @@ void protocolTests() {
   REQUIRE(p.deleteSession("alice", sid).httpStatus == 404);
   REQUIRE(Protocol::validateJsonRpc(Json::array()).has_value());
   REQUIRE(Protocol::validateJsonRpc({{"jsonrpc", "2.0"}, {"method", "ping"}, {"id", true}}).has_value());
+  for (const auto &unit :
+       {std::string("x"), std::string("\""), std::string("\\"), std::string("\n"), std::string("中")}) {
+    std::string large;
+    const auto repetitions = (65536 - 2) / (Json(unit).dump().size() - 2);
+    for (std::size_t i = 0; i < repetitions; ++i)
+      large += unit;
+    init["id"] = large;
+    r = p.handle("alice", "", init);
+    REQUIRE(r.message->contains("result"));
+    REQUIRE((*r.message)["id"] == large);
+    REQUIRE(p.deleteSession("alice", r.sessionId).httpStatus == 204);
+    init["id"] = large + unit;
+    r = p.handle("alice", "", init);
+    REQUIRE(r.message->contains("error"));
+    REQUIRE((*r.message)["id"].is_null());
+    REQUIRE(r.sessionId.empty());
+  }
+  init["id"] = "";
+  init["id"] = std::string(1024 * 1024 - init.dump().size(), 'x');
+  REQUIRE(init.dump().size() == 1024 * 1024);
+  for (const auto &method : {Json("initialize"), Json(17)}) {
+    init["method"] = method;
+    r = p.handle("alice", "", init);
+    REQUIRE(r.message->dump().size() < 1024);
+    REQUIRE((*r.message)["error"]["code"] == -32600);
+    REQUIRE(r.sessionId.empty());
+  }
+  // A valid client response is consumed without replying, even beyond our ID budget.
+  r = p.handle("alice", "",
+               {{"jsonrpc", "2.0"}, {"id", std::string(65536, 'x')}, {"result", Json::object()}});
+  REQUIRE(!r.message);
+  REQUIRE(r.httpStatus == 400);
+  init["id"] = 7;
+  init["method"] = "initialize";
+  Protocol oversizedVersion(s, std::string(1024 * 1024, 'v'));
+  r = oversizedVersion.handle("alice", "", init);
+  REQUIRE(r.message->dump().size() < 1024);
+  REQUIRE((*r.message)["id"] == 7);
+  REQUIRE((*r.message)["error"]["code"] == -32603);
+  REQUIRE(r.sessionId.empty());
+  r = p.handle("alice", "", init);
+  const auto largeSid = r.sessionId;
+  const Json largeResponse = {{"jsonrpc", "2.0"}, {"id", std::string(65536, 'x')}, {"result", Json::object()}};
+  REQUIRE(p.handle("alice", "unknown", largeResponse).httpStatus == 404);
+  REQUIRE(p.handle("bob", largeSid, largeResponse).httpStatus == 404);
+  REQUIRE(p.handle("alice", largeSid, largeResponse).httpStatus == 202);
+  p.handle("alice", largeSid, {{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}});
+  const auto largeId = std::string(65534, 'x');
+  r = p.handle("alice", largeSid,
+               {{"jsonrpc", "2.0"}, {"id", largeId}, {"method", "tools/call"},
+                {"params", {{"name", "web_open"}, {"arguments", {{"url", "https://example.com/wide"}}}}}});
+  REQUIRE((*r.message)["id"] == largeId);
+  REQUIRE((*r.message)["result"]["isError"] == false);
+  REQUIRE((*r.message)["result"]["structuredContent"].dump().size() > 200 * 1024);
+  REQUIRE(r.message->dump().size() < 1024 * 1024);
 }
 void jsonAndDeadlineTests() {
   REQUIRE(!parseBoundedJson(std::string(64, '[') + "0" + std::string(64, ']')).is_discarded());
@@ -835,6 +946,20 @@ void httpTests() {
   REQUIRE(r && r->status == 405);
   r = client.Post("/mcp", headers, "{}", "application/json");
   REQUIRE(r && r->status == 406);
+  auto mcpHeaders = headers;
+  mcpHeaders.emplace("Accept", "application/json, text/event-stream");
+  Json init = {{"jsonrpc", "2.0"}, {"id", ""}, {"method", "initialize"},
+               {"params", {{"protocolVersion", "2025-06-18"}, {"capabilities", Json::object()},
+                           {"clientInfo", {{"name", "test"}, {"version", "1"}}}}}};
+  init["id"] = std::string(1024 * 1024 - init.dump().size(), 'x');
+  r = client.Post("/mcp", mcpHeaders, init.dump(), "application/json");
+  REQUIRE(r && r->status == 400);
+  REQUIRE(Json::parse(r->body)["error"]["code"] == -32600);
+  REQUIRE(!r->has_header("Mcp-Session-Id"));
+  init["id"] = 1;
+  r = client.Post("/mcp", mcpHeaders, init.dump(), "application/json");
+  REQUIRE(r && r->status == 200);
+  REQUIRE(Json::parse(r->body)["result"].contains("protocolVersion"));
   httplib::Client control("127.0.0.1", server.controlPort());
   r = control.Get("/health/live", headers);
   REQUIRE(r && r->status == 200);
@@ -882,19 +1007,21 @@ int main(int argc, char **argv) {
       return !success && e.code == "provider_unavailable" ? 0 : 22;
     }
   }
-  const std::pair<const char *, void (*)()> tests[] = {{"network", networkTests},
-                                                       {"network-regression", networkRegressionTests},
-                                                       {"coalescing", coalescingTests},
-                                                       {"cache", cacheTests},
-                                                       {"cache-failures", cacheFailureTests},
-                                                       {"html", htmlTests},
-                                                       {"html-boundaries", htmlBoundaryTests},
-                                                       {"service", serviceTests},
-                                                       {"unicode-page", unicodePageTests},
-                                                       {"concurrency", concurrencyTests},
-                                                       {"protocol", protocolTests},
-                                                       {"json-and-deadlines", jsonAndDeadlineTests},
-                                                       {"http", httpTests}};
+  const std::pair<const char *, void (*)()> tests[] = {
+      {"network", networkTests},
+      {"network-regression", networkRegressionTests},
+      {"coalescing", coalescingTests},
+      {"cache", cacheTests},
+      {"cache-failures", cacheFailureTests},
+      {"cache-physical-pressure", cachePhysicalPressureTests},
+      {"html", htmlTests},
+      {"html-boundaries", htmlBoundaryTests},
+      {"service", serviceTests},
+      {"unicode-page", unicodePageTests},
+      {"concurrency", concurrencyTests},
+      {"protocol", protocolTests},
+      {"json-and-deadlines", jsonAndDeadlineTests},
+      {"http", httpTests}};
   int failed = 0;
   for (auto [name, fn] : tests)
     try {

@@ -30,6 +30,8 @@ def build_fixture(FIXTURE):
     INPUTS = FIXTURE / 'artifacts'
     INPUTS.mkdir()
     (CONTROL / 'tests/data').mkdir(parents=True)
+    (CONTROL / 'scripts').mkdir()
+    shutil.copyfile(REPO / 'scripts/AcceptWindowsMsi.ps1', CONTROL / 'scripts/AcceptWindowsMsi.ps1')
     query_path = CONTROL / 'tests/data/public_queries.json'
     shutil.copyfile(REPO / 'tests/data/public_queries.json', query_path)
     COMMIT, TAG, RUN, ATTEMPT, REPOSITORY = '1' * 40, 'v0.1.0', 123, 2, 'example/QCopilots-WebSearch'
@@ -173,7 +175,13 @@ def build_fixture(FIXTURE):
     evidence = {'schema_version': 1, 'source_commit': COMMIT, 'candidate_run_id': RUN,
         'package_sha256': infos['windows-x64']['package_sha256'],
         'msi_report': {'Passed': True, 'CleanupErrors': [], 'WindowsProductType': 1, 'WindowsBuild': 26100,
-                       'Candidate': {'Sha256': infos['windows-x64']['package_sha256']['candidate-windows.msi']}},
+                       'ScriptSha256': verify_release.sha(CONTROL / 'scripts/AcceptWindowsMsi.ps1'),
+                       'PowerShellVersion': '5.1.26100.1', 'PowerShellEdition': 'Desktop',
+                       'BaselineSource': {'SourceCommit': '3' * 40, 'WorkingTreeDirty': True,
+                                          'BuildInfoSha256': '4' * 64, 'PackageSha256': '5' * 64},
+                       'Baseline': {'Sha256': '5' * 64, 'ProductVersion': '0.0.1', 'UpgradeCode': 'fixture'},
+                       'Candidate': {'Sha256': infos['windows-x64']['package_sha256']['candidate-windows.msi'],
+                                     'ProductVersion': '0.1.0', 'UpgradeCode': 'fixture'}},
         'portable_report': portable, 'soak_report': soak,
         'delivery_gates': {'council_status': 'approved', 'unresolved_p0_p1': 0, 'qgis_development_passed': True,
                           'qgis_release_passed': True, 'temporary_state_restored': True, 'qgis_commit': '2' * 40}}
@@ -239,6 +247,13 @@ class ReleaseAcceptanceTests(unittest.TestCase):
         cases = [('Windows 11', lambda v: v['portable_report']['host']['windows'].update(product_type=3)),
                  ('MSI acceptance', lambda v: v['msi_report'].update(Passed=False)),
                  ('MSI acceptance', lambda v: v['msi_report'].update(CleanupErrors=['fixture'])),
+                 ('MSI script', lambda v: v['msi_report'].update(ScriptSha256='0' * 64)),
+                 ('MSI script', lambda v: v['msi_report'].pop('ScriptSha256')),
+                 ('PowerShell', lambda v: v['msi_report'].pop('PowerShellVersion')),
+                 ('baseline', lambda v: v['msi_report']['Baseline'].update(ProductVersion='0.2.0')),
+                 ('baseline', lambda v: v['msi_report']['Baseline'].update(UpgradeCode='other')),
+                 ('baseline', lambda v: v['msi_report']['BaselineSource'].update(PackageSha256='0' * 64)),
+                 ('baseline', lambda v: v['msi_report']['BaselineSource'].pop('SourceCommit')),
                  ('Windows 11 stability', lambda v: v['soak_report'].update(checks_passed=False)),
                  ('Delivery signoff', lambda v: v['delivery_gates'].update(temporary_state_restored=False))]
         for message, change in cases:

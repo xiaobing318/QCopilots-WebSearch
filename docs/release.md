@@ -27,6 +27,13 @@ version baseline MSI using the same product upgrade identity. The script refuses
 pre-existing products, services, installation/data directories or occupied ports.
 It exercises installation, failed transactions, upgrade, retained configuration,
 service identity, shutdown and uninstall, and cleans only its own state.
+The baseline's `build-info-windows-x64.json` must be adjacent to its MSI, or
+provided with `--BaselineBuildInfo`. Reports bind the actual baseline package,
+source commit and dirty status, PowerShell version and edition, and SHA-256 of
+the acceptance script. Local upgrade fixtures may be dirty and are explicitly
+recorded as such. They are never promoted as release artifacts. The verifier
+requires the script from the tagged release source and a lower baseline version
+with the same upgrade identity.
 
 The external evidence JSON is maintained under `release-evidence/` in a later
 repository commit. It contains these fields:

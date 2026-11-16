@@ -7,20 +7,31 @@
 #include <QObject>
 #include <QPointer>
 #include <QSqlDatabase>
+#include <QSqlError>
 #include <QSqlQuery>
 #include <QThread>
 #include <QUuid>
 #include <QVariant>
+#include <algorithm>
 #include <future>
 #include <limits>
 #include <map>
 #include <mutex>
 #include <qws/cache.hpp>
 #include <type_traits>
+#include <vector>
 namespace qws {
 namespace {
 [[noreturn]] void unavailable() {
   throw Error("cache_unavailable", "Cache is unavailable.", 503, true);
+}
+struct SqlFull {};
+[[noreturn]] void sqlFailure(const QSqlError &error) {
+  bool numeric = false;
+  const auto code = error.nativeErrorCode().toInt(&numeric);
+  if (numeric && (code & 0xff) == 13) // SQLITE_FULL, including extended codes.
+    throw SqlFull();
+  unavailable();
 }
 QString keyHash(const std::string &key) {
   if (key.size() > 8192)
@@ -62,16 +73,20 @@ struct Cache::Impl {
     auto future = task.get_future();
     if (!QMetaObject::invokeMethod(worker, [&task] { task(); }, Qt::BlockingQueuedConnection))
       unavailable();
-    return future.get();
+    try {
+      return future.get();
+    } catch (const SqlFull &) {
+      unavailable();
+    }
   }
   QSqlQuery query(const QString &sql, const QVariantList &values = {}) {
     QSqlQuery q(db);
     if (!q.prepare(sql))
-      unavailable();
+      sqlFailure(q.lastError());
     for (const auto &v : values)
       q.addBindValue(v);
     if (!q.exec())
-      unavailable();
+      sqlFailure(q.lastError());
     return q;
   }
   qint64 scalar(const QString &sql, const QVariantList &values = {}) {
@@ -112,6 +127,24 @@ struct Cache::Impl {
   void flushTouches() {
     for (const auto &[key, accessed] : pendingTouches)
       query("UPDATE entries SET accessed=? WHERE key=?", {accessed, key});
+  }
+  bool evictPhysical(const QString &protectedKey, qint64 limit) {
+    // FULL can roll back the whole transaction, and flushing the access index
+    // can itself need another page. Free pages first, using unflushed hit order.
+    std::vector<std::pair<qint64, QString>> order;
+    auto rows = query("SELECT key,accessed FROM entries WHERE key<>?", {protectedKey});
+    while (rows.next()) {
+      const auto key = rows.value(0).toString();
+      const auto touched = pendingTouches.find(key);
+      order.emplace_back(touched == pendingTouches.end() ? rows.value(1).toLongLong() : touched->second, key);
+    }
+    rows.finish();
+    const auto count = std::min(order.size(), std::size_t(limit));
+    if (count < order.size())
+      std::nth_element(order.begin(), order.begin() + count, order.end());
+    for (std::size_t i = 0; i < count; ++i)
+      query("DELETE FROM entries WHERE key=?", {order[i].second});
+    return count == order.size();
   }
   void start() {
     if (!QDir().mkpath(QFileInfo(path).absolutePath()) || QFileInfo(path).isSymLink())
@@ -226,24 +259,39 @@ void Cache::put(const std::string &key, const Json &value, std::int64_t ttl) {
       throw Error("invalid_argument", "Invalid cache lifetime.");
     if (data.size() > d_->payloadBudget || d_->storageBytes() > d_->maxBytes)
       unavailable();
-    if (!d_->db.transaction())
-      unavailable();
-    try {
-      // Apply all recent reads in this existing write transaction before eviction.
-      // Do not clear on rollback: the next successful write still sees exact LRU.
-      d_->flushTouches();
-      d_->query("DELETE FROM entries WHERE expires<=? OR key=?", {now, k});
-      while (d_->scalar("SELECT COUNT(*) FROM entries") >= d_->maxEntries ||
-             d_->scalar("SELECT COALESCE(SUM(size),0) FROM entries") + data.size() > d_->payloadBudget)
-        d_->query("DELETE FROM entries WHERE key=(SELECT key FROM entries ORDER BY accessed,key LIMIT 1)");
-      d_->query("INSERT INTO entries VALUES(?,?,?,?,?)",
-                {k, data, qint64(data.size()), now + ttl, ++d_->serial});
-      if (!d_->db.commit())
+    qint64 physicalEvictions = 0;
+    for (;;) {
+      if (!d_->db.transaction())
         unavailable();
-      d_->pendingTouches.clear();
-    } catch (...) {
-      d_->db.rollback();
-      throw;
+      bool allEvicted = false;
+      try {
+        if (physicalEvictions)
+          allEvicted = d_->evictPhysical(k, physicalEvictions);
+        // Apply all recent reads in this existing write transaction before eviction.
+        // Do not clear on rollback: the next successful write still sees exact LRU.
+        d_->flushTouches();
+        d_->query("DELETE FROM entries WHERE expires<=? OR key=?", {now, k});
+        while (d_->scalar("SELECT COUNT(*) FROM entries") >= d_->maxEntries ||
+               d_->scalar("SELECT COALESCE(SUM(size),0) FROM entries") + data.size() > d_->payloadBudget)
+          d_->query("DELETE FROM entries WHERE key=(SELECT key FROM entries ORDER BY accessed,key LIMIT 1)");
+        d_->query("INSERT INTO entries VALUES(?,?,?,?,?)",
+                  {k, data, qint64(data.size()), now + ttl, ++d_->serial});
+        if (!d_->db.commit())
+          sqlFailure(d_->db.lastError());
+        d_->pendingTouches.clear();
+        break;
+      } catch (const SqlFull &) {
+        d_->db.rollback();
+        // A reopened database can exceed a newly lowered maxEntries setting.
+        // Bound retries by the stored population, not the new admission limit.
+        const auto candidates = d_->scalar("SELECT COUNT(*) FROM entries WHERE key<>?", {k});
+        if (allEvicted || physicalEvictions >= candidates)
+          throw;
+        physicalEvictions = std::min(candidates, physicalEvictions ? physicalEvictions * 2 : 16);
+      } catch (...) {
+        d_->db.rollback();
+        throw;
+      }
     }
     if (d_->storageBytes() > d_->maxBytes)
       unavailable();

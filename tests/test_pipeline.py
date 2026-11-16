@@ -1,6 +1,7 @@
 """Bootstrap decision parsing and privileged APT argument boundaries."""
 import argparse
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import types
+import urllib.request
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +19,46 @@ import pipeline
 
 
 class PipelineTests(unittest.TestCase):
+    def test_profile_proxy_overrides_all_inherited_routes(self):
+        for proxy in ('', 'http://proxy.example:7897'):
+            with self.subTest(proxy=proxy), tempfile.TemporaryDirectory() as temporary:
+                document = json.loads((ROOT / 'config/BuildPipeline.json').read_text(encoding='utf-8'))
+                document['profiles'][pipeline.PLATFORM]['proxy'] = proxy
+                config = Path(temporary) / 'build.json'
+                config.write_text(json.dumps(document), encoding='utf-8')
+                inherited = {key: 'http://stale.example:1234' for key in
+                             ('http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'all_proxy', 'PIP_PROXY')}
+                inherited.update(NO_PROXY='*', no_proxy='*')
+                with patch.dict(os.environ, inherited):
+                    instance = pipeline.Pipeline(types.SimpleNamespace(ConfigPath=config, Profile=pipeline.PLATFORM, DryRun=False))
+                self.assertEqual(instance.env.get('http_proxy'), proxy)
+                self.assertEqual(instance.env.get('https_proxy'), proxy)
+                for key in ('ALL_PROXY', 'all_proxy', 'PIP_PROXY'):
+                    self.assertFalse(instance.env.get(key), key)
+                for key in ('NO_PROXY', 'no_proxy'):
+                    self.assertEqual(instance.env.get(key), '' if proxy else '*')
+                self.assertEqual(instance.env['PIP_CONFIG_FILE'], os.devnull)
+
+    def test_download_ignores_process_and_system_proxy_bypass(self):
+        content = b'controlled archive'
+        for proxy in ('', 'http://proxy.example:7897', 'https://proxy.example:7897'):
+            with self.subTest(proxy=proxy), tempfile.TemporaryDirectory() as temporary:
+                instance = pipeline.Pipeline.__new__(pipeline.Pipeline)
+                instance.profile, instance.cache = {'proxy': proxy}, Path(temporary)
+                instance.offline = instance.dry = False
+                seen = []
+                url = 'https://artifact.example/file'
+                def capture(_handler, request):
+                    seen.append((request.host, request._tunnel_host))
+                    response = urllib.response.addinfourl(io.BytesIO(content), {}, url, 200)
+                    response.msg = 'OK'
+                    return response
+                with patch.dict(os.environ, {'NO_PROXY': '*', 'no_proxy': '*', 'ALL_PROXY': 'http://stale.example:1234'}), \
+                        patch.object(urllib.request.HTTPSHandler, 'https_open', capture):
+                    result = instance.download({'url': url, 'sha256': hashlib.sha256(content).hexdigest()})
+                self.assertEqual(result.read_bytes(), content)
+                self.assertEqual(seen, [('proxy.example:7897', 'artifact.example')] if proxy else [('artifact.example', None)])
+
     def test_apt_proxy_survives_sudo_and_overrides_environment(self):
         for root in (True, False):
             for proxy in ("", "http://127.0.0.1:7897", "https://proxy.example:443"):

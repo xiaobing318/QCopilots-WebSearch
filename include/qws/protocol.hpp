@@ -21,6 +21,8 @@ public:
   static std::optional<std::string> validateJsonRpc(const Json &);
 
 private:
+  ProtocolReply handleRequest(const std::string &, const std::string &, const Json &,
+                              std::shared_ptr<CancelToken>);
   struct Session {
     std::string principal;
     Clock::time_point expires;

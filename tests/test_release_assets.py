@@ -15,12 +15,22 @@ import package_inventory as assets
 import promote_release
 import verify_release
 from process_cleanup import wait_owned
+import soak
 REAL_ZIP = zipfile.ZipFile
 REG = stat.S_IFREG | 0o644
 LINK = stat.S_IFLNK | 0o777
 
 
 class ProcessCleanupTests(unittest.TestCase):
+    def test_reaped_root_pid_is_never_reopened(self):
+        process = types.SimpleNamespace(pid=12345, poll=lambda: 1, returncode=1)
+        with patch.object(soak.psutil, 'Process', side_effect=AssertionError('reused root PID')), \
+                patch.object(soak, 'wait_owned', side_effect=AssertionError('unowned descendants')):
+            report = soak.stop_process(process)
+        self.assertEqual(report['error'], 'early_exit')
+        self.assertFalse(report['passed'])
+        self.assertFalse(report['forced'])
+
     def test_reused_pid_is_not_reopened_and_uncertain_identity_is_not_success(self):
         def forbidden_wait(*args, **kwargs):
             raise AssertionError('A reused numeric PID must never be reopened for wait')

@@ -117,10 +117,24 @@ int main(int argc, char **argv) {
     output.close();
     // Reserved ports remain bound throughout: stdio must never open listeners.
     Child first(QString::fromLocal8Bit(argv[1]), path), second(QString::fromLocal8Bit(argv[1]), path);
+    Json oversized = {{"jsonrpc", "2.0"},
+                      {"id", ""},
+                      {"method", "initialize"},
+                      {"params",
+                       {{"protocolVersion", "2025-06-18"},
+                        {"capabilities", Json::object()},
+                        {"clientInfo", {{"name", "test"}, {"version", "1"}}}}}};
+    oversized["id"] = std::string(1024 * 1024 - oversized.dump().size(), 'x');
+    require(oversized.dump().size() == 1024 * 1024, "Exact input limit fixture");
+    first.send(oversized);
+    auto oversizedError = first.receive();
+    require(oversizedError["id"].is_null() && oversizedError["error"]["code"] == -32600,
+            "Oversized ID must be a bounded protocol rejection");
     require(
         first.exchange({{"jsonrpc", "2.0"}, {"id", "before"}, {"method", "tools/list"}}).contains("error"),
         "Pre-initialize request was lost");
     first.initialize();
+    first.ping(std::string(65534, 'x'));
     second.initialize();
     second.ping("alive");
     for (int i = 0; i < 5000; ++i)

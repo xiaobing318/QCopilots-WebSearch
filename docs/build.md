@@ -48,6 +48,10 @@ missing interpreter and `--DryRun` prints the installation plan without running
 APT. An offline bootstrap requires Python and other system packages to be present.
 The APT calls explicitly apply the profile proxy through sudo. An empty proxy
 selects direct access, including when the host has other proxy settings.
+Pinned archive downloads and pip also use the profile's proxy. Inherited
+`ALL_PROXY` and bypass lists do not override it. An empty profile proxy forces
+direct access. Pip machine/user configuration files are disabled for isolated
+tool bootstrap, so their proxy settings cannot silently change this decision.
 
 ## Configuration and downloads
 
