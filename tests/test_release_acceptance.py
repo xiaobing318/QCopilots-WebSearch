@@ -183,8 +183,9 @@ def build_fixture(FIXTURE):
                        'Candidate': {'Sha256': infos['windows-x64']['package_sha256']['candidate-windows.msi'],
                                      'ProductVersion': '0.1.0', 'UpgradeCode': 'fixture'}},
         'portable_report': portable, 'soak_report': soak,
-        'delivery_gates': {'council_status': 'approved', 'unresolved_p0_p1': 0, 'qgis_development_passed': True,
-                          'qgis_release_passed': True, 'temporary_state_restored': True, 'qgis_commit': '2' * 40}}
+        'delivery_gates': {'council_status': 'approved', 'unresolved_p0_p1': 0, 'qgis_development_passed': False,
+                          'qgis_launch_stage': 'launch4Release', 'qgis_release_passed': True,
+                          'temporary_state_restored': True, 'qgis_commit': '2' * 40}}
     put_json(evidence_path, evidence)
     return types.SimpleNamespace(root=FIXTURE,control=CONTROL,inputs=INPUTS,evidence=evidence_path,
                                  infos=infos,debian_entries=debian_entries,refresh_sums=refresh_sums)
@@ -256,6 +257,10 @@ class ReleaseAcceptanceTests(unittest.TestCase):
                  ('baseline', lambda v: v['msi_report']['BaselineSource'].pop('SourceCommit')),
                  ('Windows 11 stability', lambda v: v['soak_report'].update(checks_passed=False)),
                  ('Windows 11 stability', lambda v: v['soak_report'].update(seconds_per_phase=299)),
+                 ('Delivery signoff', lambda v: v['delivery_gates'].update(qgis_release_passed=False)),
+                 ('Delivery signoff', lambda v: v['delivery_gates'].pop('qgis_release_passed')),
+                 ('Delivery signoff', lambda v: v['delivery_gates'].update(qgis_launch_stage='launch4Development')),
+                 ('Delivery signoff', lambda v: v['delivery_gates'].pop('qgis_launch_stage')),
                  ('Delivery signoff', lambda v: v['delivery_gates'].update(temporary_state_restored=False))]
         for message, change in cases:
             with self.subTest(message=message):

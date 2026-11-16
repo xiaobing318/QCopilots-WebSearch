@@ -53,8 +53,13 @@ repository commit. It contains these fields:
 | `delivery_gates` | Recorded human review and QGIS integration signoff |
 
 `delivery_gates` records `council_status: "approved"`, `unresolved_p0_p1: 0`,
-the frozen `qgis_commit`, `qgis_development_passed`, `qgis_release_passed`, and
-`temporary_state_restored`. These are explicit delivery attestations. They do
+the frozen `qgis_commit`, `qgis_launch_stage: "launch4Release"`,
+`qgis_release_passed: true`, and `temporary_state_restored: true`.
+Final QGIS acceptance uses the published package through the prescribed
+`launch4Release` command. Development-launch results are retained separately
+as diagnostic history and do not gate release. A recorded development failure
+must remain a failure rather than being replaced with a successful startup or
+an older page test. These are explicit delivery attestations. They do
 not replace the council's original reports, scoring, issue arbitration or QGIS
 test records. Preserve those underlying records with the delivery evidence.
 

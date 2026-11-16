@@ -224,7 +224,7 @@ def verify(root,commit,tag,run_id,evidence_path,evidence_sha,repository,run_atte
          and soak.get('executable_sha256') == windows['executable_sha256'], 'Windows 11 stability required')
     gates = evidence['delivery_gates']
     need(gates.get('council_status') == 'approved' and gates.get('unresolved_p0_p1') == 0
-         and gates.get('qgis_development_passed') is True and gates.get('qgis_release_passed') is True
+         and gates.get('qgis_launch_stage') == 'launch4Release' and gates.get('qgis_release_passed') is True
          and gates.get('temporary_state_restored') is True,'Delivery signoff is incomplete')
     need(re.fullmatch(r'[0-9a-f]{40}',gates.get('qgis_commit','')) is not None,'Missing QGIS snapshot')
     collect(evidence_path,'windows11-evidence.json')
