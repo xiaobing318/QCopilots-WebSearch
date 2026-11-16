@@ -69,7 +69,7 @@ def generate(pipeline, destination, packages):
         if key == "httplib":
             source_dir = re.search(r"^FETCHCONTENT_SOURCE_DIR_HTTPLIB:PATH=(.+)$", cache, re.MULTILINE).group(1)
             patched_hash = pipeline.digest(Path(source_dir) / "httplib.h")
-            if patched_hash != "9234907a4431c8e62cb12f7573a03a1c095b028e246f578c9ede700395bd620c":
+            if patched_hash != "52e0092645062258a84fa52c7075de444118cbbb8e83413d271e5859d4ae8a9d":
                 raise RuntimeError("Unexpected compiled httplib header")
             components[-1]['properties'] = [
                 {"name":"qcws:modified","value":"true"},

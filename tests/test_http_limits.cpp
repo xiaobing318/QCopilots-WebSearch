@@ -198,13 +198,49 @@ void tests(const char *templatePath) {
   started = Clock::now();
   server.stop();
   server.stop();
-  require(Clock::now() - started < std::chrono::seconds(2), "stop interrupts active and queued sockets");
+  const auto stopped = Clock::now() - started;
+  const auto stoppedMs = std::chrono::duration_cast<std::chrono::milliseconds>(stopped).count();
+  if (stopped >= std::chrono::seconds(2))
+    std::cerr << "active and queued socket shutdown took " << stoppedMs << " ms\n";
+  require(stopped < std::chrono::seconds(2), "stop interrupts active and queued sockets");
   for (auto &sock : pending) {
     if (sock->state() != QAbstractSocket::UnconnectedState)
       sock->waitForDisconnected(1000);
     require(sock->state() == QAbstractSocket::UnconnectedState, "queued socket survived shutdown");
   }
   std::cout << "PASS active and queued sockets stop, repeated stop\n";
+  {
+    httplib::Server longRead;
+    longRead.set_read_timeout(30).set_write_timeout(2);
+    std::atomic_bool reading{false};
+    longRead.set_pre_routing_handler([&](const auto &, auto &) {
+      reading = true;
+      return httplib::Server::HandlerResponse::Unhandled;
+    });
+    longRead.Post("/partial", [](const auto &, auto &res) { res.set_content("unexpected", "text/plain"); });
+    const int port = longRead.bind_to_any_port("127.0.0.1");
+    require(port > 0, "long-read listener port");
+    std::jthread listener([&] { longRead.listen_after_bind(); });
+    struct StopGuard {
+      httplib::Server &server;
+      ~StopGuard() { server.stop(); }
+    } stopGuard{longRead};
+    longRead.wait_until_ready();
+    auto partial = connection(port);
+    write(*partial, headers("POST", "/partial", "Content-Length: 1048576\r\n") + "{");
+    require(eventually([&] { return reading.load(); }), "partial request reached body reader");
+    require(!partial->waitForReadyRead(100) && partial->state() == QAbstractSocket::ConnectedState,
+            "incomplete long-read request must remain pending");
+    started = Clock::now();
+    longRead.stop();
+    listener.join();
+    const auto elapsed = Clock::now() - started;
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+    if (elapsed >= std::chrono::seconds(2))
+      std::cerr << "30-second input read shutdown took " << elapsedMs << " ms\n";
+    require(elapsed < std::chrono::seconds(2), "stop must interrupt a long read before its input deadline");
+    std::cout << "PASS 30-second input read interrupted in " << elapsedMs << " ms\n";
+  }
   for (int iteration = 0; iteration < 3; ++iteration) {
     const int port = upstream.bind_to_any_port("127.0.0.1");
     if (iteration == 0) {
