@@ -18,7 +18,10 @@ only after measuring memory, latency and upstream limits at the new setting.
 The authenticated control listener provides `/health/live`, `/health/ready` and
 Prometheus text `/metrics`. Current gauges include `qcws_active_calls` and
 `qcws_active_upstream`. Status also reports waiting coalesced searches and the
-last observed dependency state. These endpoints do not perform a public search.
+last observed dependency state. That state is `degraded` when some engines
+failed or an error followed partial results, and `unavailable` only when an
+error left no results. Client cancellation does not change it. These endpoints
+do not perform a public search.
 Readiness of this process is not proof that Google, Bing or another upstream is
 currently reachable.
 
@@ -29,10 +32,13 @@ events using bounded retention. Container log rotation is configured in Compose.
 
 ## Cache and backups
 
-Search TTL defaults to five minutes, page TTL to thirty minutes. The default
-cache budget is 256 MiB and 10,000 entries. SQLite is owned by a dedicated thread
-and the cache directory is locked against a second process. Corrupt, inaccessible
-or unsupported cache state fails explicitly rather than silently discarding data.
+Search TTL defaults to five minutes, page TTL to thirty minutes. Partial search
+results are kept for at most 30 seconds, and partial results without hits are
+not cached. The default cache budget is 256 MiB and 10,000 entries. SQLite is
+owned by a dedicated thread and the cache directory is locked against a second
+process. Corrupt, inaccessible or unsupported cache state fails explicitly rather
+than silently discarding data. The one exception is a search-cache write, whose
+failure only leaves that result uncached.
 
 Use healthy local storage for the cache. Shutdown timing cannot cover an
 indefinitely stalled operating-system filesystem. Forced termination can leave
@@ -60,8 +66,13 @@ corrupt or locked cache. Repair filesystem permissions or disk capacity first.
 ## Upgrades
 
 Runtime configuration uses `schema_version: 1` and rejects unknown fields.
-Back up configuration before upgrading and check version compatibility before
-restoring an older package. There is no automatic configuration downgrade.
+`--CheckConfig` names the first field that does not match the schema. Back up
+configuration before upgrading and check version compatibility before restoring
+an older package. There is no automatic configuration downgrade.
+
+Releases after 0.1.4 use a new cached payload layout. Entries written by 0.1.4
+or earlier are no longer read and age out through normal eviction. Page IDs issued
+before the upgrade return `page_unavailable`, and clients open the URL again.
 
 Windows packages dynamically link OpenSSL using the matched `libssl-3-x64.dll`
 and `libcrypto-3-x64.dll` pair beside the executable. Prefer updating the complete
@@ -112,7 +123,16 @@ redirect destinations, refuse HTTPS downgrade and block non-public addresses.
 They do not inherit a system proxy. The administrator's fixed SearXNG endpoint
 has a separate policy so a private backend can be used safely.
 
+A host whose resolver answers with non-public addresses cannot read any page.
+`web_open` then returns `destination_blocked` with "URL host resolves only to
+non-public addresses." for every URL. A common cause is a TUN-mode proxy in
+fake-IP mode, which answers DNS with addresses from `198.18.0.0/15`. Run the
+service on a host with ordinary DNS, or exclude its process or its DNS queries
+from fake-IP mapping. The service never treats these ranges as public.
+
 Compressed transfer and decoded body each have a five-MiB bound. HTML parsing has
-additional bounded input, node, depth, text and link budgets. Parser truncation is
-reported. Exceeding transfer limits is an error. Extraction does not execute
+additional bounded input, node, depth, text and link budgets. The parser stops as
+soon as a budget is exhausted, so hostile markup cannot multiply nodes in memory.
+Parser truncation is reported and the readable part is still returned. Exceeding
+transfer limits is an error. Extraction does not execute
 JavaScript, and web text remains untrusted content for downstream agents.

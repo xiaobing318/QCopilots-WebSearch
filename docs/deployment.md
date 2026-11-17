@@ -87,7 +87,7 @@ require Docker. A Windows native daemon still needs a reachable SearXNG JSON API
 which is different from this project's `/v1/search` REST API. Alternatively, a
 Windows MCP client can connect directly to the team's Ubuntu HTTPS gateway.
 
-## QGIS
+## Runtime trust and proxies
 
 Runtime HTTPS uses the trust sources described in [architecture](architecture.md).
 Install the complete server certificate chain at the HTTPS endpoint. The service
@@ -95,17 +95,52 @@ does not fetch missing issuers or perform online CRL/OCSP checks. Runtime reques
 do not inherit proxy settings. Configure a directly reachable SearXNG endpoint.
 The build configuration's proxy affects dependency downloads only.
 
-Install the separate `qcopilots_mcp_server_web_search` plugin from the QGIS branch.
-It reuses the existing QCopilots Manager lifecycle and local MCP HTTP transport.
-It connects to an already-running native backend and does not own that backend's
-process. The existing seven-service startup preference is not replaced.
+## QGIS
+
+Install the separate `qcopilots_mcp_server_web_search` plugin from the QGIS branch
+(`python/plugins/qcopilots_mcp_server_web_search`). It reuses the existing
+QCopilots Manager lifecycle and local MCP HTTP transport. It connects to an
+already-running native backend and does not own that backend's process. The
+existing seven-service startup preference is not replaced.
+
+### Give QGIS its own credential
+
+The adapter authenticates to the native service as an ordinary REST client.
+Give every QGIS user a separate client identity, so that page snapshots and cache
+entries stay private to that user.
+
+1. Generate a value with `qcopilots-websearch --GenerateToken`. Keep it out of
+   shell history and logs.
+2. Store it in a token file beside the service configuration, for example
+   `clients/qgis-alice.token`, protected like `client.token`. On Ubuntu the
+   file is owned by `qcopilots-websearch` with mode 0600. On Windows only
+   administrators, SYSTEM and the service account may read it.
+3. Add `{"id": "qgis-alice", "token_file": "clients/qgis-alice.token"}` to
+   `clients`, run `--CheckConfig` and restart the service.
+4. Give the user the same value in a file only that user can read, or in the
+   user environment variable `QCOPILOTS_WEBSEARCH_BACKEND_TOKEN`. On Linux and
+   macOS the adapter rejects a token file that other users can read.
+
+A single-user setup created with `--InitializeConfig` already owns its generated
+`client.token`. Point the adapter's `auth.token_file` at that absolute path
+instead of copying the value.
+
+### Adapter settings
 
 Copy the adapter's configuration example to a private path and select it using
 `QCOPILOTS_WEBSEARCH_CONFIG`, or place it at
 `<QCOPILOTS_HOME>/web_search/config.json`. Use a dedicated `token_env` or
-`token_file`. A remote backend requires HTTPS and certificate verification.
-The existing `formal_restricted` network allowlist must explicitly permit the
-backend origin. Container loopback validation is unchanged.
+`token_file`. The existing `formal_restricted` network allowlist must explicitly
+permit the backend origin. Container loopback validation is unchanged.
+
+| Adapter setting | Matching service setting |
+| --- | --- |
+| `backend_url` | Locally exactly `http://127.0.0.1:<business.port>`, and that authority must be listed in `business.allowed_hosts`. Plain HTTP is accepted only for a literal loopback IP, so `localhost` is rejected. `[::1]` is refused because the service binds 127.0.0.1. A remote backend is an HTTPS origin without a path, with certificate verification. |
+| `timeout_seconds` | Larger than both `limits.search_timeout_seconds` and `limits.open_timeout_seconds`, plus about five seconds. The defaults 25, 15 and 20 satisfy this. A shorter client deadline reports `timeout` while the service is still working, and every retry starts a new page fetch. |
+| `max_concurrency` | At most `limits.max_concurrent`, which the service shares between all of its clients |
+| `max_response_bytes` | At least 262144. Tool payloads are bounded at 240 KiB and the default of 1 MiB leaves room for the envelope. |
+
+### Start and troubleshoot
 
 Start “QCopilots MCP Server Web Search” in the Manager. Its default local MCP URL
 is `http://127.0.0.1:48218/mcp`. External-browser testing also requires
@@ -116,3 +151,11 @@ the local MCP entry.
 The adapter remains discoverable when its backend is offline. Initialization,
 tool listing and local health do not depend on a successful public search. Calls
 return explicit backend errors and recover when the backend becomes available.
+
+| Adapter error | Usual cause |
+| --- | --- |
+| `forbidden` | The `backend_url` authority is missing from `business.allowed_hosts`, or the filesystem policy denies the adapter configuration |
+| `unauthorized` | The two token values differ, or the service was not restarted after adding the client |
+| `backend_unavailable` | The service is not running, listens on another port or returned an unexpected response |
+| `invalid_configuration` | The adapter configuration or its token source is invalid |
+| `timeout` | `timeout_seconds` is shorter than the service deadline, or the upstream is slow |

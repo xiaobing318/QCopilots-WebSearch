@@ -79,7 +79,7 @@
           },
           "packageGenerators": {
             "type": "array",
-            "description": "本地分发格式。Windows候选ZIP和WIX，Ubuntu候选DEB。publish只生成所选格式，不上传GitHub。",
+            "description": "本地分发格式。Windows必须按顺序完整列出ZIP和WIX，Ubuntu必须为DEB，不能只选其中一部分。publish生成全部所列格式，不上传GitHub。",
             "items": {
               "type": "string",
               "description": "CPack生成器。候选ZIP、WIX、DEB。分别创建便携压缩包、MSI和Debian包。",

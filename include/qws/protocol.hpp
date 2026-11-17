@@ -1,6 +1,9 @@
 #pragma once
+#include <algorithm>
+#include <array>
 #include <deque>
 #include <qws/service.hpp>
+#include <string_view>
 #include <unordered_set>
 namespace qws {
 struct ProtocolReply {
@@ -12,6 +15,12 @@ class Protocol {
 public:
   using Now = std::function<Clock::time_point()>;
   enum class TransportPolicy { StreamableHttp, Stdio };
+  // Handshake-era MCP revisions, newest first. initialize echoes a listed
+  // version and otherwise answers the first; MCP-Protocol-Version must be listed.
+  static constexpr std::array<std::string_view, 2> SupportedVersions{"2025-11-25", "2025-06-18"};
+  static bool supportsVersion(std::string_view version) {
+    return std::ranges::find(SupportedVersions, version) != SupportedVersions.end();
+  }
   explicit Protocol(Service &, std::string version = QCWS_VERSION, Now now = {},
                     TransportPolicy transport = TransportPolicy::StreamableHttp);
   ProtocolReply handle(const std::string &principal, const std::string &sessionId, const Json &message,
@@ -19,6 +28,7 @@ public:
   ProtocolReply deleteSession(const std::string &principal, const std::string &sessionId);
   void shutdown();
   static std::optional<std::string> validateJsonRpc(const Json &);
+  static bool validId(const Json &);
 
 private:
   ProtocolReply handleRequest(const std::string &, const std::string &, const Json &,
@@ -31,8 +41,10 @@ private:
     std::unordered_set<std::string> usedIds;
     std::deque<std::string> recentIds;
     std::unordered_map<std::string, std::shared_ptr<CancelToken>> inFlight;
+    // Cancellations that arrived before their request registered (stdio
+    // workers start asynchronously). Small and bounded.
+    std::deque<std::string> earlyCancelled;
   };
-  static bool validId(const Json &);
   static std::string idKey(const Json &);
   static ProtocolReply rpcError(int, const Json &, int, const std::string &, const std::string &sid = {});
   static Json toolResult(Json, bool);

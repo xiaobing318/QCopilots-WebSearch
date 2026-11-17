@@ -1,3 +1,4 @@
+#include <QString>
 #include <QUuid>
 #include <algorithm>
 #include <qws/protocol.hpp>
@@ -8,7 +9,7 @@ Protocol::Protocol(Service &s, std::string version, Now now, TransportPolicy tra
     now_ = [] { return Clock::now(); };
 }
 bool Protocol::validId(const Json &id) {
-  return id.is_string() || id.is_number_integer() || id.is_number_unsigned();
+  return id.is_string() || id.is_number_integer(); // Includes unsigned integers.
 }
 std::string Protocol::idKey(const Json &id) {
   return std::string(id.is_string() ? "s:" : "n:") + id.dump();
@@ -57,6 +58,7 @@ void Protocol::retireLocked(Session &s) {
   }
   s.usedIds.clear();
   s.recentIds.clear();
+  s.earlyCancelled.clear();
   s.usedIdBytes = 0;
 }
 void Protocol::rememberIdLocked(Session &s, const std::string &key) {
@@ -140,6 +142,11 @@ ProtocolReply Protocol::handleRequest(const std::string &principal, const std::s
         !params["clientInfo"]["name"].is_string() || !params["clientInfo"].contains("version") ||
         !params["clientInfo"]["version"].is_string())
       return rpcError(200, id, -32602, "Invalid initialize parameters");
+    // Echo a supported requested version; otherwise offer the newest one.
+    const auto requested = params["protocolVersion"].get<std::string>();
+    const std::string negotiated =
+        supportsVersion(requested) ? requested : std::string(SupportedVersions.front());
+    const Json &instructions = toolCatalog()["instructions"];
     std::lock_guard lock(mutex_);
     expireLocked(now);
     if (closing_)
@@ -166,8 +173,6 @@ ProtocolReply Protocol::handleRequest(const std::string &principal, const std::s
       sessions_.erase(oldest);
     }
     const auto key = idKey(id);
-    if (key.size() > 1024 * 1024)
-      return rpcError(400, id, -32600, "Request id exceeds session budget");
     std::string fresh;
     do {
       fresh = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
@@ -181,9 +186,10 @@ ProtocolReply Protocol::handleRequest(const std::string &principal, const std::s
             Json{{"jsonrpc", "2.0"},
                  {"id", id},
                  {"result",
-                  {{"protocolVersion", "2025-06-18"},
+                  {{"protocolVersion", negotiated},
                    {"capabilities", {{"tools", Json::object()}}},
-                   {"serverInfo", {{"name", "qcopilots-websearch"}, {"version", version_}}}}}},
+                   {"serverInfo", {{"name", "qcopilots-websearch"}, {"version", version_}}},
+                   {"instructions", instructions}}}},
             fresh};
   }
   std::shared_ptr<Session> session;
@@ -207,18 +213,23 @@ ProtocolReply Protocol::handleRequest(const std::string &principal, const std::s
       if (method == "notifications/initialized")
         session->ready = true;
       else if (method == "notifications/cancelled" && params.contains("requestId") &&
-               validId(params["requestId"]))
-        if (auto pending = session->inFlight.find(idKey(params["requestId"]));
-            pending != session->inFlight.end())
+               validId(params["requestId"])) {
+        const auto target = idKey(params["requestId"]);
+        if (auto pending = session->inFlight.find(target); pending != session->inFlight.end())
           pending->second->cancelled = true;
+        else if (!session->usedIds.contains(target) && target.size() <= 1024) {
+          // A stdio worker may not have registered the request yet.
+          if (session->earlyCancelled.size() >= 16)
+            session->earlyCancelled.pop_front();
+          session->earlyCancelled.push_back(target);
+        }
+      }
       return {202, std::nullopt, sid};
     }
     if (!hasMethod)
       return {202, std::nullopt, sid};
     if (session->inFlight.contains(key) || session->usedIds.contains(key))
       return rpcError(200, id, -32600, "Request id has already been used", sid);
-    if (transport_ == TransportPolicy::Stdio && key.size() > 1024 * 1024)
-      return rpcError(200, id, -32600, "Request id exceeds session budget", sid);
     if (transport_ == TransportPolicy::StreamableHttp &&
         (session->usedIds.size() >= 4096 || key.size() > 1024 * 1024 - session->usedIdBytes)) {
       retireLocked(*session);
@@ -240,32 +251,34 @@ ProtocolReply Protocol::handleRequest(const std::string &principal, const std::s
           (params.contains("arguments") && !params["arguments"].is_object()))
         return rpcError(200, id, -32602, "Invalid tool call parameters", sid);
       tool = params["name"].get<std::string>();
+      const auto &catalog = toolCatalog()["tools"];
+      if (std::none_of(catalog.begin(), catalog.end(), [&](const Json &d) { return d["name"] == tool; }))
+        return rpcError(200, id, -32602,
+                        "Unknown tool: " + QString::fromStdString(tool).left(64).toStdString(), sid);
       args = params.value("arguments", Json::object());
       token = cancellation ? cancellation : std::make_shared<CancelToken>();
       if (!cancellation)
         token->deadline = Clock::now() + std::chrono::seconds(60);
       session->inFlight.emplace(key, token);
+      auto &early = session->earlyCancelled;
+      if (auto match = std::ranges::find(early, key); match != early.end()) {
+        early.erase(match);
+        token->cancelled = true;
+      }
     }
   }
   ProtocolReply reply;
   try {
-    const auto tools = service_.tools();
+    // Service::call validates arguments once. Schema and business failures
+    // are tool results with isError so the model can correct its call.
     if (method == "tools/list")
-      reply = {200, Json{{"jsonrpc", "2.0"}, {"id", id}, {"result", {{"tools", tools}}}}, sid};
-    else if (!std::any_of(tools.begin(), tools.end(), [&](const Json &d) { return d["name"] == tool; }))
-      reply = rpcError(200, id, -32602, "Unknown tool", sid);
-    else {
-      try {
-        validateSchema(readSchema(tool), args);
-      } catch (const Error &) {
-        return finishCall(session, sid, key, token, rpcError(200, id, -32602, "Invalid tool arguments", sid));
-      }
+      reply = {200, Json{{"jsonrpc", "2.0"}, {"id", id}, {"result", {{"tools", service_.tools()}}}}, sid};
+    else
       reply = {200,
                Json{{"jsonrpc", "2.0"},
                     {"id", id},
                     {"result", toolResult(service_.call(tool, args, principal, token), false)}},
                sid};
-    }
   } catch (const Error &e) {
     if (token)
       reply = {200, Json{{"jsonrpc", "2.0"}, {"id", id}, {"result", toolResult(errorPayload(e), true)}}, sid};

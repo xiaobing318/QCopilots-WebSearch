@@ -253,7 +253,7 @@
         },
         "search_ttl_seconds": {
           "type": "integer",
-          "description": "Search cache lifetime. Accepts 1–86400 seconds, default 300. Larger values reduce upstream traffic but retain older results.",
+          "description": "Search cache lifetime. Accepts 1–86400 seconds, default 300. Partial results are kept at most 30 seconds, and partial results without any hits are not cached.",
           "default": 300,
           "minimum": 1,
           "maximum": 86400
@@ -288,7 +288,7 @@
         },
         "search_timeout_seconds": {
           "type": "integer",
-          "description": "Search deadline. Accepts 1–60 seconds, default 15. Covers all upstream pages and retries within one call.",
+          "description": "Search deadline. Accepts 1–60 seconds, default 15. Covers all upstream pages of one call without retries; hits from earlier pages are returned as partial when a later page runs out of time.",
           "default": 15,
           "minimum": 1,
           "maximum": 60

@@ -128,10 +128,13 @@ void tests(const char *templatePath) {
       "application/json");
   require(initialized && initialized->status == 200, "initialize header test session");
   mcpHeaders.emplace("Mcp-Session-Id", initialized->get_header_value("Mcp-Session-Id"));
-  for (const int scenario : {0, 1, 2}) {
+  for (const int scenario : {0, 1, 2, 3}) {
     auto invalid = mcpHeaders;
-    invalid.emplace("MCP-Protocol-Version", scenario == 0 ? "invalid" : "2025-06-18");
-    if (scenario != 0)
+    // 2025-03-26 predates the header and is not a negotiated revision here.
+    invalid.emplace("MCP-Protocol-Version", scenario == 0   ? "invalid"
+                                            : scenario == 3 ? "2025-03-26"
+                                                            : "2025-06-18");
+    if (scenario == 1 || scenario == 2)
       invalid.emplace(scenario == 2 ? "Mcp-Session-Id" : "MCP-Protocol-Version", "2025-06-18");
     auto rejected = client.Delete("/mcp", invalid);
     require(rejected && rejected->status == 400, "invalid DELETE headers must not retire session");
@@ -141,8 +144,10 @@ void tests(const char *templatePath) {
     require(ping && ping->status == 200 && Json::parse(ping->body).contains("result"),
             "session survives rejected DELETE");
   }
-  auto deleted = client.Delete("/mcp", mcpHeaders);
-  require(deleted && deleted->status == 204, "valid session deletion");
+  auto current = mcpHeaders;
+  current.emplace("MCP-Protocol-Version", "2025-11-25");
+  auto deleted = client.Delete("/mcp", current);
+  require(deleted && deleted->status == 204, "valid session deletion with a supported protocol header");
   std::cout << "PASS bounded JSON and DELETE protocol headers\n";
   std::vector<std::unique_ptr<QTcpSocket>> active;
   for (int i = 0; i < 5; ++i) {

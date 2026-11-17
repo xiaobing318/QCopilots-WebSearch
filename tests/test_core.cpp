@@ -1,4 +1,5 @@
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QFile>
 #include <QLockFile>
 #include <QProcess>
@@ -134,6 +135,16 @@ void networkTests() {
   REQUIRE(requests == 1);
   error("invalid_argument", [&] { client.getPublic("file:///etc/passwd", token()); });
   error("invalid_argument", [&] { client.getPublic("http://user:password@example.com", token()); });
+  // Public failures name a safe reason. curl and c-ares refuse .onion names
+  // locally (RFC 7686), so this needs no network access.
+  try {
+    client.getPublic("http://example.onion/", token());
+    REQUIRE(false);
+  } catch (const Error &e) {
+    REQUIRE(e.code == "upstream_http_error");
+    REQUIRE(std::string(e.what()) == "Remote host name could not be resolved.");
+    REQUIRE(!e.retryable);
+  }
   error("provider_unavailable", [&] { client.requestBackend(base + "/redirect", "", "", token()); });
   error("response_too_large", [&] { client.requestBackend(base + "/large", "", "", token()); });
   auto cancelled = token();
@@ -386,6 +397,8 @@ void coalescingTests() {
   REQUIRE(third.get().code == "cancelled");
   REQUIRE(fourth.get().code == "cancelled");
   REQUIRE(eventually(idle));
+  // Callers abandoning a search do not make the provider look unavailable.
+  REQUIRE(service.status()["provider"]["state"] == "available");
   REQUIRE(eventually([&] { return disconnected >= 1; }));
   release = true;
   auto retry = service.call("web_search", {{"query", "cancel-all"}, {"limit", 1}}, "alice", token());
@@ -564,7 +577,7 @@ void htmlTests() {
                      "https://example.com/a", "text/html");
   REQUIRE(p.title == "T & T");
   REQUIRE(p.text == "A & B\n中文\nLink");
-  REQUIRE(p.links[0]["url"] == "https://example.com/x");
+  REQUIRE(p.links == Json::array({Json{{"url", "https://example.com/x"}, {"text", "Link"}, {"line", 3}}}));
   REQUIRE(
       parseHtml(std::string("\xd6\xd0\xce\xc4", 4), "https://example.com", "text/plain; charset=GBK").text ==
       "中文");
@@ -580,7 +593,9 @@ void htmlTests() {
                     "text/plain; charset=windows-1252")
               .text == "中文");
   error("unsupported_content", [] { parseHtml("a", "https://example.com", "application/pdf"); });
-  error("unsupported_content", [] { parseHtml("a", "https://example.com", "text/html; charset=invalid"); });
+  // Unknown labels are ignored as browsers do. One malformed scalar out of one
+  // is above the 1% replacement budget.
+  REQUIRE(parseHtml("a", "https://example.com", "text/html; charset=invalid").text == "a");
   error("unsupported_content",
         [] { parseHtml(std::string("\xf0\x9f", 2), "https://example.com", "text/plain"); });
   std::string emoji;
@@ -594,12 +609,16 @@ void htmlTests() {
     links += "<a href='/" + std::to_string(i) + "'>x</a>";
   auto many = parseHtml(links, "https://example.com", "text/html");
   REQUIRE(many.links.size() == 200);
-  REQUIRE(many.truncated);
-  std::string deep;
+  REQUIRE(many.linksTruncated);
+  REQUIRE(!many.truncated);
+  // Excessive nesting stops parsing and keeps the readable part.
+  std::string deep = "<p>before</p>";
   for (int i = 0; i < 514; ++i)
     deep += "<div>";
   deep += 'x';
-  error("response_too_large", [&] { parseHtml(deep, "https://example.com", "text/html"); });
+  auto nested = parseHtml(deep, "https://example.com", "text/html");
+  REQUIRE(nested.truncated);
+  REQUIRE(nested.text == "before");
 }
 void htmlBoundaryTests() {
   auto read = [](const std::string &s, const std::string &type = "text/html") {
@@ -622,7 +641,7 @@ void htmlBoundaryTests() {
   const QString truncated = invalid(QByteArrayView("\xf0\x9f", 2));
   REQUIRE(invalid.hasError());
   REQUIRE(!truncated.isEmpty());
-  REQUIRE(read("<table><tr><td>New</td><td>York</td></tr></table>").text == "New\nYork");
+  REQUIRE(read("<table><tr><td>New</td><td>York</td></tr></table>").text == "New | York");
   REQUIRE(read("<base href='https://cdn.example.org/docs/'><a href='guide'>x</a>").links[0]["url"] ==
           "https://cdn.example.org/docs/guide");
   REQUIRE(read("<base href='javascript:invalid'><base href='https://other.example/'><a href='guide'>x</a>")
@@ -654,7 +673,156 @@ void htmlBoundaryTests() {
   std::string hiddenDeep = "<base href='https://example.com/'><div hidden>";
   for (int i = 0; i < 514; ++i)
     hiddenDeep += "<div>";
-  error("response_too_large", [&] { read(hiddenDeep + "x"); });
+  const auto deepHidden = read(hiddenDeep + "x");
+  REQUIRE(deepHidden.truncated);
+  REQUIRE(deepHidden.text.empty());
+}
+void htmlMarkdownTests() {
+  auto read = [](const std::string &s, const std::string &type = "text/html") {
+    return parseHtml(s, "https://example.com/a", type);
+  };
+  // Light Markdown: heading and list markers, cell separators and preserved
+  // preformatted indentation. Markers appear only before visible content.
+  REQUIRE(read("<h1>Title</h1><h3>Sub <b>part</b></h3><p>Body</p>").text == "# Title\n### Sub part\nBody");
+  // ARIA landmarks are treated like nav, header and footer. banner and
+  // contentinfo stay visible inside sectioning content, navigation never does.
+  REQUIRE(read("<div role='navigation'>Menu</div><div role='banner'>Logo</div><p>Body</p>"
+               "<div role='contentinfo'>Legal</div>")
+              .text == "Body");
+  REQUIRE(read("<div role=' Region  NAVIGATION'>Menu</div><p>Body</p>").text == "Body");
+  REQUIRE(read("<article><div role='banner'>Byline</div><div role='navigation'>Pages</div><p>Body</p>"
+               "</article>")
+              .text == "Byline\nBody");
+  REQUIRE(read("<div role='main'>Body</div><div role='search'>Find</div>").text == "Body\nFind");
+  REQUIRE(read("<ul><li>A</li><li>B<ul><li>C</li></ul></li></ul><ol start=3><li>X</li><li><p>Y</p></li></ol>")
+              .text == "- A\n- B\n  - C\n3. X\n4. Y");
+  REQUIRE(read("<h2></h2><ul><li></li></ul><p>after</p>").text == "after");
+  REQUIRE(read("<table><tr><th>Name</th><th>Type</th></tr><tr><td>id</td><td></td><td>int</td></tr></table>")
+              .text == "Name | Type\nid | int");
+  REQUIRE(read("<pre>\ndef f():\n    return 1  \n\tx  y</pre><p>a   b</p>").text ==
+          "def f():\n    return 1\n\tx  y\na b");
+  REQUIRE(read("a\n  b\n\n    c  ", "text/plain").text == "a\n  b\n    c");
+  // Article and section headers stay. Page-level landmarks are boilerplate.
+  REQUIRE(read("<header>Site</header><article><header><h1>Post</h1><p>By A</p></header><p>Body</p>"
+               "<footer>Tags</footer></article><footer>Copyright</footer>")
+              .text == "# Post\nBy A\nBody\nTags");
+  REQUIRE(read("<header>Banner</header><div>Content</div><footer>Foot</footer>").text == "Content");
+  // Several articles form a listing, so the body is read. Main stays preferred.
+  REQUIRE(read("<header>Site</header><article><p>One</p></article><article><p>Two</p></article>").text ==
+          "One\nTwo");
+  REQUIRE(read("<article><p>A</p></article><main><p>M</p></main>").text == "M");
+  REQUIRE(read("<article><p>Post</p><article><p>Comment</p></article></article><aside>Side</aside>").text ==
+          "Post\nComment");
+  REQUIRE(
+      read("<p>a<svg><title>icon</title></svg>b</p><iframe>frame</iframe><video>v</video><canvas>c</canvas>"
+           "<object>o</object><audio>s</audio><div hidden='until-found'>found</div><div hidden>gone</div>"
+           "<div style='Display: NONE'>none</div>")
+          .text == "ab\nfound");
+  REQUIRE(read("<figure><figcaption>Cap</figcaption></figure><span>Next</span>"
+               "<details><summary>S</summary>D</details>")
+              .text == "Cap\nNext\nS\nD");
+  // Links: trimmed and tolerant href parsing, fragments removed before dedupe,
+  // self links and non-HTTP schemes skipped, anchor text and line recorded.
+  auto links = read("<a href=' /x '>X</a> <a href='#top'>Top</a> <a href='/a#frag'>Self</a> "
+                    "<a href='/y#one'>Y1</a><a href='/y#two'>Y2</a> <a href='/z w|q'>Z</a> "
+                    "<a href='javascript:x'>j</a><a href='mailto:a@b.c'>m</a> <a href='/n\nl'>NL</a>");
+  REQUIRE(links.links ==
+          Json::array({Json{{"url", "https://example.com/x"}, {"text", "X"}, {"line", 1}},
+                       Json{{"url", "https://example.com/y"}, {"text", "Y1"}, {"line", 1}},
+                       Json{{"url", "https://example.com/z%20w%7Cq"}, {"text", "Z"}, {"line", 1}},
+                       Json{{"url", "https://example.com/nl"}, {"text", "NL"}, {"line", 1}}}));
+  auto later = read("<a href='/p'><img alt=x></a><p>one</p><p>two <a href='/p'>Later  <b>text</b></a></p>"
+                    "<p>three</p><a href='/e'></a><p>four</p>");
+  REQUIRE(later.text == "one\ntwo Later text\nthree\nfour");
+  REQUIRE(later.links ==
+          Json::array({Json{{"url", "https://example.com/p"}, {"text", "Later text"}, {"line", 2}},
+                       Json{{"url", "https://example.com/e"}, {"text", ""}, {"line", 4}}}));
+  std::string longAnchor = "<a href='/long'>";
+  for (int i = 0; i < 150; ++i)
+    longAnchor += "word ";
+  const auto anchorText = read(longAnchor + "</a>").links[0]["text"].get<std::string>();
+  REQUIRE(QString::fromStdString(anchorText).toUcs4().size() <= 200);
+  auto heading = read("<ul><li><a href='/b'><h2>Heading</h2></a></li></ul>");
+  REQUIRE(heading.text == "## Heading");
+  REQUIRE(heading.links[0]["text"] == "Heading");
+  // Invisible formatting is removed from text and titles. U+200D and U+FEFF stay.
+  const std::string rlo("\xe2\x80\xae"), shy("\xc2\xad"), zwsp("\xe2\x80\x8b"), tag("\xf3\xa0\x81\x81"),
+      zwj("\xe2\x80\x8d"), bom("\xef\xbb\xbf"), isolate("\xe2\x81\xa6"), joiner("\xe2\x81\xa0");
+  auto invisible = read("<title>T\x01itle" + rlo + "</title><p>a" + shy + "b" + zwsp + "c" + tag + "d" + rlo +
+                        "e" + zwj + "f" + bom + "g" + isolate + "h" + joiner + "i</p>");
+  REQUIRE(invisible.title == "Title");
+  REQUIRE(invisible.text == "abcde" + zwj + "f" + bom + "ghi");
+  REQUIRE(read("<meta property='og:title' content=' OG  title '><h1>H</h1>").title == "OG title");
+  REQUIRE(read("<h1>Heading <b>One</b></h1>").title == "Heading One");
+  REQUIRE(read("<p>x</p>").title == "https://example.com/a");
+}
+void htmlContentTests() {
+  auto read = [](const std::string &s, const std::string &type = "text/html") {
+    return parseHtml(s, "https://example.com/a", type);
+  };
+  REQUIRE(read("{\"a\": 1}", "application/json").text == "{\"a\": 1}");
+  REQUIRE(read("{}", "application/ld+json; charset=utf-8").text == "{}");
+  REQUIRE(read("# H\n  x", "text/markdown").text == "# H\n  x");
+  REQUIRE(read("<rss><item>i</item></rss>", "application/rss+xml").text == "<rss><item>i</item></rss>");
+  REQUIRE(read("<p>x</p>", "text/xml").text == "<p>x</p>");
+  REQUIRE(read("<p>x</p>", "application/xhtml+xml").text == "x");
+  error("unsupported_content", [&] { read("x", "image/png"); });
+  // A missing Content-Type is sniffed.
+  REQUIRE(read("  <!DOCTYPE html><p>x</p>", "").text == "x");
+  REQUIRE(read("plain words", "").text == "plain words");
+  error("unsupported_content", [&] { read(std::string("\x89PNG\r\n\x1a\n\0\0", 10), ""); });
+  auto plainCut = read(std::string(1024 * 1024, ' ') + "tail", "text/plain");
+  REQUIRE(plainCut.truncated);
+  REQUIRE(plainCut.text.empty());
+  // Unknown HTTP labels fall back to the meta prescan (4 KiB), then UTF-8.
+  const std::string gbk("\xd6\xd0\xce\xc4", 4);
+  REQUIRE(read("<meta charset='GBK'><p>" + gbk, "text/html; charset=utf8mb4").text == "中文");
+  REQUIRE(read("plain", "text/plain; charset=bogus").text == "plain");
+  REQUIRE(read("<meta charset='nope'><p>x</p>").text == "x");
+  REQUIRE(read("<!--" + std::string(2000, ' ') + "--><meta charset=GBK><p>" + gbk).text == "中文");
+  // Sparse malformed bytes become U+FFFD. Dense ones mean a wrong charset.
+  REQUIRE(read("<p>" + std::string(200, 'a') + "\xff</p>").text == std::string(200, 'a') + "\xef\xbf\xbd");
+  error("unsupported_content", [&] { read(std::string(100, '\xff'), "text/plain"); });
+  error("unsupported_content", [&] { read(std::string("\xff\xfe\0\0a\0\0\0", 8), "text/plain"); });
+}
+void htmlComplexityTests() {
+  auto timed = [](const std::string &html) {
+    const auto start = Clock::now();
+    auto result = parseHtml(html, "https://example.com/a", "text/html");
+    REQUIRE(Clock::now() - start < std::chrono::seconds(2));
+    REQUIRE(result.truncated);
+    return result;
+  };
+  // Formatting reconstruction clones every unclosed formatting element into each
+  // new paragraph. Without parse-time budgets this page builds millions of nodes.
+  std::string reconstruct = "<p>";
+  for (int i = 0; i < 500; ++i)
+    reconstruct += "<b id=" + std::to_string(i) + ">";
+  for (int i = 0; i < 40000; ++i)
+    reconstruct += "<p>x";
+  timed(reconstruct);
+  std::string wide = "<p>";
+  for (int i = 0; i < 20000; ++i)
+    wide += "<b id=" + std::to_string(i) + ">";
+  for (int i = 0; i < 20000; ++i)
+    wide += "<p>x";
+  timed(wide);
+  // Distinct nested formatting elements make lexbor's duplicate check quadratic.
+  std::string nested;
+  for (int i = 0; i < 49000; ++i)
+    nested += "<b id=" + std::to_string(i) + ">";
+  timed(nested + "x");
+  std::string growing;
+  for (int i = 0; i < 20000; ++i)
+    growing += "<p><b id=" + std::to_string(i) + ">x";
+  REQUIRE(!timed(growing).text.empty());
+  // The node budget keeps the readable prefix of a large page.
+  std::string spans;
+  for (int i = 0; i < 70000; ++i)
+    spans += "<span>x</span>";
+  const auto many = timed(spans);
+  REQUIRE(!many.text.empty());
+  REQUIRE(many.text.size() < 70000);
 }
 void serviceTests() {
   QTemporaryDir dir;
@@ -687,9 +855,18 @@ void serviceTests() {
   auto p = s.call("web_open", {{"url", "https://example.com/a"}, {"max_lines", 1}}, "alice", token());
   REQUIRE(p["lines"].size() == 1);
   REQUIRE(p["next_start_line"] == 2);
+  // Text lines: "Hello 中文", "HELLO two", "Other". The only link is on line 3,
+  // so it is returned only with a window containing that line.
+  REQUIRE(p["links"].empty());
+  REQUIRE(p["links_truncated"] == false);
   const auto id = p["page_id"];
-  REQUIRE(s.call("web_open", {{"page_id", id}, {"start_line", 2}}, "alice", token())["lines"][0]["line"] ==
-          2);
+  auto window = s.call("web_open", {{"page_id", id}, {"start_line", 2}}, "alice", token());
+  REQUIRE(window["lines"][0]["line"] == 2);
+  REQUIRE(window["links"].size() == 1);
+  REQUIRE(window["links"][0]["url"] == "https://example.com/other");
+  REQUIRE(window["links"][0]["line"] == 3);
+  REQUIRE(window["links_truncated"] == false);
+  REQUIRE(s.call("web_open", {{"page_id", id}, {"max_lines", 2}}, "alice", token())["links"].empty());
   auto f = s.call("web_find", {{"page_id", id}, {"pattern", "hello"}, {"max_matches", 1}}, "alice", token());
   REQUIRE(f["matches"].size() == 1);
   REQUIRE(f["next_start_line"] == 2);
@@ -699,6 +876,7 @@ void serviceTests() {
         [&] { s.call("web_find", {{"page_id", id}, {"pattern", "hello"}}, "bob", token()); });
   error("invalid_argument",
         [&] { s.call("web_open", {{"url", "https://example.com"}, {"page_id", id}}, "alice", token()); });
+  error("invalid_argument", [&] { s.call("web_open", Json::object(), "alice", token()); });
   REQUIRE(s.status()["active_calls"] == 0);
 }
 void unicodePageTests() {
@@ -773,6 +951,209 @@ void concurrencyTests() {
     REQUIRE(f.get()["results"].size() == 1);
   REQUIRE(s.call("web_search", {{"query", "after"}}, "alice", token())["status"] == "ok");
   REQUIRE(s.status()["active_calls"] == 0);
+}
+int pageOf(const std::string &form) {
+  return QUrlQuery(QString::fromStdString(form)).queryItemValue("pageno").toInt();
+}
+// A SearXNG JSON page. Plain URL strings become minimal result objects.
+HttpResponse searxngPage(const Json &items, Json extra = Json::object()) {
+  Json results = Json::array();
+  for (const auto &item : items)
+    results.push_back(item.is_string() ? Json{{"title", "T"}, {"url", item}, {"content", "S"}} : item);
+  extra["results"] = results;
+  if (!extra.contains("unresponsive_engines"))
+    extra["unresponsive_engines"] = Json::array();
+  return {200, extra.dump(), "application/json", "http://backend/search", {}};
+}
+void searchQualityTests() {
+  QTemporaryDir dir;
+  auto t = transport();
+  std::vector<int> pages;
+  std::string form;
+  std::function<HttpResponse(int)> respond;
+  // Each call returns after its worker recorded the pages, so no extra locking.
+  t.search = [&](auto, auto body, auto, auto) {
+    pages.push_back(pageOf(body));
+    form = body;
+    return respond(pages.back());
+  };
+  Service s(config(dir), t);
+  auto search = [&](const Json &args) {
+    pages.clear();
+    return s.call("web_search", args, "alice", token());
+  };
+  // Duplicates across pages are recognized despite www., a trailing slash,
+  // scheme, fragment, default port and tracking parameters. The first URL wins.
+  // A page that adds no unseen URL ends the scan.
+  respond = [](int page) {
+    if (page == 1)
+      return searxngPage({"https://www.example.com/a/", "https://example.com/c"});
+    return searxngPage({"http://example.com/a#part", "https://example.com/a?utm_source=news&utm_medium=x",
+                        "https://EXAMPLE.com:443/c/"});
+  };
+  auto r = search({{"query", "dedupe"}, {"limit", 5}});
+  REQUIRE(pages == std::vector<int>({1, 2}));
+  REQUIRE(r["status"] == "ok");
+  REQUIRE(r["results"].size() == 2);
+  REQUIRE(r["results"][0]["url"] == "https://www.example.com/a/");
+  REQUIRE(r["results"][1]["url"] == "https://example.com/c");
+  // New URLs rejected by a domain filter still count as progress, so the scan
+  // continues to later pages.
+  respond = [](int page) {
+    if (page == 1)
+      return searxngPage({"https://other.org/x"});
+    if (page == 2)
+      return searxngPage({"https://docs.example.com/y"});
+    return searxngPage(Json::array());
+  };
+  r = search({{"query", "filtered"}, {"limit", 5}, {"domains", Json::array({"example.com"})}});
+  REQUIRE(pages == std::vector<int>({1, 2, 3}));
+  REQUIRE(r["results"].size() == 1);
+  REQUIRE(r["results"][0]["url"] == "https://docs.example.com/y");
+  // Hosts that are not DNS names are kept when no domain filter applies.
+  respond = [](int) { return searxngPage({"http://[2606:4700::1111]/x"}); };
+  REQUIRE(search({{"query", "literal"}, {"limit", 1}})["results"].size() == 1);
+  REQUIRE(search({{"query", "literal"}, {"limit", 1}, {"domains", Json::array({"example.com"})}})["results"].empty());
+  // Dates become UTC ISO-8601 or null. Corrections and suggestions are bounded
+  // and de-duplicated. An engine failing on several pages is listed once, with
+  // the first upstream reason as detail. "week" passes through as a hint.
+  respond = [](int page) {
+    if (page == 2)
+      return searxngPage({"https://example.com/8"},
+                         {{"unresponsive_engines", Json::array({Json::array({"bing", "timeout"})})},
+                          {"suggestions", Json::array({"late"})}});
+    auto dated = [](const char *url, Json date) {
+      Json item = {{"title", "T"}, {"url", url}, {"content", "S"}};
+      if (!date.is_discarded())
+        item["publishedDate"] = date;
+      return item;
+    };
+    return searxngPage(
+        {dated("https://example.com/1", "2024-05-01T12:30:00+02:00"),
+         dated("https://example.com/2", "2024-05-01T12:30:00"),
+         dated("https://example.com/3", "2024-05-01T12:30:00.123456+00:00"),
+         dated("https://example.com/4", ""), dated("https://example.com/5", "yesterday"),
+         dated("https://example.com/6", nullptr), dated("https://example.com/7", Json(Json::value_t::discarded))},
+        {{"unresponsive_engines", Json::array({Json::array({"bing", " Suspended:  CAPTCHA "})})},
+         {"corrections", {"qgis  spatial index", 7, "", "qgis spatial index"}},
+         {"suggestions", {std::string(300, 'x'), "s1", "s1", "s2", "s3", "s4", "s5"}}});
+  };
+  r = search({{"query", "quality"}, {"limit", 8}, {"time_range", "week"}});
+  REQUIRE(pages == std::vector<int>({1, 2}));
+  REQUIRE(QUrlQuery(QString::fromStdString(form)).queryItemValue("time_range") == "week");
+  REQUIRE(r["warnings"].size() == 1);
+  REQUIRE(r["results"].size() == 8);
+  const std::vector<Json> dates = {"2024-05-01T10:30:00Z", "2024-05-01T12:30:00Z", "2024-05-01T12:30:00Z",
+                                   nullptr, nullptr, nullptr, nullptr, nullptr};
+  for (std::size_t i = 0; i < dates.size(); ++i)
+    REQUIRE(r["results"][i]["published_at"] == dates[i]);
+  REQUIRE(r["corrections"] == Json::array({"qgis spatial index"}));
+  REQUIRE(r["suggestions"] == Json::array({std::string(200, 'x'), "s1", "s2", "s3", "s4"}));
+  REQUIRE(r["failures"] ==
+          Json::array({{{"engine", "bing"}, {"reason", "unresponsive"}, {"detail", "Suspended: CAPTCHA"}}}));
+  REQUIRE(r["status"] == "partial");
+  REQUIRE(r["cache"]["ttl_seconds"] == 30);
+}
+void searchPartialTests() {
+  QTemporaryDir dir;
+  std::atomic<std::int64_t> now = 1000;
+  std::atomic_int requests = 0;
+  std::function<HttpResponse(int, const std::shared_ptr<CancelToken> &)> respond;
+  auto t = transport();
+  t.search = [&](auto, auto body, auto, auto cancel) {
+    ++requests;
+    return respond(pageOf(body), cancel);
+  };
+  auto settings = config(dir);
+  settings.value["limits"]["search_timeout_seconds"] = 2;
+  Service s(settings, t, [&] { return now.load(); });
+  auto blockUntilStopped = [](const std::shared_ptr<CancelToken> &cancel) -> HttpResponse {
+    while (!cancel->stopped())
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    if (cancel->cancelled)
+      throw Error("cancelled", "Fixture cancelled.", 499);
+    throw Error("timeout", "Fixture timed out.", 504, true);
+  };
+  // Page 1 succeeds and page 2 exhausts the upstream deadline. The page-1 hit
+  // still reaches the caller as partial, before the caller's own deadline.
+  respond = [&](int page, const auto &cancel) {
+    return page == 1 ? searxngPage({"https://example.com/first"}) : blockUntilStopped(cancel);
+  };
+  const Json slow = {{"query", "slow second page"}, {"limit", 5}};
+  const auto began = Clock::now();
+  auto r = s.call("web_search", slow, "alice", token(5000));
+  REQUIRE(Clock::now() - began < std::chrono::seconds(2));
+  REQUIRE(r["status"] == "partial");
+  REQUIRE(r["results"].size() == 1);
+  REQUIRE(r["failures"] == Json::array({{{"engine", "provider"}, {"reason", "timeout"}}}));
+  REQUIRE(r["cache"]["ttl_seconds"] == 30);
+  REQUIRE(s.status()["provider"]["state"] == "degraded");
+  REQUIRE(requests == 2);
+  // A partial result is cached for at most 30 seconds.
+  REQUIRE(s.call("web_search", slow, "alice", token())["cache"]["hit"] == true);
+  REQUIRE(requests == 2);
+  respond = [](int page, const auto &) {
+    return page == 1 ? searxngPage({"https://example.com/first"}) : searxngPage(Json::array());
+  };
+  now += 31;
+  // Until its background cache write ends, a finished search is served like a hit.
+  REQUIRE(eventually([&] { return s.call("web_search", slow, "alice", token())["cache"]["hit"] == false; }));
+  REQUIRE(requests == 4);
+  REQUIRE(s.status()["provider"]["state"] == "available");
+  // A partial result without hits is never cached.
+  respond = [](int, const auto &) {
+    return searxngPage(Json::array(),
+                       {{"unresponsive_engines", Json::array({Json::array({"google", "timeout"})})}});
+  };
+  const Json empty = {{"query", "empty partial"}};
+  r = s.call("web_search", empty, "alice", token());
+  REQUIRE(r["status"] == "partial");
+  REQUIRE(r["results"].empty());
+  REQUIRE(r["cache"]["ttl_seconds"] == 0);
+  REQUIRE(s.call("web_search", empty, "alice", token())["cache"]["hit"] == false);
+  REQUIRE(requests == 6);
+  // A caller joins a running search only while at least half of a fresh search
+  // deadline (here 1 of 2 seconds) remains. The upstream deadline is 1.6 s.
+  std::atomic_bool release = false;
+  respond = [&](int, const auto &cancel) {
+    while (!release && !cancel->stopped())
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    return release ? searxngPage({"https://example.com/join"}) : blockUntilStopped(cancel);
+  };
+  const Json join = {{"query", "join rule"}, {"limit", 1}};
+  auto early = std::async(std::launch::async, [&] { return s.call("web_search", join, "alice", token(5000)); });
+  REQUIRE(eventually([&] { return requests == 7; }));
+  std::this_thread::sleep_for(std::chrono::milliseconds(800));
+  auto late = std::async(std::launch::async, [&] { return s.call("web_search", join, "alice", token(5000)); });
+  REQUIRE(eventually([&] { return requests == 8; }));
+  release = true;
+  REQUIRE(early.get()["results"].size() == 1);
+  REQUIRE(late.get()["results"].size() == 1);
+}
+void searchCacheWriteFailureTests() {
+  QTemporaryDir dir;
+  std::atomic_int requests = 0;
+  auto t = transport();
+  t.search = [&](auto, auto, auto, auto) {
+    ++requests;
+    return results();
+  };
+  Service s(config(dir), t);
+  const Json query = {{"query", "unstored"}, {"limit", 1}};
+  {
+    // A held write lock makes the background cache write fail after its busy timeout.
+    SqlFixture writer(dir.filePath("cache-v1.sqlite"));
+    writer.execute("BEGIN IMMEDIATE");
+    auto r = s.call("web_search", query, "alice", token());
+    REQUIRE(r["status"] == "ok");
+    REQUIRE(r["results"].size() == 1);
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    writer.execute("ROLLBACK");
+  }
+  REQUIRE(s.call("web_search", query, "alice", token())["cache"]["hit"] == false);
+  REQUIRE(requests == 2);
+  REQUIRE(eventually([&] { return s.call("web_search", query, "alice", token())["cache"]["hit"] == true; }));
+  REQUIRE(requests == 2);
 }
 void protocolTests() {
   QTemporaryDir dir;
@@ -917,6 +1298,162 @@ void jsonAndDeadlineTests() {
     REQUIRE(remaining.count() > 0 && remaining.count() <= 500);
   }
 }
+// Version negotiation, tools.json metadata, validation as tool errors,
+// cancellation before registration, configuration detail and bearer parsing.
+void mcpContractTests() {
+  QTemporaryDir dir;
+  Service s(config(dir), transport());
+  const auto &catalog = toolCatalog();
+  REQUIRE(catalog["instructions"].is_string());
+  REQUIRE(catalog["instructions"].get<std::string>().find("next_start_line") != std::string::npos);
+  REQUIRE(Protocol::supportsVersion("2025-11-25") && Protocol::supportsVersion("2025-06-18"));
+  REQUIRE(!Protocol::supportsVersion("2025-03-26") && !Protocol::supportsVersion("2026-07-28"));
+  auto initialize = [](Protocol &p, const std::string &version) {
+    return p.handle("alice", "",
+                    {{"jsonrpc", "2.0"},
+                     {"id", "init"},
+                     {"method", "initialize"},
+                     {"params",
+                      {{"protocolVersion", version},
+                       {"capabilities", Json::object()},
+                       {"clientInfo", {{"name", "contract"}, {"version", "1"}}}}}});
+  };
+  const Json initialized = {{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}};
+  Protocol p(s);
+  // Supported revisions are echoed; any other request is offered the newest.
+  for (const auto &[requested, expected] : std::initializer_list<std::pair<const char *, const char *>>{
+           {"2025-11-25", "2025-11-25"},
+           {"2025-06-18", "2025-06-18"},
+           {"2025-03-26", "2025-11-25"},
+           {"2099-01-01", "2025-11-25"}}) {
+    const auto r = initialize(p, requested);
+    REQUIRE(r.message->at("result").at("protocolVersion") == expected);
+    REQUIRE(r.message->at("result").at("instructions") == catalog["instructions"]);
+    REQUIRE(p.deleteSession("alice", r.sessionId).httpStatus == 204);
+  }
+  const auto sid = initialize(p, "2025-11-25").sessionId;
+  p.handle("alice", sid, initialized);
+  int next = 0;
+  auto request = [&](const std::string &method, Json params) {
+    return p.handle("alice", sid,
+                    {{"jsonrpc", "2.0"}, {"id", ++next}, {"method", method}, {"params", std::move(params)}});
+  };
+  auto call = [&](const std::string &name, Json args) {
+    return request("tools/call", {{"name", name}, {"arguments", std::move(args)}});
+  };
+  const auto listed = (*request("tools/list", Json::object()).message)["result"]["tools"];
+  REQUIRE(listed.size() == 4 && listed.size() == catalog["tools"].size());
+  const std::map<std::string, bool> openWorld = {
+      {"web_search", true}, {"web_open", true}, {"web_find", false}, {"web_search_status", false}};
+  for (std::size_t i = 0; i < listed.size(); ++i) {
+    const auto &tool = listed.at(i);
+    const auto &meta = catalog["tools"][i];
+    const auto name = tool.at("name").get<std::string>();
+    REQUIRE(meta["name"].get<std::string>() == name);
+    REQUIRE(tool.at("title") == meta["title"] && !meta["title"].get<std::string>().empty());
+    REQUIRE(tool.at("description") == meta["description"]);
+    REQUIRE(tool.at("annotations") == meta["annotations"]);
+    REQUIRE(tool.at("annotations").at("readOnlyHint") == true);
+    REQUIRE(tool.at("annotations").at("openWorldHint") == openWorld.at(name));
+    REQUIRE(!tool.at("annotations").contains("destructiveHint"));
+    REQUIRE(tool.at("inputSchema") == readSchema(name));
+    REQUIRE(tool.at("inputSchema").at("type") == "object");
+    // Some model APIs reject composition keywords at the schema root.
+    for (const auto *keyword : {"oneOf", "anyOf", "allOf", "not"})
+      REQUIRE(!tool.at("inputSchema").contains(keyword));
+  }
+  REQUIRE(listed.at(0).at("name") == "web_search" && listed.at(1).at("name") == "web_open");
+  REQUIRE(listed.at(2).at("name") == "web_find" && listed.at(3).at("name") == "web_search_status");
+  const auto &ranges = readSchema("web_search")["properties"]["time_range"]["enum"];
+  REQUIRE(std::find(ranges.begin(), ranges.end(), Json("week")) != ranges.end());
+  REQUIRE(&readSchema("web_find") == &readSchema("web_find"));
+  // Argument errors are tool results naming the first failing field.
+  auto toolError = [](const ProtocolReply &r) {
+    REQUIRE(r.message && r.message->contains("result"));
+    const auto &result = r.message->at("result");
+    REQUIRE(result.at("isError") == true);
+    REQUIRE(Json::parse(result.at("content").at(0).at("text").get<std::string>()) ==
+            result.at("structuredContent"));
+    return result.at("structuredContent").at("error");
+  };
+  auto failure = toolError(call("web_search", {{"query", "q"}, {"limit", 50}}));
+  REQUIRE(failure["code"] == "invalid_argument");
+  auto text = failure["message"].get<std::string>();
+  REQUIRE(text.find("/limit") != std::string::npos && text.find("maximum") != std::string::npos);
+  failure = toolError(call("web_search", Json::object()));
+  REQUIRE(failure["message"].get<std::string>().find("'query'") != std::string::npos);
+  failure = toolError(call("web_find", {{"page_id", "x"}, {"pattern", "y"}, {"regex", true}}));
+  REQUIRE(failure["message"].get<std::string>().find("'regex'") != std::string::npos);
+  REQUIRE(toolError(call("web_open", {{"url", "https://example.com"}, {"page_id", "x"}}))["code"] ==
+          "invalid_argument");
+  REQUIRE(toolError(call("web_open", Json::object()))["code"] == "invalid_argument");
+  REQUIRE((*call("web_search", {{"query", "q"}, {"time_range", "week"}}).message)["result"]["isError"] == false);
+  // A client-chosen property name is cut on a code point boundary.
+  std::string emoji;
+  for (int i = 0; i < 200; ++i)
+    emoji += "\xF0\x9F\x98\x80";
+  const auto clipped = call("web_search", {{"query", "q"}, {emoji, 1}});
+  REQUIRE(!clipped.message->dump().empty());
+  REQUIRE(QString::fromStdString(toolError(clipped)["message"].get<std::string>()).size() < 400);
+  const auto unknown = call("web_lookup", {{"query", "q"}});
+  REQUIRE(unknown.message->at("error").at("code") == -32602);
+  REQUIRE(unknown.message->at("error").at("message") == "Unknown tool: web_lookup");
+  try {
+    validateSchema(readSchema("web_find"), {{"page_id", "x"}});
+    REQUIRE(false);
+  } catch (const Error &e) {
+    REQUIRE(e.code == "invalid_argument");
+    REQUIRE(std::string(e.what()).find("'pattern'") != std::string::npos);
+  }
+  // A cancellation can arrive before a stdio worker registers its request.
+  Protocol stdio(s, QCWS_VERSION, {}, Protocol::TransportPolicy::Stdio);
+  const auto stdioSid = initialize(stdio, "2025-06-18").sessionId;
+  stdio.handle("alice", stdioSid, initialized);
+  auto cancel = [&](const std::string &id) {
+    return stdio.handle("alice", stdioSid,
+                        {{"jsonrpc", "2.0"}, {"method", "notifications/cancelled"}, {"params", {{"requestId", id}}}});
+  };
+  auto status = [&](const std::string &id) {
+    return stdio.handle("alice", stdioSid,
+                        {{"jsonrpc", "2.0"},
+                         {"id", id},
+                         {"method", "tools/call"},
+                         {"params", {{"name", "web_search_status"}}}});
+  };
+  REQUIRE(cancel("early").httpStatus == 202);
+  auto r = status("early");
+  REQUIRE(r.httpStatus == 202 && !r.message);
+  r = status("after");
+  REQUIRE(r.message && (*r.message)["result"]["isError"] == false);
+  // Completed IDs are not remembered, and the early window keeps 16 IDs.
+  REQUIRE(cancel("after").httpStatus == 202);
+  for (int i = 0; i < 20; ++i)
+    cancel("window-" + std::to_string(i));
+  REQUIRE(status("window-0").message);
+  REQUIRE(!status("window-19").message);
+  // Runtime configuration errors name the failing field.
+  auto runtime = defaultConfiguration();
+  runtime["limits"]["max_concurrent"] = 999;
+  QFile invalid(dir.filePath("invalid-runtime.json"));
+  REQUIRE(invalid.open(QIODevice::WriteOnly));
+  REQUIRE(invalid.write(QByteArray::fromStdString(runtime.dump())) > 0);
+  invalid.close();
+  try {
+    (void)Config::load(dir.filePath("invalid-runtime.json").toStdString());
+    REQUIRE(false);
+  } catch (const Error &e) {
+    REQUIRE(e.code == "invalid_configuration");
+    REQUIRE(std::string(e.what()).find("/limits/max_concurrent") != std::string::npos);
+  }
+  // RFC 9110: the bearer scheme is case-insensitive and followed by 1*SP.
+  const std::string secret(40, 'k');
+  const std::vector<ClientIdentity> clients{
+      {"case", QCryptographicHash::hash(QByteArray::fromStdString(secret), QCryptographicHash::Sha256)}};
+  for (const auto *scheme : {"Bearer ", "bearer ", "BEARER  "})
+    REQUIRE(authenticate(clients, scheme + secret) == "case");
+  for (const auto &bad : {"Bearer" + secret, "Basic " + secret, "Bearer " + secret + "x", std::string("Bearer ")})
+    error("unauthorized", [&] { authenticate(clients, bad); });
+}
 void httpTests() {
   qputenv("QCWS_TEST_CREDENTIAL", QByteArray(64, 'a'));
   QTemporaryDir dir;
@@ -959,7 +1496,33 @@ void httpTests() {
   init["id"] = 1;
   r = client.Post("/mcp", mcpHeaders, init.dump(), "application/json");
   REQUIRE(r && r->status == 200);
-  REQUIRE(Json::parse(r->body)["result"].contains("protocolVersion"));
+  REQUIRE(Json::parse(r->body)["result"]["protocolVersion"] == "2025-06-18");
+  init["id"] = 2;
+  init["params"]["protocolVersion"] = "2025-11-25";
+  r = client.Post("/mcp", mcpHeaders, init.dump(), "application/json");
+  REQUIRE(r && r->status == 200);
+  const auto negotiated = Json::parse(r->body)["result"];
+  REQUIRE(negotiated["protocolVersion"] == "2025-11-25" && negotiated["instructions"].is_string());
+  auto session = mcpHeaders;
+  session.emplace("Mcp-Session-Id", r->get_header_value("Mcp-Session-Id"));
+  int pingId = 10;
+  for (const auto &[version, status] : std::initializer_list<std::pair<const char *, int>>{
+           {"2025-11-25", 200}, {"2025-06-18", 200}, {"2025-03-26", 400}, {"2026-07-28", 400}}) {
+    auto versioned = session;
+    versioned.emplace("MCP-Protocol-Version", version);
+    r = client.Post("/mcp", versioned, Json{{"jsonrpc", "2.0"}, {"id", ++pingId}, {"method", "ping"}}.dump(),
+                    "application/json");
+    REQUIRE(r && r->status == status);
+    // No JSON-RPC body, so a dual-era client falls back to initialize.
+    if (status == 400)
+      REQUIRE(!Json::parse(r->body).contains("jsonrpc"));
+  }
+  r = client.Post("/v1/search", headers, R"({"query":"q","limit":0})", "application/json");
+  REQUIRE(r && r->status == 400);
+  REQUIRE(Json::parse(r->body)["error"]["message"].get<std::string>().find("/limit") != std::string::npos);
+  r = client.Get("/v1/status",
+                 httplib::Headers{{"Host", "test.local"}, {"Authorization", "bearer " + std::string(64, 'a')}});
+  REQUIRE(r && r->status == 200);
   httplib::Client control("127.0.0.1", server.controlPort());
   r = control.Get("/health/live", headers);
   REQUIRE(r && r->status == 200);
@@ -1016,11 +1579,18 @@ int main(int argc, char **argv) {
       {"cache-physical-pressure", cachePhysicalPressureTests},
       {"html", htmlTests},
       {"html-boundaries", htmlBoundaryTests},
+      {"html-markdown", htmlMarkdownTests},
+      {"html-content", htmlContentTests},
+      {"html-complexity", htmlComplexityTests},
       {"service", serviceTests},
       {"unicode-page", unicodePageTests},
       {"concurrency", concurrencyTests},
+      {"search-quality", searchQualityTests},
+      {"search-partial", searchPartialTests},
+      {"search-cache-write-failure", searchCacheWriteFailureTests},
       {"protocol", protocolTests},
       {"json-and-deadlines", jsonAndDeadlineTests},
+      {"mcp-contract", mcpContractTests},
       {"http", httpTests}};
   int failed = 0;
   for (auto [name, fn] : tests)

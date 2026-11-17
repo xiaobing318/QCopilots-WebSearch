@@ -2,7 +2,7 @@
 
 [简体中文](README.zh-CN.md)
 
-An Apache-2.0 C++20 / Qt 6.12 service for self-hosted web search, HTML reading and literal page search. SearXNG supplies search results. REST, MCP HTTP and MCP stdio share the same versioned tools. A separate GPL adapter connects QGIS QCopilots to the service.
+An Apache-2.0 C++20 / Qt 6.12 service for self-hosted web search, HTML reading and literal page search. SearXNG supplies search results. REST, MCP HTTP and MCP stdio share the same versioned tools. A separate GPL adapter, `python/plugins/qcopilots_mcp_server_web_search` in the QGIS repository, connects QGIS QCopilots to the service. See [connecting QGIS](docs/deployment.md#qgis).
 
 CI builds and tests Windows and Ubuntu packages. Pushing a `vMAJOR.MINOR.PATCH` tag runs the full automated checks, verifies the resulting packages and their build origin, then publishes a GitHub Release. Windows CI runs on Windows Server 2022. See [the release workflow](docs/release.md) for platform coverage and required checks.
 
@@ -16,6 +16,8 @@ CI builds and tests Windows and Ubuntu packages. Pushing a `vMAJOR.MINOR.PATCH` 
 | `web_search_status` | Read local and last-known dependency state without searching the web |
 
 No paid provider, independent web index, PDF extraction, JavaScript execution or LLM answer generation is included. Self-hosting removes a software-imposed commercial quota, but upstream search engines can still throttle or block requests.
+
+By default five business operations can run at once and a full service returns `busy` immediately. Search has a 15-second deadline and page reading 20 seconds. Search results are cached for 5 minutes and page snapshots for 30 minutes. Cache identity, output budgets and error codes are governed by the versioned contract.
 
 ## Build
 
@@ -45,14 +47,14 @@ qcopilots-websearch --ConfigPath /private/path/service.json
 
 Set `provider.url` to the private SearXNG `/search` endpoint with JSON enabled. The default business listener is `127.0.0.1:8088`, and authenticated health/metrics use `127.0.0.1:8089`. Configure independent credentials per client. Remote access requires an HTTPS reverse proxy with exact Host and Origin settings.
 
-REST uses `POST /v1/search`, `/v1/open`, `/v1/find` and `GET /v1/status`, with `Authorization: Bearer ...`. MCP uses `/mcp` and protocol `2025-06-18`. For a process-based client, use `--Stdio --ConfigPath FILE`. Stdio has private temporary state and does not open HTTP listeners.
+REST uses `POST /v1/search`, `/v1/open`, `/v1/find` and `GET /v1/status`, with `Authorization: Bearer ...`. MCP uses `/mcp` and protocol `2025-11-25` or `2025-06-18`. For a process-based client, use `--Stdio --ConfigPath FILE`. Stdio has private temporary state and does not open HTTP listeners.
 
 Web content is untrusted source material. Tools return provenance and bounded text, not instructions that clients should execute. Public fetching blocks non-public addresses, checks the actual connection destination, disables inherited proxies and checks every redirect.
 
 ## Project layout
 
 - `app`, `include/qws`, `src`: native application and reusable service components
-- `contracts/v1`: canonical tool schemas
+- `contracts/v1`: canonical tool schemas and tool metadata
 - `config`: build/runtime examples, schemas and fixed dependency hashes
 - `scripts`, `cmake`: shared build and distribution tooling
 - `tests`: deterministic tests with temporary state and dynamically allocated ports

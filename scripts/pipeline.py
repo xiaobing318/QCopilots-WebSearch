@@ -52,7 +52,15 @@ def apt_command(proxy, root):
                       "-o", "Acquire::https::Proxy=" + (proxy or "DIRECT")]
 
 
+def forwarded_arguments(args):
+    """Rebuild the command line for the tool-environment run from parsed options."""
+    return ["--ConfigPath", str(args.ConfigPath), "--Profile", args.Profile, "--Stages", ",".join(args.Stages),
+            *(["--CheckOnly"] if args.CheckOnly else []), *(["--DryRun"] if args.DryRun else [])]
+
+
 class Pipeline:
+    tooling_missing = False
+
     def __init__(self, args):
         self.args = args
         self.config = json.loads(Path(args.ConfigPath).read_text(encoding="utf-8-sig"))
@@ -93,6 +101,10 @@ class Pipeline:
         command = list(map(str, command))
         if command[0] in self.tool_paths and self.tool_paths[command[0]]:
             command[0] = str(Path(self.tool_paths[command[0]]).expanduser().resolve())
+        elif WIN and not os.path.dirname(command[0]):
+            # CreateProcess searches this process's PATH, not env["PATH"]. Resolve
+            # bare names such as cmake or nmake against the imported VS2022 environment.
+            command[0] = shutil.which(command[0], path=self.env.get("PATH")) or command[0]
         print("+", subprocess.list2cmdline(command), flush=True)
         if self.dry:
             return ""
@@ -109,7 +121,13 @@ class Pipeline:
             if self.dry:
                 print("Tool environment missing. Dry run will not install it.")
                 return
-            if "bootstrap" not in self.args.Stages or self.args.CheckOnly:
+            if self.args.CheckOnly:
+                # Diagnose the host with this interpreter. main() reports the
+                # missing tooling after the diagnostics instead of before them.
+                print("Tool environment missing. CheckOnly continues with host diagnostics.", flush=True)
+                self.tooling_missing = True
+                return
+            if "bootstrap" not in self.args.Stages:
                 raise RuntimeError("Tooling is missing. Run --Stages bootstrap first.")
             directory.parent.mkdir(parents=True, exist_ok=True)
             venv.EnvBuilder(with_pip=True).create(directory)
@@ -124,14 +142,17 @@ class Pipeline:
             self.run([python, "-m", "pip", "install", "--no-index", "--find-links", wheels,
                       "--only-binary=:all:", "--require-hashes", "-r", ROOT / "scripts/requirements-tools.lock"])
         if not self.dry:
-            raise SystemExit(subprocess.call([str(python), __file__, *sys.argv[1:]], cwd=ROOT, env=self.env))
+            # Forward the parsed options, whose ConfigPath main() made absolute,
+            # so the child reads the same file even though it runs from ROOT.
+            raise SystemExit(subprocess.call([str(python), __file__, *forwarded_arguments(self.args)],
+                                             cwd=ROOT, env=self.env))
 
     def validate(self):
         try:
             import jsonschema
         except ImportError:
-            if self.dry:
-                print("Dry run: full schema validation unavailable until bootstrap.")
+            if self.dry or self.tooling_missing:
+                print("Full schema validation is unavailable until bootstrap.")
                 return
             raise RuntimeError("Missing pinned schema validator. Run bootstrap.") from None
         schema = json.loads((ROOT / "config/BuildPipeline.schema.json").read_text(encoding="utf-8"))
@@ -234,6 +255,8 @@ class Pipeline:
 
     def verify_qt(self):
         qmake = self.qt_prefix / "bin" / ("qmake.exe" if WIN else "qmake")
+        if not self.dry and not qmake.is_file():
+            raise RuntimeError(f"Qt {self.qt['version']} is missing at {self.qt_prefix}. Run --Stages bootstrap.")
         version = self.run([qmake, "-query", "QT_VERSION"], True).strip()
         prefix = self.run([qmake, "-query", "QT_INSTALL_PREFIX"], True).strip()
         if not self.dry and (version != "6.12.0" or os.path.normcase(str(Path(prefix).resolve())) != os.path.normcase(str(self.qt_prefix))):
@@ -289,8 +312,10 @@ class Pipeline:
             raise RuntimeError("Install missing build tools: " + ", ".join(missing))
         output = self.run(["cmake", "--version"], True)
         match = re.search(r"cmake version (\d+)\.(\d+)", output)
-        if not self.dry and (not match or tuple(map(int, match.groups())) < (3, 28)):
-            raise RuntimeError("CMake 3.28 or newer is required.")
+        # cmake/Packaging.cmake requires 3.30 for the Windows WiX .NET generator.
+        minimum = (3, 30) if WIN else (3, 28)
+        if not self.dry and (not match or tuple(map(int, match.groups())) < minimum):
+            raise RuntimeError("CMake {}.{} or newer is required.".format(*minimum))
         for tool in ("ninja", "git"):
             self.run([tool, "--version"])
         if WIN:
@@ -358,7 +383,11 @@ class Pipeline:
             # parent segments. Keep this build's source adjacent to its output
             # instead of traversing back into the long SHA-keyed download cache.
             if not source.is_dir():
-                shutil.copytree(verified_source, source)
+                # Stage the copy and rename it so an interrupted copy is never reused.
+                with tempfile.TemporaryDirectory(prefix=".openssl-source-", dir=directory) as tmp:
+                    stage = Path(tmp) / "source"
+                    shutil.copytree(verified_source, stage)
+                    stage.rename(source)
         marker = directory / "qcws-complete.json"
         identity = {"source": spec["sha256"], "compiler": self.env.get("VCToolsVersion", ""),
                     "sdk": self.env.get("WindowsSDKVersion", ""),
@@ -497,18 +526,24 @@ def main():
         parser.error("Stages must be unique names from: " + ",".join(STAGES))
     if sys.version_info < (3, 12):
         raise RuntimeError("Python 3.12 or newer is required.")
+    # The tool-environment run starts from ROOT. Resolve against the caller's directory now.
+    args.ConfigPath = str(Path(args.ConfigPath).resolve())
     pipeline = Pipeline(args)
-    pipeline.windows_environment()
-    pipeline.configured_tools()
     if "bootstrap" in args.Stages and not args.CheckOnly:
         pipeline.ubuntu_dependencies()
+    # Switch to the pinned tool environment before importing VS2022, so VsDevCmd
+    # runs once, in the process that executes the stages.
     pipeline.tools()
+    pipeline.windows_environment()
+    pipeline.configured_tools()
     pipeline.validate()
     actions = {"doctor": pipeline.doctor, "bootstrap": pipeline.bootstrap, "configure": pipeline.configure,
                "build": pipeline.build_stage, "test": pipeline.test, "install": pipeline.install_stage, "publish": pipeline.publish}
     for stage in ("doctor",) if args.CheckOnly else args.Stages:
         print("Stage:", stage, flush=True)
         actions[stage]()
+    if pipeline.tooling_missing:
+        raise RuntimeError("Host diagnostics finished, but the pinned Python tooling is missing. Run --Stages bootstrap.")
 
 
 if __name__ == "__main__":

@@ -10,6 +10,12 @@ import tempfile
 import time
 
 
+def require(condition, message):
+    # Explicit checks keep working under python -O, unlike assert.
+    if not condition:
+        raise RuntimeError(message)
+
+
 def pressure(executable, template, close_reader):
     with tempfile.TemporaryDirectory(prefix="qcws stdio pipe ") as temporary:
         config = json.loads(Path(template).read_text(encoding="utf-8"))
@@ -25,26 +31,26 @@ def pressure(executable, template, close_reader):
                 "protocolVersion": "2025-06-18", "capabilities": {},
                 "clientInfo": {"name": "pipe-test", "version": "1"}}}
             child.stdin.write((json.dumps(initialize) + "\n").encode())
-            assert json.loads(child.stdout.readline())["id"] == 1
+            require(json.loads(child.stdout.readline())["id"] == 1, "initialize reply has the wrong id")
             if close_reader:
                 child.stdout.close()
             payload = memoryview((json.dumps({"jsonrpc": "2.0", "id": "p" * 262144,
                                              "method": "ping"}) + "\n").encode())
             while payload:
                 written = child.stdin.write(payload)
-                assert written
+                require(written, "stdin accepted no bytes")
                 payload = payload[written:]
             # Popen.wait does not pump stdout, unlike QProcess.waitForFinished.
             started = time.monotonic()
             if not close_reader:
                 child.stdin.close()
             result = child.wait(timeout=5)
-            assert result in (0, 1), f"abnormal stdio exit: {result}"
+            require(result in (0, 1), f"abnormal stdio exit: {result}")
             if not close_reader:
-                assert result == 0, "EOF should cancel backpressure without reporting input failure"
+                require(result == 0, "EOF should cancel backpressure without reporting input failure")
             else:
-                assert result == 1, "A broken stdout must stop input even while stdin stays open"
-            assert time.monotonic() - started < 5
+                require(result == 1, "A broken stdout must stop input even while stdin stays open")
+            require(time.monotonic() - started < 5, "stdio shutdown exceeded 5 seconds")
         finally:
             if child.poll() is None:
                 child.kill()

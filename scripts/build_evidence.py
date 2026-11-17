@@ -35,7 +35,7 @@ def require_receipt(path, current):
         raise RuntimeError('Required pipeline stage has not completed: ' + Path(path).name)
     receipt = json.loads(Path(path).read_text('utf-8'))
     if receipt.get('identity') != current:
-        raise RuntimeError('Source or build profile changed. Repeat build, test and install.')
+        raise RuntimeError('Source or build profile changed. Repeat configure, build, test and install.')
     return receipt
 
 

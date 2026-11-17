@@ -21,7 +21,7 @@ endif()
 include(cmake/Dependencies.cmake)
 add_library(qcws_core STATIC src/network.cpp src/cache.cpp src/config.cpp src/html.cpp src/service.cpp src/protocol.cpp src/server.cpp src/stdio_output.cpp)
 set(_schemas config/runtime.json config/runtime.schema.json contracts/v1/web_search.schema.json contracts/v1/web_open.schema.json
-  contracts/v1/web_find.schema.json contracts/v1/web_search_status.schema.json)
+  contracts/v1/web_find.schema.json contracts/v1/web_search_status.schema.json contracts/v1/tools.json)
 foreach(schema IN LISTS _schemas)
   get_filename_component(alias "${schema}" NAME)
   set_source_files_properties("${schema}" PROPERTIES QT_RESOURCE_ALIAS "${alias}")
@@ -111,7 +111,10 @@ if(QCWS_BUILD_TESTING)
     target_compile_options(qcws_windows_security_tests PRIVATE /W4 /utf-8 /permissive-)
     add_test(NAME windows-security COMMAND qcws_windows_security_tests)
     set_tests_properties(windows-security PROPERTIES TIMEOUT 45)
-    set_property(TEST windows-security APPEND PROPERTY ENVIRONMENT_MODIFICATION
+    # Give every registered test Qt's DLL directory, so direct ctest runs work
+    # without the build pipeline's PATH.
+    get_property(_qcws_test_names DIRECTORY PROPERTY TESTS)
+    set_property(TEST ${_qcws_test_names} APPEND PROPERTY ENVIRONMENT_MODIFICATION
       "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
   endif()
 endif()

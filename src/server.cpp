@@ -237,10 +237,11 @@ struct HttpServer::Impl {
     });
   }
   static bool protocolHeaders(const httplib::Request &req, httplib::Response &res) {
+    // An absent header is accepted. A present one must name a supported revision.
     if (req.get_header_value_count("Mcp-Session-Id") > 1 ||
         req.get_header_value_count("MCP-Protocol-Version") > 1 ||
         (req.has_header("MCP-Protocol-Version") &&
-         req.get_header_value("MCP-Protocol-Version") != "2025-06-18")) {
+         !Protocol::supportsVersion(req.get_header_value("MCP-Protocol-Version")))) {
       sendError(res, Error("invalid_argument", "Unsupported protocol header."));
       return false;
     }
@@ -313,8 +314,7 @@ int runStdio(Service &service) {
     // calls still have no response, but rejected requests receive an error.
     if (!message && reply.httpStatus >= 400 && request && request->is_object() &&
         request->contains("method") && (*request)["method"].is_string() && request->contains("id") &&
-        ((*request)["id"].is_string() || (*request)["id"].is_number_integer() ||
-         (*request)["id"].is_number_unsigned())) {
+        Protocol::validId((*request)["id"])) {
       message =
           Json{{"jsonrpc", "2.0"},
                {"id", (*request)["id"]},
@@ -398,22 +398,34 @@ int runStdio(Service &service) {
       return true;
     }
   };
-  auto readLine = [&] {
+  // A line beyond the 1 MiB input budget is discarded through its newline
+  // without buffering, so the process keeps serving later messages.
+  enum class Input { Line, Overlong, End };
+  auto readLine = [&]() -> Input {
     line.clear();
+    bool overlong = false;
     for (;;) {
       if (offset == pending.size() && !readInput())
-        return !line.empty();
+        return overlong ? Input::Overlong : line.empty() ? Input::End : Input::Line;
       const char ch = pending[offset++];
       if (ch == '\n')
-        return true;
-      if (line.size() >= 1024 * 1024)
-        throw Error("request_too_large", "Stdio line exceeds 1 MiB.", 413);
+        return overlong ? Input::Overlong : Input::Line;
+      if (overlong)
+        continue;
+      if (line.size() >= 1024 * 1024) {
+        overlong = true;
+        line.clear();
+        continue;
+      }
       line += ch;
     }
   };
   int result = 0;
   try {
-    while (!output.failed() && readLine()) {
+    while (!output.failed()) {
+      const auto input = readLine();
+      if (input == Input::End)
+        break;
       std::erase_if(tasks, [](Task &t) {
         if (t.done->load()) {
           t.thread.join();
@@ -421,6 +433,17 @@ int runStdio(Service &service) {
         }
         return false;
       });
+      if (input == Input::Overlong) {
+        writeReply({200,
+                    Json{{"jsonrpc", "2.0"},
+                         {"id", nullptr},
+                         {"error", {{"code", -32600}, {"message", "Message exceeds 1 MiB"}}}},
+                    session});
+        continue;
+      }
+      // Blank or CR-only lines are framing noise, not messages.
+      if (line.find_first_not_of(" \t\r") == std::string::npos)
+        continue;
       auto message = parseBoundedJson(line);
       if (message.is_discarded()) {
         writeReply({200,

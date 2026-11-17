@@ -116,9 +116,10 @@ python scripts/publish_verified_release.py --ArtifactsRoot <new-download-directo
 
 Both directories must be new and separate. The publisher downloads artifacts
 itself. It requires `GH_TOKEN`, `GITHUB_REPOSITORY`, `GITHUB_RUN_ID`,
-`GITHUB_RUN_ATTEMPT`, `GITHUB_SHA` and `GITHUB_REF`, plus a clean checkout of the
-tagged commit. `--CheckOnly` verifies inputs and any existing remote assets
-without creating, uploading, deleting or publishing remote objects.
+`GITHUB_RUN_ATTEMPT`, `GITHUB_SHA`, `GITHUB_REF` and `GITHUB_EVENT_NAME` (which
+must be `push`), plus a clean checkout of the tagged commit. `--CheckOnly`
+verifies inputs and any existing remote assets without creating, uploading,
+deleting or publishing remote objects.
 
 The release and asset operations use the [GitHub Release API](https://docs.github.com/en/rest/releases/releases)
 and [asset API](https://docs.github.com/en/rest/releases/assets).

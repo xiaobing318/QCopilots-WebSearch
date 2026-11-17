@@ -72,16 +72,16 @@ public:
     require(exchange({{"jsonrpc", "2.0"}, {"id", std::move(id)}, {"method", "ping"}}).contains("result"),
             "Ping failed");
   }
-  void initialize() {
-    require(exchange({{"jsonrpc", "2.0"},
-                      {"id", "init"},
-                      {"method", "initialize"},
-                      {"params",
-                       {{"protocolVersion", "2025-06-18"},
-                        {"capabilities", Json::object()},
-                        {"clientInfo", {{"name", "process-test"}, {"version", "1"}}}}}})
-                .contains("result"),
-            "Initialize failed");
+  void initialize(const std::string &version = "2025-06-18") {
+    auto reply = exchange({{"jsonrpc", "2.0"},
+                           {"id", "init"},
+                           {"method", "initialize"},
+                           {"params",
+                            {{"protocolVersion", version},
+                             {"capabilities", Json::object()},
+                             {"clientInfo", {{"name", "process-test"}, {"version", "1"}}}}}});
+    require(reply.contains("result") && reply["result"]["protocolVersion"] == version, "Initialize failed");
+    require(reply["result"]["instructions"].is_string(), "Initialize lacks instructions");
     send({{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}});
   }
   void finish() {
@@ -135,7 +135,7 @@ int main(int argc, char **argv) {
         "Pre-initialize request was lost");
     first.initialize();
     first.ping(std::string(65534, 'x'));
-    second.initialize();
+    second.initialize("2025-11-25");
     second.ping("alive");
     for (int i = 0; i < 5000; ++i)
       first.ping(i);
@@ -149,6 +149,18 @@ int main(int argc, char **argv) {
     auto error = first.receive();
     require(error["id"].is_null() && error["error"]["code"] == -32700, "Parse error changed protocol");
     first.ping("after-parse-error");
+    // Blank and CR-only lines produce no reply; a BOM and CRLF framing are accepted.
+    first.bytes("\n \t\r\n\r\n");
+    first.ping("after-blank-lines");
+    first.bytes(QByteArray("\xEF\xBB\xBF") +
+                QByteArray::fromStdString(Json{{"jsonrpc", "2.0"}, {"id", "bom"}, {"method", "ping"}}.dump()) +
+                "\r\n");
+    require(first.receive()["id"] == "bom", "BOM or CRLF framing was rejected");
+    // A line beyond 1 MiB is discarded through its newline and answered.
+    first.bytes(QByteArray(1024 * 1024 + 1, 'x') + "\n");
+    auto overlong = first.receive();
+    require(overlong["id"].is_null() && overlong["error"]["code"] == -32600, "Overlong line was not rejected");
+    first.ping("after-overlong");
     for (const int depth : {65, 10000, 30000}) {
       first.bytes(QByteArray("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"params\":{\"deep\":") +
                   QByteArray(depth, '[') + '0' + QByteArray(depth, ']') + "}}\n");

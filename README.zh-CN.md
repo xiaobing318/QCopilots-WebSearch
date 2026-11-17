@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-使用 C++20 和 Qt 6.12 实现的独立网页搜索服务，通过自部署 SearXNG 搜索公网，提供网页阅读、页内查找、REST、MCP HTTP 和 MCP stdio。QGIS 通过独立 Python MCP 适配插件接入，同一原生服务也可用于其他项目。
+使用 C++20 和 Qt 6.12 实现的独立网页搜索服务，通过自部署 SearXNG 搜索公网，提供网页阅读、页内查找、REST、MCP HTTP 和 MCP stdio。QGIS 通过 QGIS 仓库中的独立 Python MCP 适配插件 `python/plugins/qcopilots_mcp_server_web_search` 接入，接入步骤见[团队部署](docs/deployment.md#qgis)。同一原生服务也可用于其他项目。
 
 CI 构建并测试 Windows 和 Ubuntu 安装包。推送 `vMAJOR.MINOR.PATCH` 标签后，流水线执行完整自动检查，核对安装包和构建来源，然后发布 GitHub Release。Windows CI 使用 Windows Server 2022。平台覆盖范围与必需检查详见[发布流程](docs/release.md)。
 
@@ -43,9 +43,18 @@ qcopilots-websearch --ConfigPath 私有目录/service.json
 
 初始化会生成随机客户端令牌，并保留已存在的配置。设置 `provider.url` 指向启用 JSON 输出的私有 SearXNG `/search` 端点。默认业务地址为 `127.0.0.1:8088`，健康与指标地址为 `127.0.0.1:8089`，两者均需认证。远程访问通过 HTTPS 反向代理，并配置精确 Host 和 Origin 白名单。
 
-REST 提供 `POST /v1/search`、`/v1/open`、`/v1/find` 和 `GET /v1/status`，使用 Bearer 认证。MCP HTTP 地址为 `/mcp`，协议版本为 `2025-06-18`。添加 `--Stdio` 可通过标准输入输出连接，使用独立临时缓存且不监听 HTTP。
+REST 提供 `POST /v1/search`、`/v1/open`、`/v1/find` 和 `GET /v1/status`，使用 Bearer 认证。MCP HTTP 地址为 `/mcp`，协议版本为 `2025-11-25` 或 `2025-06-18`。添加 `--Stdio` 可通过标准输入输出连接，使用独立临时缓存且不监听 HTTP。
 
 网页内容属于不可信外部资料。客户端应将返回内容用于引用与分析。公共抓取会检查真实连接地址及每次重定向，阻止内网和云元数据目标，不继承系统代理。
+
+## 目录结构
+
+- `app`、`include/qws`、`src`：原生应用与可复用服务组件
+- `contracts/v1`：规范工具模式与工具元数据
+- `config`：构建与运行配置示例、配置模式及固定依赖哈希
+- `scripts`、`cmake`：共享的构建与分发工具
+- `tests`：使用临时状态和动态端口的确定性测试
+- `docs`：架构、接口、构建、部署与运维文档
 
 原生仓库采用 Apache-2.0，第三方依赖保留各自许可。Qt 动态链接，正式发行附匹配源码及共享库替换说明。QGIS 适配代码留在 QGIS 仓库中并遵循 GPL 许可。
 

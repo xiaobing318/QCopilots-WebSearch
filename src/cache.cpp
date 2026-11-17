@@ -125,8 +125,19 @@ struct Cache::Impl {
     lockFile.unlock();
   }
   void flushTouches() {
-    for (const auto &[key, accessed] : pendingTouches)
-      query("UPDATE entries SET accessed=? WHERE key=?", {accessed, key});
+    if (pendingTouches.empty())
+      return;
+    // One prepared statement for every pending hit. A completed DML step resets
+    // itself, so the statement holds no lock between executions.
+    QSqlQuery q(db);
+    if (!q.prepare("UPDATE entries SET accessed=? WHERE key=?"))
+      sqlFailure(q.lastError());
+    for (const auto &[key, accessed] : pendingTouches) {
+      q.bindValue(0, accessed);
+      q.bindValue(1, key);
+      if (!q.exec())
+        sqlFailure(q.lastError());
+    }
   }
   bool evictPhysical(const QString &protectedKey, qint64 limit) {
     // FULL can roll back the whole transaction, and flushing the access index
@@ -142,8 +153,14 @@ struct Cache::Impl {
     const auto count = std::min(order.size(), std::size_t(limit));
     if (count < order.size())
       std::nth_element(order.begin(), order.begin() + count, order.end());
-    for (std::size_t i = 0; i < count; ++i)
-      query("DELETE FROM entries WHERE key=?", {order[i].second});
+    QSqlQuery remove(db);
+    if (!remove.prepare("DELETE FROM entries WHERE key=?"))
+      sqlFailure(remove.lastError());
+    for (std::size_t i = 0; i < count; ++i) {
+      remove.bindValue(0, order[i].second);
+      if (!remove.exec())
+        sqlFailure(remove.lastError());
+    }
     return count == order.size();
   }
   void start() {
@@ -188,6 +205,13 @@ struct Cache::Impl {
               "NOT NULL CHECK(size>=0),expires INTEGER NOT NULL,accessed INTEGER NOT NULL)");
         query("CREATE INDEX IF NOT EXISTS entry_lru ON entries(accessed,key)");
         query("CREATE INDEX IF NOT EXISTS entry_expiry ON entries(expires)");
+        // The payload BLOB precedes size in each row, so totals read through a
+        // covering index instead of the table. An existing full database can
+        // still open without it; totals then fall back to a table scan.
+        try {
+          query("CREATE INDEX IF NOT EXISTS entry_size ON entries(size)");
+        } catch (const SqlFull &) {
+        }
         query("PRAGMA user_version=1");
         serial = scalar("SELECT COALESCE(MAX(accessed),0) FROM entries");
         query("DELETE FROM entries WHERE expires<=?", {qint64(clock())});
@@ -228,27 +252,31 @@ void Cache::close() {
 }
 std::optional<Json> Cache::get(const std::string &key) {
   const auto k = keyHash(key);
-  return d_->run([&]() -> std::optional<Json> {
-    QByteArray bytes;
-    {
-      auto q = d_->query("SELECT payload FROM entries WHERE key=? AND expires>?", {k, qint64(d_->clock())});
-      if (!q.next()) {
-        // Expired rows are collected by put/stats. A cache read never needs a
-        // disk write merely to update eviction metadata or report a miss.
-        d_->pendingTouches.erase(k);
-        return std::nullopt;
-      }
-      bytes = q.value(0).toByteArray();
-    }
-    Json value = parseBoundedJson(std::string_view(bytes.constData(), size_t(bytes.size())));
-    if (value.is_discarded()) {
-      d_->query("DELETE FROM entries WHERE key=?", {k});
+  const auto bytes = d_->run([&]() -> std::optional<QByteArray> {
+    auto q = d_->query("SELECT payload FROM entries WHERE key=? AND expires>?", {k, qint64(d_->clock())});
+    if (!q.next()) {
+      // Expired rows are collected by put. A cache read never needs a disk
+      // write merely to update eviction metadata or report a miss.
       d_->pendingTouches.erase(k);
       return std::nullopt;
     }
+    auto payload = q.value(0).toByteArray();
     d_->pendingTouches[k] = ++d_->serial;
-    return value;
+    return payload;
   });
+  if (!bytes)
+    return std::nullopt;
+  // Parse on the caller's thread so a large snapshot does not hold the single
+  // SQLite thread and every other client's cache access.
+  Json value = parseBoundedJson(std::string_view(bytes->constData(), size_t(bytes->size())));
+  if (!value.is_discarded())
+    return value;
+  d_->run([&] {
+    // Remove only the unreadable bytes, never a valid replacement written since.
+    d_->query("DELETE FROM entries WHERE key=? AND payload=?", {k, *bytes});
+    d_->pendingTouches.erase(k);
+  });
+  return std::nullopt;
 }
 void Cache::put(const std::string &key, const Json &value, std::int64_t ttl) {
   const auto k = keyHash(key);
@@ -271,9 +299,28 @@ void Cache::put(const std::string &key, const Json &value, std::int64_t ttl) {
         // Do not clear on rollback: the next successful write still sees exact LRU.
         d_->flushTouches();
         d_->query("DELETE FROM entries WHERE expires<=? OR key=?", {now, k});
-        while (d_->scalar("SELECT COUNT(*) FROM entries") >= d_->maxEntries ||
-               d_->scalar("SELECT COALESCE(SUM(size),0) FROM entries") + data.size() > d_->payloadBudget)
-          d_->query("DELETE FROM entries WHERE key=(SELECT key FROM entries ORDER BY accessed,key LIMIT 1)");
+        // Read the totals once, then account for each least-recently-used
+        // victim instead of rescanning the table after every deletion.
+        qint64 entries = 0, bytes = 0;
+        {
+          auto totals = d_->query("SELECT COUNT(*),COALESCE(SUM(size),0) FROM entries");
+          if (!totals.next())
+            unavailable();
+          entries = totals.value(0).toLongLong();
+          bytes = totals.value(1).toLongLong();
+        }
+        while (entries >= d_->maxEntries || bytes + data.size() > d_->payloadBudget) {
+          QString victim;
+          {
+            auto oldest = d_->query("SELECT key,size FROM entries ORDER BY accessed,key LIMIT 1");
+            if (!oldest.next())
+              break;
+            victim = oldest.value(0).toString();
+            bytes -= oldest.value(1).toLongLong();
+          }
+          --entries;
+          d_->query("DELETE FROM entries WHERE key=?", {victim});
+        }
         d_->query("INSERT INTO entries VALUES(?,?,?,?,?)",
                   {k, data, qint64(data.size()), now + ttl, ++d_->serial});
         if (!d_->db.commit())
@@ -306,9 +353,10 @@ void Cache::erase(const std::string &key) {
 }
 Json Cache::stats() {
   return d_->run([&] {
-    d_->query("DELETE FROM entries WHERE expires<=?", {qint64(d_->clock())});
-    return Json{{"entries", d_->scalar("SELECT COUNT(*) FROM entries")},
-                {"logical_bytes", d_->scalar("SELECT COALESCE(SUM(size),0) FROM entries")},
+    // Read-only: live entries are counted without collecting expired rows.
+    const qint64 now = d_->clock();
+    return Json{{"entries", d_->scalar("SELECT COUNT(*) FROM entries WHERE expires>?", {now})},
+                {"logical_bytes", d_->scalar("SELECT COALESCE(SUM(size),0) FROM entries WHERE expires>?", {now})},
                 {"storage_bytes", d_->storageBytes()},
                 {"max_storage_bytes", d_->maxBytes},
                 {"effective_payload_limit", d_->payloadBudget}};

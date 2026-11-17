@@ -13,7 +13,11 @@ and coalesced searches are isolated by caller identity, provider and contract
 version. A request joins a matching search only when at least half of a fresh
 search deadline remains. Waiters have independent deadlines and cancellation.
 The upstream is cancelled when its last waiter leaves or its shared deadline
-expires. Its capacity slot remains occupied until the transfer ends.
+expires. That shared deadline ends up to one second before its waiters'
+deadlines, so results from earlier pages still reach them as `partial` when a
+later page runs out of time. Its capacity slot remains occupied until the
+transfer ends. Waiters receive the result before it is written to the cache, and
+a failed search-cache write does not fail the search.
 
 Status reads local and last-known state without starting network requests and
 bypasses business admission. Capacity is bounded per service instance and does

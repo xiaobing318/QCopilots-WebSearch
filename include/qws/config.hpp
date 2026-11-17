@@ -4,9 +4,15 @@
 #include <qws/common.hpp>
 #include <vector>
 namespace qws {
-Json readSchema(const std::string &name);
+// Bundled schemas are parsed and compiled once. The returned reference stays
+// valid for the process lifetime, and validateSchema reuses its validator.
+const Json &readSchema(const std::string &name);
+// contracts/v1/tools.json: {"instructions": string, "tools": [{name, title,
+// description, annotations}]} in tools/list order.
+const Json &toolCatalog();
 Json defaultConfiguration();
 void initializeConfiguration(const std::string &path);
+// Throws invalid_argument naming the first failing JSON pointer and reason.
 void validateSchema(const Json &schema, const Json &value);
 struct ClientIdentity {
   std::string id;

@@ -28,6 +28,9 @@ from runtime_evidence import fingerprint, host_info
 from process_cleanup import wait_owned
 
 EXPECTED = {"web_search", "web_open", "web_find", "web_search_status"}
+# Handshake-era revisions the server negotiates; it echoes either one.
+SUPPORTED_VERSIONS = {"2025-11-25", "2025-06-18"}
+CATALOG = json.loads((ROOT / "contracts/v1/tools.json").read_text("utf-8"))
 
 
 def require(condition, code):
@@ -169,14 +172,20 @@ async def cancel_in_flight(client, fixture, label):
 
 
 async def exercise(client, fixture, label, public_url):
-    require(client.protocol_version == "2025-06-18", "protocol_negotiation")
+    require(client.protocol_version in SUPPORTED_VERSIONS, "protocol_negotiation")
     await client.session.send_ping()
     listing = await client.list_tools(cache_mode="bypass")
     require({tool.name for tool in listing.tools} == EXPECTED, "tool_inventory")
+    require([tool.name for tool in listing.tools] == [entry["name"] for entry in CATALOG["tools"]],
+            "tool_order")
     require(listing.next_cursor is None, "unexpected_tool_pagination")
-    for tool in listing.tools:
+    for tool, entry in zip(listing.tools, CATALOG["tools"]):
         expected = json.loads((ROOT / "contracts/v1" / f"{tool.name}.schema.json").read_text("utf-8"))
         require(tool.input_schema == expected, "tool_schema_disagreement")
+        require(tool.title == entry["title"] and tool.description == entry["description"],
+                "tool_metadata_disagreement")
+        annotations = tool.annotations.model_dump(by_alias=True, exclude_none=True) if tool.annotations else {}
+        require(annotations == entry["annotations"], "tool_annotation_disagreement")
     status = payload(await client.call_tool("web_search_status", {}))
     require(status["service"] == "ready", "service_not_ready")
     query = f"mcp-search-{label}-{secrets.token_hex(8)}"
@@ -189,9 +198,13 @@ async def exercise(client, fixture, label, public_url):
         {"url": f"http://127.0.0.1:{fixture.server_port}/private"}), error="destination_blocked")
     payload(await client.call_tool("web_find",
         {"page_id": secrets.token_hex(16), "pattern": "fixture"}), error="page_unavailable")
+    # Unknown tools stay protocol errors. Argument errors are tool results
+    # naming the failing field, so a model can correct its call.
     await rpc_error(client, "unknown_tool", {})
-    await rpc_error(client, "web_search", {})
-    await rpc_error(client, "web_open", {"url": "https://example.org", "page_id": "x"})
+    invalid = payload(await client.call_tool("web_search", {}), error="invalid_argument")
+    require("'query'" in invalid["error"]["message"], "validation_detail_missing")
+    payload(await client.call_tool("web_open", {"url": "https://example.org", "page_id": "x"}),
+            error="invalid_argument")
     cancellation = await cancel_in_flight(client, fixture, label)
     public = {"attempted": bool(public_url), "passed": False}
     if public_url:
@@ -209,6 +222,30 @@ async def exercise(client, fixture, label, public_url):
     await client.session.send_ping()
     return {"transport": label, "protocol": client.protocol_version, "tools": sorted(EXPECTED),
             "passed": True, "cancellation_seconds": cancellation, "public": public}
+
+
+async def exercise_auto(client, label):
+    # The SDK default mode probes for a 2026-era server first. This server is
+    # handshake-based, so the probe must fall back to initialize.
+    require(client.protocol_version in SUPPORTED_VERSIONS, f"{label}_auto_fallback")
+    await client.session.send_ping()
+    listing = await client.list_tools(cache_mode="bypass")
+    require({tool.name for tool in listing.tools} == EXPECTED, f"{label}_auto_tool_inventory")
+    status = payload(await client.call_tool("web_search_status", {}))
+    require(status["service"] == "ready", f"{label}_auto_status")
+    return client.protocol_version
+
+
+def stdio_children(config):
+    found = []
+    for child in psutil.Process().children(recursive=True):
+        try:
+            command = child.cmdline()
+            if "--Stdio" in command and str(config) in command:
+                found.append(child)
+        except psutil.Error:
+            pass
+    return found
 
 
 async def exercise_http(port, token, fixture, public_url):
@@ -234,6 +271,12 @@ async def exercise_http(port, token, fixture, public_url):
         require("notifications/cancelled" in methods, "cancel_notification_missing")
         require(deletes == [204], "session_delete_failed")
     result["http_session_deleted"] = True
+    async with httpx2.AsyncClient(headers={"Authorization": "Bearer " + token}, trust_env=False,
+        follow_redirects=False, timeout=30) as http:
+        transport = streamable_http_client(f"http://127.0.0.1:{port}/mcp",
+                                           http_client=http, terminate_on_close=True)
+        async with Client(transport, read_timeout_seconds=10) as client:
+            result["auto_protocol"] = await exercise_auto(client, "http")
     return result
 
 
@@ -245,15 +288,14 @@ async def exercise_stdio(executable, config, tokens, fixture, public_url):
         with open(os.devnull, "w", encoding="utf-8") as errlog:
             transport = stdio_client(params, errlog=errlog)
             async with Client(transport, mode="legacy", read_timeout_seconds=10) as client:
-                for child in psutil.Process().children(recursive=True):
-                    try:
-                        command = child.cmdline()
-                        if "--Stdio" in command and str(config) in command:
-                            owned.append(child)
-                    except psutil.Error:
-                        pass
+                owned.extend(stdio_children(config))
                 require(len(owned) == 1, "stdio_process_not_identified")
                 result = await exercise(client, fixture, "stdio", public_url)
+            async with Client(stdio_client(params, errlog=errlog), read_timeout_seconds=10) as client:
+                fresh = [child for child in stdio_children(config) if child not in owned]
+                require(len(fresh) == 1, "stdio_auto_process_not_identified")
+                owned.extend(fresh)
+                result["auto_protocol"] = await exercise_auto(client, "stdio")
         require(not any(child.is_running() for child in owned), "stdio_sdk_left_process")
         result["stdio_cleanup"] = "sdk_managed_no_remaining_process"
         return result

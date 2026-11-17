@@ -18,9 +18,19 @@
 #include <qws/network.hpp>
 #include <string_view>
 
+#ifndef QCWS_VERSION
+#define QCWS_VERSION "0.0.0"
+#endif
+
 namespace qws {
 namespace {
 constexpr std::size_t BodyLimit = 5 * 1024 * 1024;
+constexpr unsigned RedirectLimit = 5;
+// Public page failures are attributed to the remote site. Only transient
+// conditions are retryable.
+[[noreturn]] void remoteFailure(const std::string &message, bool retryable) {
+  throw Error("upstream_http_error", message, 502, retryable);
+}
 constexpr std::size_t HeaderLimit = 64 * 1024;
 struct Runtime {
   Runtime() {
@@ -155,12 +165,13 @@ std::size_t receiveHeader(char *data, std::size_t s, std::size_t n, void *p) noe
     auto name = trim(line.substr(0, colon));
     std::transform(name.begin(), name.end(), name.begin(),
                    [](unsigned char c) { return char(std::tolower(c)); });
-    if (name != "location" && name != "content-type" && name != "content-length" &&
-        name != "content-encoding" && name != "retry-after")
+    if (name != "location" && name != "content-type")
       return bytes;
     auto value = trim(line.substr(colon + 1));
+    // Like browsers, the last Content-Type wins. Conflicting redirect targets
+    // remain ambiguous and are rejected.
     const auto old = t.response.headers.find(name);
-    if (old != t.response.headers.end() && old->second != value) {
+    if (name == "location" && old != t.response.headers.end() && old->second != value) {
       t.badHeader = true;
       return 0;
     }
@@ -256,7 +267,8 @@ HttpResponse perform(const QUrl &url, const std::string &body, const std::string
   Handles h;
   if (!h.easy || !h.multi)
     throw Error("internal_error", "HTTP allocation failed.", 500);
-  headers.add(publicOnly ? "Accept: text/html,text/plain;q=0.9" : "Accept: application/json");
+  headers.add(publicOnly ? "Accept: text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5"
+                         : "Accept: application/json");
   headers.add("Expect:");
   if (!token.empty())
     headers.add("Authorization: Bearer " + token);
@@ -287,7 +299,7 @@ HttpResponse perform(const QUrl &url, const std::string &body, const std::string
   option(h.easy, CURLOPT_HTTP09_ALLOWED, 0L);
   option(h.easy, CURLOPT_HTTP_VERSION, long(CURL_HTTP_VERSION_1_1));
   option(h.easy, CURLOPT_NOSIGNAL, 1L);
-  option(h.easy, CURLOPT_USERAGENT, "QCopilots-WebSearch/0.1");
+  option(h.easy, CURLOPT_USERAGENT, "QCopilots-WebSearch/" QCWS_VERSION);
   option(h.easy, CURLOPT_ACCEPT_ENCODING, "gzip");
   option(h.easy, CURLOPT_MAXFILESIZE_LARGE, curl_off_t(BodyLimit));
   option(h.easy, CURLOPT_WRITEFUNCTION, receiveBody);
@@ -339,16 +351,39 @@ HttpResponse perform(const QUrl &url, const std::string &body, const std::string
     throw Error("response_too_large", "Response exceeds its size limit.", 502);
   if (t.callbackFailed)
     throw Error("internal_error", "HTTP callback failed.", 500);
-  if (t.badHeader)
+  if (t.badHeader) {
+    if (publicOnly)
+      remoteFailure("Remote resource returned conflicting headers.", false);
     throw Error("provider_unavailable", "Invalid upstream headers.", 502);
+  }
   if (result == CURLE_OPERATION_TIMEDOUT)
     throw Error("timeout", "Request timed out.", 504, true);
   if (result != CURLE_OK) {
     if (t.blocked && t.accepted == 0)
-      throw Error("destination_blocked", "URL destination is not permitted.", 403);
+      throw Error("destination_blocked", "URL host resolves only to non-public addresses.", 403);
     if (result == CURLE_BAD_CONTENT_ENCODING)
       throw Error("unsupported_content", "Unsupported content encoding.", 415);
-    throw Error("provider_unavailable", "Upstream request failed.", 502, true);
+    if (!publicOnly)
+      throw Error("provider_unavailable", "Upstream request failed.", 502, true);
+    switch (result) {
+    case CURLE_COULDNT_RESOLVE_HOST:
+      remoteFailure("Remote host name could not be resolved.", false);
+    case CURLE_COULDNT_CONNECT:
+    case CURLE_SEND_ERROR:
+    case CURLE_RECV_ERROR:
+    case CURLE_GOT_NOTHING:
+    case CURLE_PARTIAL_FILE:
+      remoteFailure("Remote connection failed.", true);
+    case CURLE_PEER_FAILED_VERIFICATION:
+      remoteFailure("TLS verification failed.", false);
+    case CURLE_SSL_CONNECT_ERROR:
+      remoteFailure("TLS handshake failed.", false);
+    case CURLE_WEIRD_SERVER_REPLY:
+    case CURLE_UNSUPPORTED_PROTOCOL:
+      remoteFailure("Remote server returned an invalid HTTP response.", false);
+    default:
+      remoteFailure("Remote request failed.", false);
+    }
   }
   long status = 0;
   check(curl_easy_getinfo(h.easy, CURLINFO_RESPONSE_CODE, &status));
@@ -404,21 +439,28 @@ HttpResponse HttpClient::getPublic(std::string value, std::shared_ptr<CancelToke
         r.status == 301 || r.status == 302 || r.status == 303 || r.status == 307 || r.status == 308;
     if (!redirect) {
       if (r.status < 200 || r.status >= 300)
-        throw Error(r.status == 429 ? "rate_limited" : "upstream_http_error",
-                    "Remote resource could not be read.", r.status == 429 ? 429 : 502,
-                    r.status == 429 || r.status >= 500);
+        remoteFailure("Remote resource returned HTTP " + std::to_string(r.status) + ".",
+                      r.status == 429 || r.status >= 500);
       return r;
     }
+    if (redirects >= RedirectLimit)
+      remoteFailure("Remote resource redirected too many times.", false);
     auto location = r.headers.find("location");
-    if (redirects >= 5 || location == r.headers.end())
-      throw Error("provider_unavailable", "Invalid upstream redirect.", 502);
-    QUrl relative(QString::fromUtf8(location->second.data(), qsizetype(location->second.size())),
-                  QUrl::StrictMode);
-    if (!relative.isValid())
-      throw Error("provider_unavailable", "Invalid upstream redirect.", 502);
-    QUrl next = normalizedUrl(url.resolved(relative).toEncoded(QUrl::FullyEncoded).toStdString());
+    if (location == r.headers.end())
+      remoteFailure("Remote resource returned an invalid redirect.", false);
+    // Browsers accept unencoded spaces and similar characters in Location.
+    QUrl relative(QString::fromUtf8(location->second.data(), qsizetype(location->second.size())).trimmed(),
+                  QUrl::TolerantMode);
+    QUrl next;
+    try {
+      if (!relative.isValid())
+        throw Error("invalid_argument", "Invalid HTTP URL.");
+      next = normalizedUrl(url.resolved(relative).toEncoded(QUrl::FullyEncoded).toStdString());
+    } catch (const Error &) {
+      remoteFailure("Remote resource returned an invalid redirect.", false);
+    }
     if (url.scheme() == "https" && next.scheme() != "https")
-      throw Error("forbidden", "HTTPS downgrade not permitted.", 403);
+      throw Error("destination_blocked", "HTTPS to HTTP redirects are not permitted.", 403);
     url = next;
   }
 }
