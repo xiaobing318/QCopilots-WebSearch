@@ -72,7 +72,7 @@ class PipelineTests(unittest.TestCase):
             environment = dict(os.environ, PYTHON=str(interpreter))
             completed = subprocess.run(["bash", wrapper, *options], env=environment,
                                        capture_output=True, check=True, timeout=10)
-            self.assertEqual(completed.stdout.decode().split("\\0")[:-1],
+            self.assertEqual(completed.stdout.decode().split("\0")[:-1],
                              [str(ROOT / "scripts/pipeline.py"), *options])
             environment["PYTHON"] = str(interpreter) + ".missing"
             missing = subprocess.run(["bash", wrapper, "--Stages", "bootstrap"], env=environment,
