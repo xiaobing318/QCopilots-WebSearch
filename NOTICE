@@ -19,9 +19,12 @@ govern redistribution. Windows system libraries are not included.
 Linux system libraries remain managed by the operating system package manager.
 The DEB dependency metadata identifies required runtime packages.
 
-Windows dynamically links bundled OpenSSL 3.5.9, licensed under Apache-2.0.
-The matching source archive accompanies release assets. Its license is installed
-with the application.
+Windows uses the system Schannel TLS backend.
+
+The settings frontend redistributes its third-party notices in
+THIRD_PARTY_NOTICES.txt. The automatic web search provider draws on Strata
+by Niko1221 and the Strata contributors under the MIT license. Its upstream
+license and copyright notice are installed under licenses/strata.
 
 The cpp-httplib 0.66.0 MIT header is modified for request-input deadlines and
 owned-socket shutdown. The modified header and patch script are under

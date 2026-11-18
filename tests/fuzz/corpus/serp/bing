@@ -1,0 +1,12 @@
+2<!doctype html>
+<html lang="en"><title>Search results</title>
+<ol id="b_results">
+  <li class="b_ans"><h2><a href="https://example.org/nonorganic">Answer card</a></h2></li>
+  <li class="b_algo featured">
+    <h2><a href="/ck/a?tag=other&amp;u=a1aHR0cHM6Ly9leGFtcGxlLm5ldC9iaW5nP3JlZj1zZWFyY2g"><strong>QGIS</strong> Bing</a></h2>
+    <div class="b_caption"><p class="b_lineclamp2">A Bing search result.</p><time datetime="2026-09-02T10:20:00Z">September 2</time></div>
+  </li>
+  <li class="b_algo"><h2><a href="/ck/a?u=a1@@bad">Invalid base64</a></h2></li>
+  <li class="b_algo"><h2><a href="/search?q=qgis+maps">Internal navigation</a></h2></li>
+</ol>
+</html>

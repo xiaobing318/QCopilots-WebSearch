@@ -2,26 +2,43 @@
 
 [简体中文](README.zh-CN.md)
 
-An Apache-2.0 C++20 / Qt 6.12 service for self-hosted web search, HTML reading and literal page search. SearXNG supplies search results. REST, MCP HTTP and MCP stdio share the same versioned tools. A separate GPL adapter, `python/plugins/qcopilots_mcp_server_web_search` in the QGIS repository, connects QGIS QCopilots to the service. See [connecting QGIS](docs/deployment.md#qgis).
+QCopilots-WebSearch is an Apache-2.0 C++20 and Qt 6.12 service for web search, page reading and literal text search. It ships a settings page in English and Simplified Chinese and supports Windows 11 and Ubuntu 26.04 on amd64.
 
-CI builds and tests Windows and Ubuntu packages. Pushing a `vMAJOR.MINOR.PATCH` tag runs the full automated checks, verifies the resulting packages and their build origin, then publishes a GitHub Release. Windows CI runs on Windows Server 2022. See [the release workflow](docs/release.md) for platform coverage and required checks.
+Search works without an API key through DuckDuckGo HTML, DuckDuckGo Lite and Bing fallback. Select a private SearXNG instance or supply your own Brave, Tavily or Exa key in Settings. Availability and rate limits depend on the selected source.
 
-## Tools
+## Install and open Settings
 
-| Tool | Purpose |
+| Platform | Package | Settings command |
+| --- | --- | --- |
+| Windows 11 | MSI. Registers the machine service | Run `qcopilots-websearch.exe --SettingsUrl` from the installed `bin` directory |
+| Windows 11 | ZIP. Extract and initialize in a private writable directory | Run `bin/qcopilots-websearch.exe --ConfigPath <file> --SettingsUrl` |
+| Ubuntu 26.04 | DEB. Install with `sudo apt install ./qcopilots-websearch_<version>_amd64.deb` | Run `sudo /opt/qcopilots-websearch/bin/qcopilots-websearch --ConfigPath /etc/qcopilots-websearch/runtime.json --SettingsUrl` |
+
+For a portable installation, initialize the configuration and start the service first.
+
+```text
+qcopilots-websearch --InitializeConfig --ConfigPath /private/path/service.json
+qcopilots-websearch --ConfigPath /private/path/service.json
+```
+
+The Settings command prints a one-time link. Open it within two minutes, or append `--Open` to launch the browser. You can also open [Settings](http://127.0.0.1:8091/settings/) and sign in with the separate `admin.token`. Initialization generates random client and admin tokens and preserves existing configuration.
+
+The business listener defaults to `127.0.0.1:8088`. Use its `/v1` REST routes or `/mcp` with a client Bearer token. Health and metrics use `127.0.0.1:8089`. Process-based MCP clients can use `--Stdio --ConfigPath FILE`. [Deployment and QGIS setup](docs/deployment.md)
+
+## MCP tools
+
+| Tool | Behavior |
 | --- | --- |
-| `web_search` | Search through a configured SearXNG instance, with strict domain filtering |
-| `web_open` | Read public HTML/text into an identity-scoped snapshot with numbered lines |
-| `web_find` | Find literal text in that snapshot, with Unicode case-insensitive matching |
-| `web_search_status` | Read local and last-known dependency state without searching the web |
+| `web_search` | Searches the selected source and applies strict domain filters |
+| `web_open` | Reads public HTML or text into a client-scoped page with numbered lines |
+| `web_find` | Finds literal text in a stored page |
+| `web_search_status` | Reads the current tool settings and last known provider state |
 
-No paid provider, independent web index, PDF extraction, JavaScript execution or LLM answer generation is included. Self-hosting removes a software-imposed commercial quota, but upstream search engines can still throttle or block requests.
+Use Settings to enable search and page opening independently. When “Search without asking” is off, the QGIS adapter asks once per QGIS session before a search or new URL open. Direct REST and MCP clients manage their own confirmation. The [versioned API](docs/api.md) defines cache behavior, provenance and errors.
 
-By default five business operations can run at once and a full service returns `busy` immediately. Search has a 15-second deadline and page reading 20 seconds. Search results are cached for 5 minutes and page snapshots for 30 minutes. Cache identity, output budgets and error codes are governed by the versioned contract.
+## Build and test
 
-## Build
-
-Windows requires VS2022 with the C++ workload and Windows SDK, CMake 3.30+, Ninja, Git, native Windows Perl and Python 3.12+. Bootstrap installs the fixed Qt archives and isolated Python download tooling. It does not install Visual Studio or Perl. Ubuntu bootstrap installs its compiler and system dependencies using apt.
+Windows requires Visual Studio 2022 or 2026 with C++ and a Windows SDK, CMake 3.30 or newer, Ninja, Git and Python 3.12 or newer. Ubuntu requires Python 3.12 or newer before bootstrap. Bootstrap prepares Qt, Node and the required build dependencies.
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/BuildPipeline.ps1 --Profile windows-x64 --Stages bootstrap,doctor,configure,build,test,install
@@ -31,38 +48,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/BuildPipeline.ps
 bash scripts/BuildPipeline.sh --Profile ubuntu-x64 --Stages bootstrap,doctor,configure,build,test,install
 ```
 
-Use `--ConfigPath` to select a private configuration copied from `config/BuildPipeline.json`. Files ending in `.local.json` are ignored. `--CheckOnly` diagnoses without installing, and `--DryRun` prints planned commands. A download proxy can be configured as `http://127.0.0.1:7897`. This setting does not proxy runtime webpage requests.
+Use `--ConfigPath` with a private `*.local.json` derived from `config/BuildPipeline.json`. Add `publish` to create local packages. Windows MSI packaging requires WiX 7.0.1 and .NET 10. GitHub Actions builds on Windows Server 2025 and Ubuntu 26.04. A version tag runs release acceptance and publishes the tested packages with checksums, matching Qt source and provenance. [Build instructions](docs/build.md) · [Release workflow](docs/release.md)
 
-`--Stages publish` generates local ZIP/MSI or DEB packages. It does not publish a GitHub Release. MSI requires official WiX 7.0.1, its matching UI extension and .NET 10. See the official package's maintenance-fee terms before choosing that distribution.
+## Repository layout
 
-## Run
+- `app`, `include/qws`, `src` contain the native service and CLI.
+- `web` contains the React and TypeScript frontend embedded as Qt resources.
+- `contracts/v1` and `contracts/admin/v1` define the MCP and management interfaces.
+- `config`, `cmake`, `scripts`, `packaging` and `deploy` cover the build and installation.
+- `tests` contains deterministic native and Python fixtures and fuzz targets.
 
-Initialize a configuration in a private writable directory. The command creates a random client token file and preserves existing configuration.
-
-```text
-qcopilots-websearch --InitializeConfig --ConfigPath /private/path/service.json
-qcopilots-websearch --CheckConfig --ConfigPath /private/path/service.json
-qcopilots-websearch --ConfigPath /private/path/service.json
-```
-
-Set `provider.url` to the private SearXNG `/search` endpoint with JSON enabled. The default business listener is `127.0.0.1:8088`, and authenticated health/metrics use `127.0.0.1:8089`. Configure independent credentials per client. Remote access requires an HTTPS reverse proxy with exact Host and Origin settings.
-
-REST uses `POST /v1/search`, `/v1/open`, `/v1/find` and `GET /v1/status`, with `Authorization: Bearer ...`. MCP uses `/mcp` and protocol `2025-11-25` or `2025-06-18`. For a process-based client, use `--Stdio --ConfigPath FILE`. Stdio has private temporary state and does not open HTTP listeners.
-
-Web content is untrusted source material. Tools return provenance and bounded text, not instructions that clients should execute. Public fetching blocks non-public addresses, checks the actual connection destination, disables inherited proxies and checks every redirect.
-
-## Project layout
-
-- `app`, `include/qws`, `src`: native application and reusable service components
-- `contracts/v1`: canonical tool schemas and tool metadata
-- `config`: build/runtime examples, schemas and fixed dependency hashes
-- `scripts`, `cmake`: shared build and distribution tooling
-- `tests`: deterministic tests with temporary state and dynamically allocated ports
-- `docs`: architecture, interfaces, building, deployment and operations
-
-Native source uses Apache-2.0. Third-party libraries retain their own licenses. Qt is dynamically linked and release artifacts include its matching source and replacement instructions. QGIS adaptation code remains in the QGIS GPL repository.
-
-Read the [research](docs/research.md), [runtime architecture](docs/architecture.md),
-[API reference](docs/api.md),
-[build instructions](docs/build.md), [team deployment](docs/deployment.md),
-[operations guide](docs/operations.md), [release workflow](docs/release.md) and [license details](docs/licensing.md).
+See [runtime architecture](docs/architecture.md), [operations](docs/operations.md) and [licensing](docs/licensing.md).

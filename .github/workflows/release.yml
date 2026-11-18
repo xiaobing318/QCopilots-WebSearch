@@ -1,0 +1,101 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Match the release tag to the project version
+        shell: python
+        run: |
+          import os
+          import re
+          from pathlib import Path
+          version = re.search(r'^set\(QCWS_VERSION "([0-9]+\.[0-9]+\.[0-9]+)"', Path("CMakeLists.txt").read_text(encoding="utf-8"), re.MULTILINE)
+          if version is None or os.environ["GITHUB_REF_NAME"] != f"v{version[1]}":
+              raise RuntimeError("The release tag must match QCWS_VERSION in CMakeLists.txt")
+
+  build:
+    needs: version
+    uses: ./.github/workflows/build.yml
+    with:
+      release: true
+
+  publish:
+    needs: build
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: packages-*
+          merge-multiple: true
+          path: release-assets
+      - name: Verify and include the corresponding Qt source
+        shell: python
+        run: |
+          import hashlib
+          import json
+          import re
+          import shutil
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
+
+          assets = Path("release-assets")
+          packages = sorted(assets.iterdir())
+          if any(not item.is_file() for item in packages) or sorted(item.suffix for item in packages) != [".deb", ".msi", ".zip"]:
+              raise RuntimeError("Expected exactly one ZIP, MSI and DEB from this run")
+          source = json.loads(Path("config/dependencies.lock.json").read_text())["qt_source"]
+          expected = source["sha256"]
+          url = urllib.parse.urlsplit(source["url"])
+          name = url.path.rsplit("/", 1)[-1]
+          if url.scheme != "https" or not re.fullmatch(r"qtbase-everywhere-src-[0-9.]+\.tar\.xz", name):
+              raise RuntimeError("Invalid Qt source lock")
+          archive = assets / name
+          with urllib.request.urlopen(source["url"], timeout=120) as response, archive.open("xb") as stream:
+              if urllib.parse.urlsplit(response.geturl()).scheme != "https":
+                  raise RuntimeError("Qt source redirected away from HTTPS")
+              shutil.copyfileobj(response, stream)
+
+          def digest(path):
+              with path.open("rb") as stream:
+                  return hashlib.file_digest(stream, "sha256").hexdigest()
+
+          if digest(archive) != expected:
+              raise RuntimeError("Qt source hash differs from the lock")
+          entries = sorted([*packages, archive])
+          (assets / "SHA256SUMS").write_text("".join(f"{digest(path)}  {path.name}\n" for path in entries), encoding="ascii")
+      - name: Attest the packages
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release-assets/*.zip
+            release-assets/*.msi
+            release-assets/*.deb
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --generate-notes

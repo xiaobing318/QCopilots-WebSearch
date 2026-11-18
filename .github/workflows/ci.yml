@@ -1,310 +1,54 @@
 name: CI
+
 on:
   push:
+    branches: ['**']
   pull_request:
   workflow_dispatch:
-    inputs:
-      FullStability:
-        description: Run five-minute cold/hot stability on both platforms and full fuzz campaigns
-        required: false
-        type: boolean
-        default: false
-      LivePublicSearch:
-        description: Observe 30 Chinese and 30 English queries through pinned self-hosted SearXNG
-        required: false
-        type: boolean
-        default: false
-      FuzzSeconds:
-        description: Seconds per fuzzer without repeating the full stability workload
-        required: false
-        type: choice
-        options: ['60', '300']
-        default: '60'
+
 permissions:
   contents: read
+
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    name: ${{ matrix.profile }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-2022
-            profile: windows-x64
-          - os: ubuntu-26.04
-            profile: ubuntu-x64
-    env:
-      QCWS_PROFILE: ${{ matrix.profile }}
-      QCWS_FULL_STABILITY: ${{ (inputs.FullStability || startsWith(github.ref, 'refs/tags/v')) && 'true' || 'false' }}
-      QCWS_FUZZ_SECONDS: ${{ (inputs.FullStability || startsWith(github.ref, 'refs/tags/v')) && '300' || inputs.FuzzSeconds || '60' }}
-      PYTHONUTF8: '1'
-      PYTHONUNBUFFERED: '1'
-      DEBIAN_FRONTEND: noninteractive
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: '3.13.17'
-          architecture: x64
-          check-latest: false
-      - name: Validate release tag
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: python
-        run: |
-          import os,re
-          if not re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)',os.environ['GITHUB_REF_NAME']):
-              raise RuntimeError('Release tags must use vMAJOR.MINOR.PATCH')
-      - name: Prepare fixed Windows packaging tools and native Perl
-        if: runner.os == 'Windows'
-        run: python scripts/ci_windows_tools.py --IncludePerl
-      - name: Create runner-local configuration
-        shell: python
-        run: |
-          import json,os,sys
-          from pathlib import Path
-          sys.path.insert(0,os.environ['GITHUB_WORKSPACE'])
-          from scripts.ci_cleanup import create
-          root,temp=Path(os.environ['GITHUB_WORKSPACE']),Path(os.environ['RUNNER_TEMP'])
-          output=create()
-          with open(os.environ['GITHUB_ENV'],'a',encoding='utf-8') as stream:
-              stream.write(f'QCWS_CI_TEMP={output}\n')
-          name=os.environ['QCWS_PROFILE']
-          config=json.loads((root/'config/BuildPipeline.json').read_text())
-          profile=config['profiles'][name]
-          profile.update(qtRoot=str(temp/'qcws-qt'),buildDir=str(root/'build/ci'),installDir=str(root/'install/ci'),cacheDir=str(temp/'qcws-cache'),proxy='',jobs=2)
-          if os.name=='nt':
-              profile['tools'].update(json.loads(Path(os.environ['QCWS_WINDOWS_TOOLS']).read_text()))
-          config['profiles']={name:profile}
-          destination=output/'build.json'
-          destination.write_text(json.dumps(config),encoding='utf-8')
-          with open(os.environ['GITHUB_ENV'],'a',encoding='utf-8') as stream:
-              stream.write(f'QCWS_CONFIG={destination}\n')
-      - name: Bootstrap, build, test and install
-        id: native_build
-        shell: python
-        run: |
-          import os,subprocess,sys
-          subprocess.run([sys.executable,'scripts/pipeline.py','--ConfigPath',os.environ['QCWS_CONFIG'],'--Profile',os.environ['QCWS_PROFILE'],'--Stages','bootstrap,doctor,configure,build,test,install'],check=True)
-      - name: Build distribution candidates
-        id: packages
-        shell: python
-        run: |
-          import os,subprocess,sys
-          subprocess.run([sys.executable,'scripts/pipeline.py','--ConfigPath',os.environ['QCWS_CONFIG'],'--Profile',os.environ['QCWS_PROFILE'],'--Stages','publish'],check=True)
-      - name: Install integration test tooling
-        id: tooling
-        if: always() && steps.native_build.outcome == 'success'
-        shell: python
-        run: |
-          import subprocess,sys
-          subprocess.run([sys.executable,'-m','pip','install','--require-hashes','-r','tests/requirements.lock'],check=True)
-      - name: Official SDK and stability checks
-        if: always() && steps.native_build.outcome == 'success' && steps.tooling.outcome == 'success'
-        shell: python
-        run: |
-          import os,subprocess,sys
-          from pathlib import Path
-          output=Path(os.environ['QCWS_CI_TEMP'])
-          relative='bin/qcopilots-websearch.exe' if os.name=='nt' else 'opt/qcopilots-websearch/bin/qcopilots-websearch'
-          exe=Path('install/ci',relative).resolve()
-          subprocess.run([sys.executable,'scripts/test_mcp_sdk.py','--Executable',str(exe),'--Output',str(output/'mcp-sdk.json')],check=True)
-          duration='300' if os.environ['QCWS_FULL_STABILITY']=='true' else '10'
-          subprocess.run([sys.executable,'scripts/soak.py','--Executable',str(exe),'--Seconds',duration,'--Output',str(output/'soak.json')],check=True)
-      - name: Portable Windows ZIP relocation
-        if: always() && runner.os == 'Windows' && steps.packages.outcome == 'success' && steps.tooling.outcome == 'success'
-        shell: python
-        run: |
-          import json,os,subprocess,sys
-          from pathlib import Path
-          infos=list(Path('build/ci/packages').glob('*/build-info-windows-x64.json'))
-          if len(infos)!=1: raise RuntimeError('Expected one candidate package set')
-          info=json.loads(infos[0].read_text())
-          name=next(name for name in info['package_sha256'] if name.endswith('.zip'))
-          subprocess.run([sys.executable,'scripts/acceptance_windows_zip.py','--Package',str((infos[0].parent/name).resolve()),'--PackageSHA256',info['package_sha256'][name],'--Output',str(Path(os.environ['QCWS_CI_TEMP'])/'portable.json')],check=True)
-      - name: Build isolated installer upgrade baseline
-        id: baseline
-        if: always() && steps.packages.outcome == 'success'
-        shell: python
-        run: |
-          import json,os,subprocess,sys
-          from pathlib import Path
-          config=json.loads(Path(os.environ['QCWS_CONFIG']).read_text())
-          profile=config['profiles'][os.environ['QCWS_PROFILE']]
-          profile['cmakeArgs'].append('-DQCWS_VERSION=0.0.1')
-          profile.update(buildDir='build/baseline',installDir='install/baseline')
-          destination=Path(os.environ['QCWS_CI_TEMP'])/'baseline.json'
-          destination.write_text(json.dumps(config),encoding='utf-8')
-          subprocess.run([sys.executable,'scripts/pipeline.py','--ConfigPath',str(destination),'--Profile',os.environ['QCWS_PROFILE'],'--Stages','configure,build,test,install,publish'],check=True)
-      - name: Windows MSI install, rollback, upgrade and uninstall
-        if: always() && runner.os == 'Windows' && steps.baseline.outcome == 'success'
-        shell: python
-        run: |
-          import json,os,subprocess
-          from pathlib import Path
-          def package(build):
-              infos=list(Path(build,'packages').glob('*/build-info-windows-x64.json'))
-              if len(infos)!=1: raise RuntimeError('Expected one installer package set')
-              info=json.loads(infos[0].read_text())
-              name=next(name for name in info['package_sha256'] if name.endswith('.msi'))
-              return (infos[0].parent/name).resolve(),infos[0].resolve()
-          candidate,_=package('build/ci')
-          baseline,metadata=package('build/baseline')
-          subprocess.run(['powershell.exe','-NoProfile','-ExecutionPolicy','Bypass','-File','scripts/AcceptWindowsMsi.ps1','--CandidateMsi',str(candidate),'--BaselineMsi',str(baseline),'--BaselineBuildInfo',str(metadata),'--OutputDir',str(Path(os.environ['QCWS_CI_TEMP'])/'msi')],check=True)
-      - name: DEB installation and recovery
-        if: always() && runner.os == 'Linux' && steps.baseline.outcome == 'success'
-        shell: python
-        run: |
-          import json,os,subprocess
-          from pathlib import Path
-          def package(build):
-              infos=list(Path(build,'packages').glob('*/build-info-ubuntu-x64.json'))
-              if len(infos)!=1: raise RuntimeError('Expected one installer package set')
-              info=json.loads(infos[0].read_text())
-              name=next(name for name in info['package_sha256'] if name.endswith('.deb'))
-              return (infos[0].parent/name).resolve(),info['package_sha256'][name]
-          candidate,digest=package('build/ci')
-          baseline,baseline_digest=package('build/baseline')
-          subprocess.run(['sudo','/usr/bin/python3','scripts/acceptance_deb.py','--Package',str(candidate),'--PackageSHA256',digest,'--BaselinePackage',str(baseline),'--BaselineSHA256',baseline_digest,'--OutputPath',str(Path(os.environ['QCWS_CI_TEMP'])/'deb.json'),'--DisposableMachine'],check=True)
-      - name: Caddy HTTPS deployment contract
-        if: always() && runner.os == 'Linux' && steps.native_build.outcome == 'success' && steps.tooling.outcome == 'success'
-        run: python scripts/acceptance_caddy.py --Executable install/ci/opt/qcopilots-websearch/bin/qcopilots-websearch --Output "$QCWS_CI_TEMP/caddy.json"
-      - name: Real public search and read/find closure
-        if: always() && runner.os == 'Linux' && steps.native_build.outcome == 'success' && steps.tooling.outcome == 'success' && (inputs.LivePublicSearch || startsWith(github.ref, 'refs/tags/v'))
-        run: python scripts/run_live_compose.py --Executable install/ci/opt/qcopilots-websearch/bin/qcopilots-websearch --OutputDir "$QCWS_CI_TEMP/public"
-      - name: Minimal Ubuntu Python bootstrap
-        if: always() && runner.os == 'Linux' && steps.native_build.outcome == 'success'
-        run: bash tests/bootstrap_ubuntu.sh
-      - name: Run native quality gates
-        if: always() && runner.os == 'Linux' && steps.native_build.outcome == 'success'
-        run: python scripts/quality.py --ConfigPath "$QCWS_CONFIG" --Profile "$QCWS_PROFILE" --Seconds "$QCWS_FUZZ_SECONDS" --OutputDir "$QCWS_CI_TEMP/quality"
-      - name: Collect exact distribution files
-        shell: python
-        run: |
-          import os,shutil
-          from pathlib import Path
-          infos=list(Path('build/ci/packages').glob('*/build-info-*.json'))
-          if len(infos)!=1: raise RuntimeError('Expected one candidate package set')
-          output=Path(os.environ['QCWS_CI_TEMP'])/'packages'
-          output.mkdir()
-          for source in infos[0].parent.iterdir():
-              if source.is_file(): shutil.copyfile(source,output/source.name)
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: packages-${{ matrix.profile }}
-          path: ${{ env.QCWS_CI_TEMP }}/packages/
-          if-no-files-found: error
-          retention-days: 14
-          overwrite: true
-      - name: Report failures and remove temporary test outputs
-        if: always() && env.QCWS_CI_TEMP != ''
-        shell: python
-        env:
-          QCWS_JOB_STATUS: ${{ job.status }}
-        run: |
-          import os,sys
-          from pathlib import Path
-          sys.path.insert(0,os.environ['GITHUB_WORKSPACE'])
-          from scripts.ci_cleanup import cleanup,report_failures
-          root=Path(os.environ['QCWS_CI_TEMP'])
-          try:
-              if os.environ['QCWS_JOB_STATUS']!='success':
-                  report_failures(root)
-          finally:
-              cleanup(root)
+    uses: ./.github/workflows/build.yml
+    with:
+      deep: ${{ github.event_name == 'workflow_dispatch' }}
 
-  attest:
-    name: Attest exact distribution packages
-    needs: build
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+  documentation:
     runs-on: ubuntu-26.04
-    timeout-minutes: 15
-    permissions:
-      actions: read
-      contents: read
-      id-token: write
-      attestations: write
-    env:
-      GH_TOKEN: ${{ github.token }}
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: '3.13.17'
-          architecture: x64
-          check-latest: false
-      - name: Download this run's exact distribution packages
+      - name: Flag semicolons in documentation prose
         shell: python
         run: |
-          import os,subprocess,sys
-          sys.path.insert(0,os.environ['GITHUB_WORKSPACE'])
-          from scripts.ci_cleanup import create
-          output=create()
-          with open(os.environ['GITHUB_ENV'],'a',encoding='utf-8') as stream:
-              stream.write(f'QCWS_CI_TEMP={output}\n')
-          for profile,suffixes in (('windows-x64',('.zip','.msi')),('ubuntu-x64',('.deb',))):
-              folder=output/profile
-              subprocess.run(['gh','run','download',os.environ['GITHUB_RUN_ID'],'--repo',os.environ['GITHUB_REPOSITORY'],'--name','packages-'+profile,'--dir',str(folder)],check=True)
-              for suffix in suffixes:
-                  files=list(folder.glob('*'+suffix))
-                  if len(files)!=1 or not files[0].is_file():
-                      raise RuntimeError('Expected one distribution package per format')
-      - name: Attest distribution package bytes
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: |
-            ${{ env.QCWS_CI_TEMP }}/windows-x64/*.zip
-            ${{ env.QCWS_CI_TEMP }}/windows-x64/*.msi
-            ${{ env.QCWS_CI_TEMP }}/ubuntu-x64/*.deb
-          create-storage-record: false
-      - name: Remove temporary package copies
-        if: always() && env.QCWS_CI_TEMP != ''
-        run: python scripts/ci_cleanup.py --Root "$QCWS_CI_TEMP"
+          from pathlib import Path
+          import os
+          import re
 
-  publish:
-    name: Publish complete release
-    needs: [build, attest]
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-26.04
-    timeout-minutes: 40
-    permissions:
-      actions: read
-      attestations: read
-      contents: write
-    concurrency:
-      group: release-${{ github.ref_name }}
-      cancel-in-progress: false
-    env:
-      GH_TOKEN: ${{ github.token }}
-      PYTHONUTF8: '1'
-      PYTHONUNBUFFERED: '1'
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: '3.13.17'
-          architecture: x64
-          check-latest: false
-      - name: Verify this run's packages and publish
-        shell: python
-        run: |
-          import os,subprocess,sys
-          sys.path.insert(0,os.environ['GITHUB_WORKSPACE'])
-          from scripts.ci_cleanup import create
-          output=create()
-          with open(os.environ['GITHUB_ENV'],'a',encoding='utf-8') as stream:
-              stream.write(f'QCWS_CI_TEMP={output}\n')
-          subprocess.run([sys.executable,'scripts/publish_verified_release.py','--ArtifactsRoot',str(output/'artifacts'),'--Tag',os.environ['GITHUB_REF_NAME'],'--Commit',os.environ['GITHUB_SHA'],'--Output',str(output/'release')],check=True)
-      - name: Remove temporary publication files
-        if: always() && env.QCWS_CI_TEMP != ''
-        run: python scripts/ci_cleanup.py --Root "$QCWS_CI_TEMP"
+          files = sorted([*Path("docs").rglob("*.md"), *Path(".").glob("README*.md"), Path("CONTRIBUTING.md")])
+          total = 0
+          for path in files:
+              fence = None
+              for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                  marker = re.match(r"^\s*(`{3,}|~{3,})", line)
+                  if marker:
+                      delimiter = marker.group(1)
+                      if fence is None:
+                          fence = delimiter
+                      elif delimiter.startswith(fence):
+                          fence = None
+                      continue
+                  if fence or not any(mark in re.sub(r"`[^`]*`", "", line) for mark in (";", "；")):
+                      continue
+                  print(f"::warning file={path.as_posix()},line={line_number}::Consider replacing a semicolon in prose.")
+                  total += 1
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              print(f"Documentation lines with semicolons outside code: {total}", file=summary)

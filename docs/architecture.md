@@ -1,49 +1,23 @@
 # Runtime architecture
 
-REST, HTTP MCP and stdio share the same service and versioned tool contracts.
-HTTP business and control listeners have separate bounded worker pools. The
-five-operation business gate is shared by REST and HTTP MCP. Each stdio process
-has its own service instance and capacity, random local identity and private
-temporary cache. It opens no HTTP listeners. End of input cancels its work and
-removes only its own temporary data. Stdout contains UTF-8 protocol messages,
-while logging uses stderr.
+REST, MCP HTTP and stdio share the service and versioned tool contracts. Business, control and admin HTTP listeners each have a bounded worker pool. The business gate is shared by REST and MCP HTTP. A stdio process has its own service instance, random identity and private temporary cache. Closing stdin cancels that instance's work and removes its temporary state. Protocol output goes to stdout and logs go to stderr.
 
-A dedicated Qt thread owns each SQLite cache connection. Persistent cache keys
-and coalesced searches are isolated by caller identity, provider and contract
-version. A request joins a matching search only when at least half of a fresh
-search deadline remains. Waiters have independent deadlines and cancellation.
-The upstream is cancelled when its last waiter leaves or its shared deadline
-expires. That shared deadline ends up to one second before its waiters'
-deadlines, so results from earlier pages still reach them as `partial` when a
-later page runs out of time. Its capacity slot remains occupied until the
-transfer ends. Waiters receive the result before it is written to the cache, and
-a failed search-cache write does not fail the search.
+A dedicated Qt thread owns each SQLite connection. Search cache keys and coalesced work include the client identity, effective source configuration and cache layout version. Page keys include the client identity and stay valid when the source changes. Identical requests can join a search while at least half of a fresh search deadline remains. Waiters have independent deadlines, and the upstream stops when the last waiter leaves or the shared deadline expires. The upstream ends up to a second before its waiters so earlier SearXNG results can still be returned as `partial`. The service delivers the result before an asynchronous search-cache write.
 
-Status reads local and last-known state without starting network requests and
-bypasses business admission. Capacity is bounded per service instance and does
-not guarantee fairness or separate quotas between callers.
+## Settings and sources
 
-Outbound HTTP(S) uses libcurl with c-ares and OpenSSL. Public retrieval validates
-each actual connection address before connecting and checks every redirect.
-The administrator-configured SearXNG endpoint has a separate policy that permits
-a private backend. Neither connection path inherits system or environment
-proxies. The build pipeline's download proxy does not configure runtime traffic.
+Deployment settings in `runtime.json` take effect on restart. The settings store publishes immutable settings and credential snapshots. The admin API writes a validated update atomically and detects mismatched revisions. Each in-flight operation keeps its starting snapshot. The daemon polls for filesystem changes every two seconds and retains its last valid snapshot when an edit fails validation. A separate protected file holds provider keys.
 
-TLS verifies the certificate chain, validity period, server purpose and URL
-hostname. Windows imports certificates from the native ROOT and CA stores when
-no explicit backend CA file is configured. Partial chains are rejected. This
-uses OpenSSL verification and does not reproduce every Schannel policy.
-An explicit backend CA file replaces the default trust sources for that request.
-Ubuntu otherwise uses its distribution-managed CA configuration.
+The settings listener defaults to loopback port 8091. Qt resources serve the web app from the service binary. A separate admin credential signs in directly or issues a one-time browser login link. Sessions are held in memory. Host and Origin allowlists, session cookies and CSRF headers govern edits. See [admin API](api.md#administration).
 
-Certificate verification does not retrieve AIA issuers, CRLs or OCSP responses.
-Missing intermediate certificates therefore fail verification unless supplied
-by the server or already available from the selected trust sources. Version 1
-does not provide online revocation checking. OpenSSL configuration files are
-not automatically loaded.
+The service checks search and open switches before tool execution. The QGIS adapter applies the separate confirmation preference using its shared host bridge. One authorization covers a QGIS session. Direct MCP and REST clients handle confirmation independently. Status reads local and last-known information without querying a provider.
 
-A hash-checked local cpp-httplib patch keeps the two-second request-input deadline
-active through headers, body, chunk framing and trailers. The deadline ends
-before application work begins. Control endpoints and non-POST routes reject
-request bodies and close the connection. Shutdown interrupts accepted sockets,
-including sockets waiting in the bounded worker queue.
+The provider registry selects DuckDuckGo HTML, DuckDuckGo Lite and Bing fallback in `auto`, or a configured SearXNG, Brave, Tavily or Exa provider. Search results pass through shared filtering, deduplication and normalization. Auto applies bounded pacing and cooldown. Provider settings and credentials are independent of a client's business token.
+
+## Outbound HTTP and TLS
+
+libcurl uses c-ares to resolve addresses. Public sources and webpage requests check the actual connection address and every redirect. A fixed administrator-configured SearXNG endpoint uses the private backend policy. Runtime traffic ignores system and environment proxies. Build download proxies apply to build tooling.
+
+TLS validates hostnames and certificate chains with Schannel on Windows and distribution OpenSSL on Ubuntu. Schannel uses the Windows trust store by default. A private backend may configure its own CA file. The Windows TLS fixture observed AIA retrieval for missing intermediates. Deploy endpoints with complete certificate chains. Administrators can review the Windows `MaxAIAUrlRetrievalCountPerChain` setting when controlling AIA retrieval. Both platforms' fixtures enforce no online CRL or OCSP requests, and Ubuntu checks that there is no AIA retrieval.
+
+A hash-checked cpp-httplib patch keeps a two-second request-input deadline active through headers, body, chunk framing and trailers. Application work has its own deadlines. Shutdown interrupts accepted sockets, including sockets queued for workers.

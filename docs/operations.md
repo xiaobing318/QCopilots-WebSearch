@@ -7,7 +7,7 @@ access is intentional. Never commit token files or copy them into diagnostics.
 
 ## Capacity and monitoring
 
-Business and control listeners are separate. The default capacity is five
+Business, control and settings listeners are separate. The default capacity is five
 operations. After parsing and authentication, work that exceeds business
 operation capacity returns `busy`/429. Control health uses a separate worker
 pool. Request input has a two-second absolute read deadline, including chunk
@@ -30,9 +30,22 @@ avoid enabling access logs that capture credentials or request bodies at their
 reverse proxy. Monitor latency, 429s, provider failures and package/service restart
 events using bounded retention. Container log rotation is configured in Compose.
 
+## Manage search sources
+
+Open the bilingual settings page using `--SettingsUrl`. A management link expires
+after 120 seconds and can be used once. Clients should use distinct business
+tokens. MSI allows local interactive users to read the separate `admin.token`.
+On Ubuntu the admin token is service-owned with mode 0600. Keep management links,
+tokens and provider secrets out of logs.
+
+Auto uses public DuckDuckGo and Bing pages and can report `provider_unavailable`
+or `rate_limited` when they are unreachable or throttling. Use the provider test
+in Settings to diagnose a failure. For managed search, select your SearXNG endpoint
+or configure a Brave, Tavily or Exa key.
+
 ## Cache and backups
 
-Search TTL defaults to five minutes, page TTL to thirty minutes. Partial search
+New configurations default to a thirty-minute TTL for search and page snapshots. Partial search
 results are kept for at most 30 seconds, and partial results without hits are
 not cached. The default cache budget is 256 MiB and 10,000 entries. SQLite is
 owned by a dedicated thread and the cache directory is locked against a second
@@ -74,16 +87,15 @@ Releases after 0.1.4 use a new cached payload layout. Entries written by 0.1.4
 or earlier are no longer read and age out through normal eviction. Page IDs issued
 before the upgrade return `page_unavailable`, and clients open the URL again.
 
-Windows packages dynamically link OpenSSL using the matched `libssl-3-x64.dll`
-and `libcrypto-3-x64.dll` pair beside the executable. Prefer updating the complete
-validated package. For an administrator-managed library replacement, stop the
-service, preserve the previous pair, use compatible matching x64 builds, and
-repeat TLS and service checks before resuming traffic. MSI repair or upgrade can
-restore package-owned DLLs.
+Windows uses system Schannel. Ubuntu uses the distribution's OpenSSL shared
+libraries. Apply OS security updates and restart the service. Maintain the
+appropriate CA stores and supply complete certificate chains to endpoints.
 
-Ubuntu OpenSSL remains distribution-managed. Apply distribution security updates
-and restart the service. Keep CA trust sources current on both platforms. Trust
-store updates do not constitute an online revocation check by this service.
+Upgrades retain existing SearXNG deployments. When the user settings file is
+absent, the old provider configuration supplies the initial settings. New
+installations use `auto`. Browser settings and key changes take effect on
+save. External edits are checked every two seconds. If a file is invalid, the
+admin status reports `settings_error` while the last valid snapshot stays active.
 
 Back up private state before upgrading. Apply the complete validated package,
 then check version, service identity, authentication, health and one search/read

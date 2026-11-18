@@ -1,0 +1,5 @@
+foreach(file index.html assets/app.js assets/app.css assets/icon.svg THIRD_PARTY_NOTICES.txt)
+  if(NOT EXISTS "${DIST}/${file}" OR IS_DIRECTORY "${DIST}/${file}")
+    message(FATAL_ERROR "Web UI artifact is missing: ${file}")
+  endif()
+endforeach()

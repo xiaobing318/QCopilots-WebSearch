@@ -11,7 +11,7 @@ import time
 import zipfile
 import psutil
 from package_inventory import package_files
-from verify_release import need, sha
+from testkit import digest, need
 from process_cleanup import wait_owned
 
 
@@ -60,9 +60,14 @@ def main():
     package = args.Package.resolve(strict=True)
     output = args.Output.resolve()
     need(package != output and package.suffix.lower() == '.zip', 'Invalid ZIP or output')
-    need(sha(package) == args.PackageSHA256.lower(), 'Candidate ZIP hash mismatch')
+    need(digest(package) == args.PackageSHA256.lower(), 'Candidate ZIP hash mismatch')
     inventory = package_files(package)
     need(inventory and all(item.get('hashes') for item in inventory), 'Windows ZIP must contain regular files')
+    names = {item["name"].casefold() for item in inventory}
+    for required in ("licenses/strata/license", "licenses/web/third_party_notices.txt", "config/settings.schema.json"):
+        need(any(name.endswith("/" + required) for name in names), f"Missing portable asset: {required}")
+    need(not any(name.endswith(("/libssl-3-x64.dll", "/libcrypto-3-x64.dll", "/qopensslbackend.dll")) for name in names),
+         "Windows ZIP still contains OpenSSL binaries")
     report = {'passed': False}
     code = 1
     with tempfile.TemporaryDirectory(prefix='qcws portable acceptance ') as temporary:
@@ -90,7 +95,7 @@ def main():
             report = json.loads((folder / 'sdk.json').read_text('utf-8'))
         if exit_code or forced:
             report.update(passed=False, error='sdk_runner_or_cleanup_failed')
-        report['portable'] = {'package_sha256':sha(package), 'relocated_path_with_spaces':True,
+        report['portable'] = {'package_sha256':digest(package), 'relocated_path_with_spaces':True,
                               'system_only_path':True, 'temporary_directory_removed':False,
                               'forced_process_count':forced, 'runner_exit_code':exit_code}
         need(report['portable']['package_sha256'] == args.PackageSHA256.lower(), 'ZIP changed during acceptance')

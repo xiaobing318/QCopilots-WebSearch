@@ -1,9 +1,11 @@
 #include <QCoreApplication>
-#include <QRandomGenerator>
+#include <QDir>
+#include <QFileInfo>
 #include <QRegularExpression>
 #include <QTemporaryDir>
 #include <csignal>
 #include <iostream>
+#include <qws/admin.hpp>
 #include <qws/server.hpp>
 #include <qws/windows.hpp>
 #ifdef _WIN32
@@ -17,14 +19,23 @@ std::wstring windowsServiceName = L"QCopilotsWebSearch";
 void signalStop(int) {
   stopping.store(true, std::memory_order_relaxed);
 }
+void waitForStop(qws::Service &service) {
+  auto nextReload = qws::Clock::now() + std::chrono::seconds(2);
+  while (!stopping.load(std::memory_order_relaxed)) {
+    if (qws::Clock::now() >= nextReload) {
+      service.settings().reloadIfChanged();
+      nextReload = qws::Clock::now() + std::chrono::seconds(2);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+}
 int serve() {
   auto config = qws::Config::load(configPath);
   qws::Service service(config);
   qws::HttpServer server(service, config);
   server.start();
   std::cerr << "QCopilots-WebSearch ready.\n";
-  while (!stopping.load(std::memory_order_relaxed))
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  waitForStop(service);
   server.stop();
   return 0;
 }
@@ -59,8 +70,7 @@ void WINAPI serviceMain(DWORD, wchar_t **) {
     qws::HttpServer server(service, config);
     server.start();
     report(SERVICE_RUNNING);
-    while (!stopping.load())
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    waitForStop(service);
     server.stop();
     report(SERVICE_STOPPED);
   } catch (...) {
@@ -75,12 +85,17 @@ int main(int argc, char **argv) {
   QCoreApplication::setApplicationVersion(QCWS_VERSION);
   bool stdio = false, serviceMode = false, check = false, initialize = false, serviceNameSpecified = false;
   bool rollbackInitialization = false, commitInitialization = false;
+  bool settingsUrl = false, openUrl = false;
   QString transaction;
   const auto args = application.arguments();
   try {
     for (int i = 1; i < args.size(); ++i) {
       if (args[i] == "--ConfigPath" && i + 1 < args.size())
         configPath = args[++i].toStdString();
+      else if (args[i] == "--SettingsUrl")
+        settingsUrl = true;
+      else if (args[i] == "--Open")
+        openUrl = true;
       else if (args[i] == "--Stdio")
         stdio = true;
       else if (args[i] == "--WindowsService")
@@ -105,31 +120,29 @@ int main(int argc, char **argv) {
         std::cout << "QCopilots-WebSearch " << QCWS_VERSION << ", Qt " << qVersion() << '\n';
         return 0;
       } else if (args[i] == "--GenerateToken") {
-        QByteArray token(32, Qt::Uninitialized);
-        auto *rng = QRandomGenerator::system();
-        for (int n = 0; n < 32; n += 4) {
-          const auto v = rng->generate();
-          std::memcpy(token.data() + n, &v, 4);
-        }
-        std::cout << token.toHex().toStdString() << '\n';
+        std::cout << qws::generateToken().toStdString() << '\n';
         return 0;
       } else if (args[i] == "--Help") {
         std::cout << "qcopilots-websearch --ConfigPath FILE [--Stdio | --WindowsService | --CheckConfig | "
-                     "--InitializeConfig]\n"
+                     "--InitializeConfig | --SettingsUrl [--Open]]\n"
+                     "qcopilots-websearch --SettingsUrl [--Open]\n"
                      "qcopilots-websearch --GenerateToken | --Version | --Help\n";
         return 0;
       } else
         throw qws::Error("invalid_argument", "Unknown or incomplete command-line option.");
     }
-    if (configPath.empty() ||
+    if ((!settingsUrl && configPath.empty()) ||
         int(stdio) + int(serviceMode) + int(check) + int(initialize) + int(rollbackInitialization) +
-                int(commitInitialization) >
-            1 ||
+                int(commitInitialization) + int(settingsUrl) >
+            1 || (openUrl && !settingsUrl) ||
         (!transaction.isEmpty() && !initialize && !rollbackInitialization && !commitInitialization) ||
         ((rollbackInitialization || commitInitialization) && transaction.isEmpty()))
       throw qws::Error("invalid_argument", "Provide --ConfigPath and choose only one operation.");
 #ifdef _WIN32
-    qws::configureWindowsCredentialPolicy(serviceMode || serviceNameSpecified || !transaction.isEmpty(),
+    const bool installedSettings = settingsUrl && configPath.empty() &&
+                                   !QFileInfo::exists("runtime.json");
+    qws::configureWindowsCredentialPolicy(serviceMode || serviceNameSpecified || !transaction.isEmpty() ||
+                                              installedSettings,
                                           QString::fromStdWString(windowsServiceName).toStdString());
     if (rollbackInitialization || commitInitialization) {
       qws::finishWindowsInitialization(QString::fromStdString(configPath), transaction,
@@ -150,10 +163,34 @@ int main(int argc, char **argv) {
       std::cout << "Configuration initialized. Existing files were preserved.\n";
       return 0;
     }
+    if (settingsUrl) {
+      if (configPath.empty() && QFileInfo::exists("runtime.json"))
+        configPath = "runtime.json";
+      qws::Config config;
+#ifdef _WIN32
+      if (installedSettings) {
+        const auto sharedData = qEnvironmentVariable("ProgramData");
+        if (sharedData.isEmpty())
+          throw qws::Error("invalid_configuration", "Cannot locate the installed administration credential.");
+        config = {qws::Json::object(), QDir(sharedData).filePath("QCopilots-WebSearch").toStdString()};
+      } else
+#else
+      if (configPath.empty())
+        configPath = "/etc/qcopilots-websearch/runtime.json";
+#endif
+      {
+        config = qws::Config::load(configPath);
+      }
+      const auto url = qws::settingsUrl(config);
+      if (openUrl)
+        qws::openSettingsUrl(url);
+      std::cout << url << '\n';
+      return 0;
+    }
     if (check) {
       auto c = qws::Config::load(configPath);
       (void)c.clients();
-      (void)c.secret(c.value["provider"], false);
+      qws::checkSettings(c);
       std::cout << "Configuration valid.\n";
       return 0;
     }

@@ -1,0 +1,33 @@
+name: Report a bug
+description: Report a problem with WebSearch or its QGIS integration
+body:
+  - type: input
+    id: version
+    attributes:
+      label: WebSearch version
+      placeholder: Output of qcopilots-websearch --Version
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows 11 amd64
+        - Ubuntu 26.04 amd64
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include the installation format and search source if relevant. Remove credentials and one-time links from logs.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected and observed results
+    validations:
+      required: true

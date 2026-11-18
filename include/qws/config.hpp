@@ -11,6 +11,7 @@ const Json &readSchema(const std::string &name);
 // description, annotations}]} in tools/list order.
 const Json &toolCatalog();
 Json defaultConfiguration();
+Json defaultSettings();
 void initializeConfiguration(const std::string &path);
 // Throws invalid_argument naming the first failing JSON pointer and reason.
 void validateSchema(const Json &schema, const Json &value);

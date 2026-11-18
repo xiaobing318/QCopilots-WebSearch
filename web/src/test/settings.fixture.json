@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "tools": {
+    "search": {
+      "enabled": true
+    },
+    "open": {
+      "enabled": true
+    }
+  },
+  "search_without_asking": false,
+  "search": {
+    "provider": "auto",
+    "searxng": {
+      "url": "http://127.0.0.1:8080/search",
+      "engines": ["google", "bing", "duckduckgo"]
+    }
+  },
+  "revision": "1234567890abcdef",
+  "providers": {
+    "searxng": {
+      "key_set": false
+    },
+    "brave": {
+      "key_set": false
+    },
+    "tavily": {
+      "key_set": false
+    },
+    "exa": {
+      "key_set": false
+    }
+  }
+}

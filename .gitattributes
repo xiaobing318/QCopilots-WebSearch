@@ -7,9 +7,5 @@
 *.deb binary
 *.rtf binary
 tests/fuzz/corpus/** -text -whitespace
-scripts/vendor/perl/JSON/*.pm -text -whitespace
-scripts/vendor/perl/JSON/PP/*.pm -text -whitespace
-scripts/vendor/perl/README.upstream -text -whitespace
-scripts/vendor/perl/LICENSE-Artistic -text -whitespace
 *.bat text eol=crlf
 *.cmd text eol=crlf

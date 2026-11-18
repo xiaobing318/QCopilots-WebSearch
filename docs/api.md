@@ -31,8 +31,8 @@ fixed REST backend.
 ```
 
 `limit` defaults to 10 and is at most 20. Repeated whitespace in the query is
-collapsed before searching and caching. The service scans at most three upstream
-pages internally and does not expose a page cursor. Scanning stops at the limit,
+collapsed before searching and caching. SearXNG scans at most three upstream
+pages internally. Other sources return one page. The API has no page cursor. Scanning stops at the limit,
 on an empty page, or on a page that adds no URL not seen before. Strict domain
 filtering can therefore return fewer results than requested. Hostname
 normalization and domain/subdomain matching are enforced locally after the
@@ -47,7 +47,8 @@ leading `www.`, a trailing slash, the fragment, a default port and `utm_*`,
 hint and does not guarantee strict publication-date filtering. Each result has
 `title`, `url`, `snippet`, `sources` and `published_at`. `published_at` is a UTC
 ISO-8601 time such as `2024-05-01T10:30:00Z`, or `null` when the provider gave no
-usable date. The response also carries up to five `corrections` and five
+usable date. The response's `provider` is the source that supplied the results.
+The response also carries up to five `corrections` and five
 `suggestions` from the provider, each at most 200 characters.
 
 Search results are `ok` or `partial`. All upstream engines failing is an explicit
@@ -55,9 +56,9 @@ error, distinct from a successful empty result. Each failed engine appears once
 in `failures` as `{"engine", "reason": "unresponsive", "detail"}`, where `detail`
 is the provider's reason of at most 200 characters. When a later page fails or
 times out after earlier pages produced results, those results are returned as
-`partial` with a `{"engine": "provider", "reason": <error code>}` entry. Each call
-makes one upstream attempt per page and does not retry. Warnings, fetched time
-and cache state remain visible to the caller.
+`partial` with a `{"engine": "provider", "reason": <error code>}` entry. Automatic search tries DuckDuckGo HTML, DuckDuckGo Lite and Bing. It
+can retry a timeout or a 5xx response once and applies per-source pacing and
+cooldown. The response reports warnings, fetch time and cache state.
 
 `cache.ttl_seconds` is the configured search TTL for `ok` results and at most 30
 seconds for `partial` results with hits. A `partial` result without hits is not
@@ -181,24 +182,27 @@ REST errors use this envelope and a suitable HTTP status:
 Errors do not have a success `contract_version` field. Clients should branch on
 HTTP status or MCP error type before parsing successful content. `retryable`
 tells the client whether the same call can succeed later. HTTP 429 responses
-also carry `Retry-After: 1`.
+also carry a `Retry-After` header. Provider limits can include a matching
+`retry_after_seconds` field in the error object.
 
 | Code | Typical HTTP status | Retryable | Meaning |
 | --- | --- | --- | --- |
 | `invalid_argument` | 400 | no | Input violates the versioned schema or the url/page_id choice |
 | `unauthorized` | 401 | no | Missing or invalid independent credential |
 | `forbidden` | 403 | no | Host or Origin is not in the configured allowlist |
+| `tool_disabled` | 403 | no | The search or page opening switch is off |
 | `destination_blocked` | 403 | no | Public fetch policy rejected a target, including an HTTPS to HTTP redirect |
 | `page_unavailable` | 404 | no | Snapshot is unavailable to this identity |
 | `request_too_large` | 413 | no | Incoming request exceeds the limit |
 | `unsupported_content` | 415 | no | Unsupported media type, charset or mostly malformed encoded text |
 | `busy` | 429 | yes | No business/upstream capacity available |
-| `rate_limited` | 429 | yes | The search provider answered with HTTP 429 |
+| `rate_limited` | 429 | yes | The provider is throttled or all automatic sources are in cooldown |
 | `cancelled` | 499 | no | Request work was cancelled |
 | `internal_error` | 500 | no | Unexpected local failure |
 | `response_too_large` | 502 | no | Upstream transfer exceeded bounded limits |
-| `provider_unavailable` | 502 | yes | Search dependency could not supply results |
+| `provider_unavailable` | 502 | for transient failures | The search source could not supply results |
 | `upstream_http_error` | 502 | for 429, 5xx and connection failures | A web page could not be read. The message gives the HTTP status or a safe reason such as an unresolved host name |
+| `provider_not_configured` | 503 | no | The selected source needs an API key |
 | `backend_unavailable` | 503 | yes | The service is stopping |
 | `cache_unavailable` | 503 | yes | Private cache cannot be used safely |
 | `timeout` | 504 | yes | Operation deadline expired |
@@ -232,3 +236,37 @@ endings and a leading UTF-8 BOM are accepted, and a line longer than 1 MiB is
 discarded and answered with Invalid Request and `id: null` while the process
 keeps serving. A cancellation that arrives just before its request starts is
 still honoured.
+
+## Settings status
+
+`web_search_status` and `GET /v1/status` return local settings and last known
+provider state. The additive `settings` object includes `search_enabled`,
+`open_enabled`, `search_without_asking`, `provider`, `provider_ready` and
+`revision`. Search and open switches apply to REST, MCP HTTP and stdio.
+`web_find` and status remain available. Changing a switch does not change
+the tool list. The QGIS adapter interprets `search_without_asking` for its
+session confirmation.
+
+## Administration
+
+The admin UI is available on the configured admin origin at `/settings/`.
+The default origin is `http://127.0.0.1:8091`. An admin token is independent of
+client Bearer credentials on the business listener.
+
+| Method and path under `/admin/api/v1` | Authentication and behavior |
+| --- | --- |
+| `POST /login-links` | Send an admin Bearer token without Origin or Cookie. Returns `url` and `expires_in` for a single-use login link. |
+| `POST /session` | Send one `code` or `token` field. Sets a session cookie and returns `csrf`. |
+| `GET /session`, `DELETE /session` | Read the session's CSRF token or sign out. |
+| `GET /settings`, `PUT /settings` | Read current settings or write a patch with its previous revision. Conflicts return 409. |
+| `PUT /providers/{id}/key`, `DELETE /providers/{id}/key` | Store a `key` or delete it. The response indicates `key_set`. |
+| `POST /providers/{id}/test` | Test the selected source. Returns success status, source, counts, latency and at most three sample results. |
+| `GET /status` | Reports listener addresses, version, source cooldown and settings errors. |
+
+The admin API validates Host and Origin. Session writes require a session
+cookie, JSON Content-Type and `X-QCWS-CSRF`. The initial login uses an allowed
+Origin and JSON body. It does not yet have a session's CSRF token. The login code
+is passed as a fragment and cleared by the UI after use.
+
+The request and response schemas and error codes are under
+[contracts/admin/v1](../contracts/admin/v1).

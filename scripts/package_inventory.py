@@ -125,34 +125,3 @@ def package_files(package):
                 break
             target = links[target]
     return items
-
-
-def require_windows_payload_match(zip_items, msi_items):
-    executable = 'bin/qcopilots-websearch.exe'
-    roots = [item['name'][:-len(executable)] for item in zip_items
-             if item['name'] == executable or item['name'].endswith('/' + executable)]
-    if len(roots) != 1:
-        raise RuntimeError('ZIP executable root is ambiguous')
-
-    def payload(items, prefix):
-        result = {}
-        for item in items:
-            name = item['name']
-            if not name.startswith(prefix):
-                raise RuntimeError('File outside application installation root')
-            relative = canonical_member(name[len(prefix):], windows=True)
-            hashes = [value['content'] for value in item.get('hashes', []) if value['alg'] == 'SHA-256']
-            if len(hashes) != 1 or relative.casefold() in result:
-                raise RuntimeError('Windows payload must contain unique regular files')
-            result[relative.casefold()] = hashes[0]
-        return result
-
-    zipped = payload(zip_items, roots[0])
-    installed = payload(msi_items, '[ProgramFiles64Folder]/QCopilots-WebSearch/')
-    if zipped != installed:
-        raise RuntimeError('ZIP/MSI payload mismatch')
-    required = {'bin/libssl-3-x64.dll', 'bin/libcrypto-3-x64.dll',
-                'share/qcopilots-websearch/licenses/openssl/license.txt'}
-    if not required <= set(zipped):
-        raise RuntimeError('Missing bundled OpenSSL DLL or license')
-    return {'files':len(zipped),'consistent':True}

@@ -98,7 +98,7 @@
           },
           "tools": {
             "type": "object",
-            "description": "工具路径覆盖。候选为空对象或已列出的工具键，空值自动发现，绝对可执行文件路径优先于PATH。visualStudio指定VS2022安装目录。",
+            "description": "工具路径覆盖。候选为空对象或已列出的工具键，空值自动发现，绝对可执行文件路径优先于PATH。visualStudio指定Visual Studio 2022/2026安装目录。",
             "additionalProperties": false,
             "properties": {
               "cmake": {
@@ -129,12 +129,7 @@
               "visualStudio": {
                 "type": "string",
                 "maxLength": 4096,
-                "description": "visualStudio路径。候选为空字符串或绝对VS2022安装目录，空值自动发现，指定路径覆盖默认发现结果。"
-              },
-              "perl": {
-                "maxLength": 4096,
-                "type": "string",
-                "description": "原生Windows Perl路径。候选为空字符串或MSWin32 Perl可执行文件绝对路径，空值在PATH中发现，用于构建固定版本OpenSSL，Git/MSYS/Cygwin Perl会被拒绝，Ubuntu不使用此项。"
+                "description": "visualStudio路径。候选为空字符串或绝对Visual Studio 2022/2026安装目录，空值自动发现，指定路径覆盖默认发现结果。"
               }
             }
           }
@@ -164,9 +159,14 @@
             "then": {
               "properties": {
                 "packageGenerators": {
-                  "const": [
-                    "ZIP",
-                    "WIX"
+                  "enum": [
+                    [
+                      "ZIP"
+                    ],
+                    [
+                      "ZIP",
+                      "WIX"
+                    ]
                   ]
                 }
               }

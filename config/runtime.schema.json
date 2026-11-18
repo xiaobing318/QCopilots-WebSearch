@@ -253,8 +253,8 @@
         },
         "search_ttl_seconds": {
           "type": "integer",
-          "description": "Search cache lifetime. Accepts 1–86400 seconds, default 300. Partial results are kept at most 30 seconds, and partial results without any hits are not cached.",
-          "default": 300,
+          "description": "Search cache lifetime. Accepts 1–86400 seconds, default 1800. Partial results are kept at most 30 seconds, and partial results without any hits are not cached.",
+          "default": 1800,
           "minimum": 1,
           "maximum": 86400
         },
@@ -308,6 +308,101 @@
       ],
       "additionalProperties": false,
       "description": "Request limits. Accepts concurrency and end-to-end deadlines. Higher limits increase memory and upstream load."
+    },
+    "admin": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string",
+          "description": "Listen address. Accepts 127.0.0.1 or ::1. Chooses IPv4 or IPv6 loopback behind the TLS proxy.",
+          "enum": [
+            "127.0.0.1",
+            "::1"
+          ],
+          "default": "127.0.0.1"
+        },
+        "port": {
+          "type": "integer",
+          "description": "TCP port. Accepts 1–65535 in deployed configurations. Use a free port distinct from the other listener.",
+          "default": 8091,
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "allowed_hosts": {
+          "type": "array",
+          "description": "Exact accepted Host headers. Accepts host:port strings, including the reverse proxy public authority. Other hosts are rejected to prevent DNS rebinding.",
+          "items": {
+            "type": "string",
+            "description": "Accepted authority. Accepts a hostname with optional port or bracketed IPv6 with port. Matching is case-insensitive and exact.",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "minItems": 1,
+          "maxItems": 20,
+          "uniqueItems": true
+        },
+        "origins": {
+          "type": "array",
+          "description": "Browser origins. Accepts exact scheme://host[:port] strings, or an empty list. Empty rejects all browser Origin headers but permits native clients without Origin.",
+          "items": {
+            "type": "string",
+            "description": "Allowed Origin. Accepts one exact HTTP or HTTPS origin without a trailing slash. Only this origin receives CORS access.",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "maxItems": 20,
+          "uniqueItems": true,
+          "default": []
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "public_origin": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "token_file": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "token_env": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "session_idle_minutes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 720
+        },
+        "session_max_hours": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 72
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "not": {
+        "required": [
+          "token_file",
+          "token_env"
+        ]
+      }
+    },
+    "settings": {
+      "type": "object",
+      "properties": {
+        "directory": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "required": [],
+      "additionalProperties": false
     }
   },
   "required": [
@@ -315,7 +410,6 @@
     "business",
     "control",
     "clients",
-    "provider",
     "cache",
     "limits"
   ],

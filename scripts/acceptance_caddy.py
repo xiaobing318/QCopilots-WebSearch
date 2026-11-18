@@ -15,8 +15,7 @@ import tempfile
 import threading
 import time
 import http.client
-from soak import ROOT, digest, environment, stop_process
-from runtime_evidence import fingerprint
+from testkit import ROOT, admin_smoke, digest, environment, fingerprint, stop_process
 from test_mcp_sdk import Fixture, Handler
 
 
@@ -126,17 +125,18 @@ def main():
         reserved,process,compose,compose_env = [],None,None,None
         project = 'qcws-test-'+secrets.token_hex(8)
         try:
-            for _ in range(4):
+            for _ in range(5):
                 reservation = socket.socket()
                 reserved.append(reservation)
                 reservation.bind(('127.0.0.1',0))
-            bp,cp,hp,lp = [sock.getsockname()[1] for sock in reserved]
+            bp,cp,ap,hp,lp = [sock.getsockname()[1] for sock in reserved]
             hostname,bearer = project+'.test',secrets.token_hex(32)
             authority,origin = f'{hostname}:{hp}','https://client-'+secrets.token_hex(8)+'.test'
             tls,ca = certificates(args.OpenSSL,folder,hostname)
             config = json.loads((ROOT/'config/runtime.json').read_text('utf-8'))
             config['business'] = {'host':'127.0.0.1','port':bp,'allowed_hosts':[authority],'origins':[origin]}
             config['control'] = {'host':'127.0.0.1','port':cp,'allowed_hosts':[f'127.0.0.1:{cp}'],'origins':[]}
+            config["admin"] = {"enabled": True, "port": ap, "token_env": "QCWS_CADDY_ADMIN_TOKEN"}
             config['clients'] = [{'id':'caddy-contract','token_env':'QCWS_CADDY_TEST_TOKEN'}]
             config['provider'] = {'url':f'http://127.0.0.1:{fixture.server_port}/search','ca_file':'','engines':['fixture']}
             config['cache']['directory'] = str(folder/'cache')
@@ -171,16 +171,18 @@ def main():
             require(all(re.fullmatch(r'.+@sha256:[0-9a-f]{64}',image) for image in report['images'].values()),'unpinned_image')
             require(rendered['services']['caddy']['network_mode'] == 'host','reference_network_changed')
             command(compose+['pull','caddy'],env=compose_env,timeout=240)
-            for sock in reserved[:2]:
+            for sock in reserved[:3]:
                 sock.close()
             native_env = environment([])
             native_env['QCWS_CADDY_TEST_TOKEN'] = bearer
+            native_env['QCWS_CADDY_ADMIN_TOKEN'] = secrets.token_hex(32)
             process = subprocess.Popen([str(executable),'--ConfigPath',str(config_path)],env=native_env,
                 stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
             def local(path='/health/ready'):
                 return exchange(http.client.HTTPConnection('127.0.0.1',cp,timeout=.5),path,bearer=bearer)
             eventually(lambda:local('/health/live')[0] == 200,15)
-            for sock in reserved[2:]:
+            report["admin"] = admin_smoke(executable, config_path, native_env, "searxng")
+            for sock in reserved[3:]:
                 sock.close()
             command(compose+['up','-d','--no-deps','--wait','--wait-timeout','30','caddy'],env=compose_env,timeout=45)
             context = ssl.create_default_context(cafile=str(ca))
@@ -189,6 +191,8 @@ def main():
                 return exchange(LocalTLS(hostname,hp,context=context,timeout=3),path,**kwargs)
             for path in ('/health/live','/health/ready','/metrics'):
                 require(local(path)[0] == 200 and remote(path,bearer=bearer)[0] == 404,'control_exposed')
+            for path in ('/settings/', '/admin/api/v1/settings'):
+                require(remote(path,bearer=bearer)[0] == 404,'admin_exposed')
             require(remote(bearer=bearer)[0] == 200,'https_status')
             untrusted = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             try:

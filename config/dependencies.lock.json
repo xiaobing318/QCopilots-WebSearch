@@ -1,9 +1,4 @@
 {
-  "openssl_windows": {
-    "url": "https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz",
-    "sha256": "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a",
-    "sourceDir": "openssl-3.5.9"
-  },
   "qt": {
     "windows-x64": {
       "version": "6.12.0",
@@ -85,6 +80,19 @@
       "url": "https://codeload.github.com/pboettch/json-schema-validator/tar.gz/refs/tags/2.4.1",
       "sha256": "0c8bf7ba59bd50e312d82da4bab1d49cf3e2211cfbd659472f9c90505d2a4e4c",
       "sourceDir": "json-schema-validator-2.4.1"
+    }
+  },
+  "node": {
+    "version": "24.22.3",
+    "windows-x64": {
+      "url": "https://nodejs.org/dist/v24.22.3/node-v24.22.3-win-x64.zip",
+      "sha256": "e612af99f626ab415ea225af6bce5c971feb448cb5cae250bb1c3fa50c5f7d9f",
+      "filename": "node-v24.22.3-win-x64.zip"
+    },
+    "ubuntu-x64": {
+      "url": "https://nodejs.org/dist/v24.22.3/node-v24.22.3-linux-x64.tar.xz",
+      "sha256": "4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb",
+      "filename": "node-v24.22.3-linux-x64.tar.xz"
     }
   }
 }

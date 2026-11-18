@@ -8,18 +8,29 @@ CAPTCHAs or throttling. The service never bypasses those restrictions.
 ## Ubuntu host
 
 Install the release DEB using apt. The package creates the unprivileged
-`qcopilots-websearch` account, a random credential and a systemd unit.
+`qcopilots-websearch` account, separate random client and admin credentials, and a systemd unit.
 
 ```bash
 sudo apt install ./qcopilots-websearch_<version>_amd64.deb
 sudo systemctl status qcopilots-websearch
 ```
 
-The configuration is `/etc/qcopilots-websearch/runtime.json`, the generated
-credential is `client.token` in that directory and state resides under
-`/var/lib/qcopilots-websearch`. The service owns its private token and state.
-Configuration is administrator-writable and service-readable. Do not make
-token files readable by a group or by other users.
+The deployment configuration is `/etc/qcopilots-websearch/runtime.json`.
+The service owns `client.token` and `admin.token` with mode 0600. It stores
+user settings and provider keys under `/var/lib/qcopilots-websearch`.
+The administrator can edit the deployment configuration, and the service can
+read it.
+
+Create a one-time management link with
+
+```bash
+sudo /opt/qcopilots-websearch/bin/qcopilots-websearch --ConfigPath /etc/qcopilots-websearch/runtime.json --SettingsUrl
+```
+
+Open the link in a browser on the service host. For a remote browser, use an
+SSH tunnel with the matching loopback address, or configure a dedicated HTTPS
+proxy and set the admin Host, Origin and public origin accordingly. The
+reference Caddy deployment publishes the business service.
 
 Copy `deploy/team` to an administrator-managed deployment directory. Copy
 `.env.example` to `.env`, set a real DNS hostname and ACME contact, and supply a
@@ -38,7 +49,7 @@ the internal Compose network. Caddy exposes the public HTTPS API, while its own
 liveness check uses loopback 8090. Public DNS and inbound 80/443 are needed for
 automatic certificates. No native control endpoint is published by Caddy.
 
-Set the native provider to `http://127.0.0.1:8888/search`. Add the real external
+In Settings, select SearXNG and set its endpoint to `http://127.0.0.1:8888/search`. Add the real external
 authority to `business.allowed_hosts`, for example `search.example.org` and
 `search.example.org:443`. For the QCopilots WebUI, add the exact Origin
 `https://chat.vastarmorai.com` to `business.origins`. Retain loopback binding and
@@ -56,7 +67,7 @@ sudo systemctl restart qcopilots-websearch
 Caddy preserves client Authorization, Host and Origin. It does not substitute a
 shared gateway token. Do not add `flush_interval -1`, because it changes upstream
 cancellation behavior after client disconnect. The native service rejects unknown
-Origins and hosts. Keep 8088, 8089, 8888 and 8090 inaccessible from external hosts.
+Origins and hosts. Keep 8088, 8089, 8090, 8091 and 8888 inaccessible from external hosts.
 
 The SearXNG limiter is disabled in this private backend template. SearXNG is not
 an independently public endpoint. Exposing it requires a separate authentication,
@@ -65,33 +76,34 @@ in `compose.yml`. Upgrade them deliberately and repeat acceptance.
 
 ## Windows
 
-The MSI installs a machine service named `QCopilotsWebSearch` under the virtual
-account `NT SERVICE\QCopilotsWebSearch`. Program files, shared Qt libraries and
-the bundled OpenSSL 3.5.9 DLLs go under Program Files. OpenSSL uses `no-asm`, so
-performance evidence applies to that build configuration. Configuration, token
-and private state are under
-`%ProgramData%\QCopilots-WebSearch`. The service can read its credential and write
-its state, but cannot rewrite the configuration. Only administrators and SYSTEM
-can change service configuration or credentials.
+The MSI installs the `QCopilotsWebSearch` machine service under the virtual
+account `NT SERVICE\QCopilotsWebSearch`. Program files and Qt libraries go under
+Program Files. Deployment configuration and credentials live in
+`%ProgramData%\QCopilots-WebSearch`, with user settings and provider keys in its
+`state` subdirectory. Windows uses Schannel.
+
+Local interactive users can read `admin.token` to open the settings page and
+manage search settings. Runtime configuration, the client token and provider
+secret files retain their own ACLs. From the installed `bin` directory, run
+`qcopilots-websearch.exe --SettingsUrl` to create a one-time link for the
+default MSI installation.
 
 The MSI needs elevation. Read the Apache and separate Microsoft runtime terms
-shown by the installer. The package is unsigned until release signing evidence
-states otherwise. Uninstall removes program files and the service while retaining
+shown by the installer. The package is unsigned unless stated in its release notes. Uninstall removes program files and the service while retaining
 generated configuration and data. Do not delete retained data unless intentionally
 resetting the deployment.
 
-A portable ZIP can be extracted to an arbitrary directory, including paths with
-spaces or Unicode. Use its `bin/qcopilots-websearch.exe` and initialize configuration
-in a private writable directory. It does not register a service. Windows does not
-require Docker. A Windows native daemon still needs a reachable SearXNG JSON API,
-which is different from this project's `/v1/search` REST API. Alternatively, a
-Windows MCP client can connect directly to the team's Ubuntu HTTPS gateway.
+Extract the portable ZIP to a writable directory, including one with spaces or
+Unicode, and use `bin/qcopilots-websearch.exe` to initialize and run the service.
+Issue a link with `--ConfigPath FILE --SettingsUrl`. The ZIP runs as a foreground
+process. New configurations use the automatic source, so a SearXNG instance is optional.
 
 ## Runtime trust and proxies
 
 Runtime HTTPS uses the trust sources described in [architecture](architecture.md).
-Install the complete server certificate chain at the HTTPS endpoint. The service
-does not fetch missing issuers or perform online CRL/OCSP checks. Runtime requests
+Install the complete server certificate chain at the HTTPS endpoint. Windows may retrieve an intermediate
+issuer through AIA. Linux relies on the supplied chain and its local trust store.
+Both platforms omit online CRL and OCSP checks. Runtime requests
 do not inherit proxy settings. Configure a directly reachable SearXNG endpoint.
 The build configuration's proxy affects dependency downloads only.
 
@@ -140,6 +152,12 @@ permit the backend origin. Container loopback validation is unchanged.
 | `max_concurrency` | At most `limits.max_concurrent`, which the service shares between all of its clients |
 | `max_response_bytes` | At least 262144. Tool payloads are bounded at 240 KiB and the default of 1 MiB leaves room for the envelope. |
 
+The separate `settings` object can set `url` to the admin origin and supply an
+`admin_token_file` or `admin_token_env`. It uses the management credential
+independently of the backend business credential. The Web Search card's menu
+opens a one-time login link when a management credential is available, or
+opens the manual login page otherwise.
+
 ### Start and troubleshoot
 
 Start “QCopilots MCP Server Web Search” in the Manager. Its default local MCP URL
@@ -147,6 +165,10 @@ is `http://127.0.0.1:48218/mcp`. External-browser testing also requires
 `QCOPILOTS_EXTERNAL_BROWSER_ACCESS=ON`, the configured WebUI Origin, and the
 Manager's local Bearer credential. Do not paste the native backend token into
 the local MCP entry.
+
+With “Search without asking” off, QGIS asks before the first search or open of a
+new URL in its current session. After a refusal, it waits 120 seconds before
+prompting again. Cached page reads, find and status need no confirmation.
 
 The adapter remains discoverable when its backend is offline. Initialization,
 tool listing and local health do not depend on a successful public search. Calls

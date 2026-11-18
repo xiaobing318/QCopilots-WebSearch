@@ -53,11 +53,11 @@ install(FILES "${_qt_prefix}/config_qtbase.opt" "${_qt_prefix}/config_qtbase.sum
   DESTINATION "${_app_share}/qt-build" OPTIONAL)
 install(FILES "${PROJECT_SOURCE_DIR}/NOTICE" DESTINATION "${_app_share}")
 if(WIN32)
-  set(QCWS_OPENSSL_SOURCE_DIR "" CACHE PATH "Verified OpenSSL source")
-  if(NOT EXISTS "${QCWS_OPENSSL_SOURCE_DIR}/LICENSE.txt")
-    message(FATAL_ERROR "Missing verified OpenSSL source license")
-  endif()
-  install(FILES "${QCWS_OPENSSL_SOURCE_DIR}/LICENSE.txt" DESTINATION "${_app_share}/licenses/openssl")
   install(DIRECTORY "${PROJECT_SOURCE_DIR}/packaging/windows/licenses/"
     DESTINATION "${_app_share}/licenses/microsoft-runtime")
 endif()
+
+install(FILES "${PROJECT_SOURCE_DIR}/packaging/licenses/strata/LICENSE"
+  DESTINATION "${_app_share}/licenses/strata")
+install(FILES "${_web_dist}/THIRD_PARTY_NOTICES.txt"
+  DESTINATION "${_app_share}/licenses/web")

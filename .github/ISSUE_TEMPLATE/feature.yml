@@ -1,0 +1,10 @@
+name: Request a feature
+description: Suggest an improvement to the service or its settings
+body:
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: Describe the task and the change that would help.
+    validations:
+      required: true

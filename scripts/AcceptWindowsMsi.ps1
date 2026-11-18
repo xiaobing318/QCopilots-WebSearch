@@ -2,12 +2,12 @@
 $options = @{}
 for ($n = 0; $n -lt $args.Count; $n += 2) {
     $key = [string]$args[$n]
-    if ($key -notin @('--CandidateMsi','--BaselineMsi','--BaselineBuildInfo','--OutputDir') -or $n + 1 -ge $args.Count -or $options.ContainsKey($key)) {
-        throw 'Use --CandidateMsi FILE --BaselineMsi FILE --OutputDir DIR [--BaselineBuildInfo FILE].'
+    if ($key -notin @('--CandidateMsi','--BaselineMsi','--CandidateSHA256','--BaselineSHA256','--OutputDir') -or $n + 1 -ge $args.Count -or $options.ContainsKey($key)) {
+        throw 'Use --CandidateMsi FILE --CandidateSHA256 HASH --BaselineMsi FILE --BaselineSHA256 HASH --OutputDir DIR.'
     }
     $options[$key] = [string]$args[$n + 1]
 }
-foreach ($key in @('--CandidateMsi','--BaselineMsi','--OutputDir')) {
+foreach ($key in @('--CandidateMsi','--BaselineMsi','--CandidateSHA256','--BaselineSHA256','--OutputDir')) {
     if (!$options.ContainsKey($key)) { throw "Missing $key" }
 }
 Set-StrictMode -Version Latest
@@ -28,6 +28,7 @@ $dataRoot = [IO.Path]::GetFullPath((Join-Path $env:ProgramData 'QCopilots-WebSea
 $exe = Join-Path $installRoot 'bin\qcopilots-websearch.exe'
 $config = Join-Path $dataRoot 'service.json'
 $token = Join-Path $dataRoot 'client.token'
+$adminToken = Join-Path $dataRoot 'admin.token'
 $owned = $false
 $trackedRoots = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 $wi = New-Object -ComObject WindowsInstaller.Installer
@@ -152,6 +153,48 @@ function Assert-Running([hashtable]$metadata) {
     $installed = @($wi.ProductsEx($metadata.ProductCode, '', 4))
     Assert ($installed.Count -eq 1 -and (Read-ProductProperty $installed[0] 'InstallProperty' @('VersionString')) -eq $metadata.ProductVersion) 'Registered version mismatch.'
 }
+function Grant-ToInteractive([string]$path) {
+    $acl = Get-Acl -LiteralPath $path
+    return @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) |
+        Where-Object { $_.IdentityReference.Value -eq 'S-1-5-4' -and
+                       $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow })
+}
+function Assert-Administration {
+    $adminAcl = Get-Acl -LiteralPath $adminToken
+    Assert $adminAcl.AreAccessRulesProtected 'The administration credential inherits permissions.'
+    $grants = @(Grant-ToInteractive $adminToken)
+    Assert ($grants.Count -eq 1 -and !$grants[0].IsInherited) 'Missing explicit INTERACTIVE grant.'
+    $allowed = [int][Security.AccessControl.FileSystemRights]::Read -bor
+               [int][Security.AccessControl.FileSystemRights]::Synchronize
+    $rights = [int]$grants[0].FileSystemRights
+    Assert (($rights -band (-bnot $allowed)) -eq 0 -and
+            ($rights -band [int][Security.AccessControl.FileSystemRights]::ReadData)) 'INTERACTIVE must only read the administration token.'
+    foreach ($path in @($token, $config)) {
+        Assert (@(Grant-ToInteractive $path).Count -eq 0) 'INTERACTIVE can access a private service file.'
+    }
+
+    $url = & $exe --SettingsUrl
+    Assert ($LASTEXITCODE -eq 0 -and $url -match '^http://127\.0\.0\.1:8091/settings/#login=([a-f0-9]{64})$') 'The installed settings CLI did not return a local login link.'
+    $loginCode = $Matches[1]
+    $origin = 'http://127.0.0.1:8091'
+    $page = Invoke-WebRequest -UseBasicParsing -Uri "$origin/settings/" -TimeoutSec 4
+    Assert ($page.StatusCode -eq 200 -and $page.Headers['Content-Security-Policy']) 'The installed settings page is unavailable.'
+    $json = @{ ContentType = 'application/json'; TimeoutSec = 4 }
+    $state = Invoke-RestMethod -Uri "$origin/admin/api/v1/session" -Method Post -Headers @{ Origin = $origin } -Body (@{ code = $loginCode } | ConvertTo-Json -Compress) -SessionVariable session @json
+    $settings = Invoke-RestMethod -Uri "$origin/admin/api/v1/settings" -WebSession $session -TimeoutSec 4
+    $runtime = [IO.File]::ReadAllText($config) | ConvertFrom-Json
+    $provider = if ('provider' -in $runtime.PSObject.Properties.Name) { 'searxng' } else { 'auto' }
+    Assert ($settings.search.provider -eq $provider) 'The settings response did not load the expected source.'
+    $headers = @{ Origin = $origin; 'X-QCWS-CSRF' = $state.csrf }
+    $keyPath = "$origin/admin/api/v1/providers/brave/key"
+    $fakeKey = [guid]::NewGuid().ToString('N')
+    $saved = Invoke-RestMethod -Uri $keyPath -Method Put -Headers $headers -WebSession $session -Body (@{ key = $fakeKey } | ConvertTo-Json -Compress) @json
+    Assert ($saved.providers.brave.key_set -and ($saved | ConvertTo-Json -Depth 16) -notmatch $fakeKey) 'The settings response exposed or failed to save a key.'
+    $secrets = Join-Path $dataRoot 'state\secrets.json'
+    Assert ((Test-Path -LiteralPath $secrets) -and @(Grant-ToInteractive $secrets).Count -eq 0) 'INTERACTIVE can access the provider secret file.'
+    [void](Invoke-RestMethod -Uri $keyPath -Method Delete -Headers $headers -WebSession $session -Body '{}' @json)
+    [void](Invoke-RestMethod -Uri "$origin/admin/api/v1/session" -Method Delete -Headers $headers -WebSession $session -Body '{}' @json)
+}
 function Snapshot([string[]]$paths) {
     $result = @{}
     foreach ($path in $paths) { $result[$path] = @{ Hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash; Acl = (Get-Acl -LiteralPath $path).Sddl } }
@@ -183,16 +226,11 @@ function Remove-OwnedTree([string]$root) {
 }
 $candidate = Read-Msi $options['--CandidateMsi']
 $baseline = Read-Msi $options['--BaselineMsi']
-$baselineInfoPath = if ($options.ContainsKey('--BaselineBuildInfo')) { $options['--BaselineBuildInfo'] }
-                    else { Join-Path ([IO.Path]::GetDirectoryName($baseline.Path)) 'build-info-windows-x64.json' }
-$baselineInfo = Get-Content -LiteralPath $baselineInfoPath -Raw | ConvertFrom-Json
-$baselinePackageHash = $baselineInfo.package_sha256.([IO.Path]::GetFileName($baseline.Path))
-Assert ($baselineInfo.target -eq 'windows-x64' -and $baselineInfo.project_version -eq $baseline.ProductVersion) 'Baseline build metadata mismatch.'
-Assert ($baselineInfo.source_commit -match '^[0-9a-f]{40}$' -and $baselineInfo.working_tree_dirty -is [bool]) 'Baseline source identity missing.'
-Assert ($baselinePackageHash -eq $baseline.Sha256) 'Baseline build metadata does not match MSI bytes.'
-$baselineSource = @{ SourceCommit = $baselineInfo.source_commit; WorkingTreeDirty = $baselineInfo.working_tree_dirty;
-                     BuildInfoSha256 = (Get-FileHash -LiteralPath $baselineInfoPath -Algorithm SHA256).Hash.ToLowerInvariant();
-                     PackageSha256 = $baselinePackageHash.ToLowerInvariant() }
+foreach ($pair in @(@{ Key = '--CandidateSHA256'; Msi = $candidate },
+                    @{ Key = '--BaselineSHA256'; Msi = $baseline })) {
+    $expected = $options[$pair.Key]
+    Assert ($expected -match '^[a-fA-F0-9]{64}$' -and $pair.Msi.Sha256 -eq $expected) 'MSI SHA-256 mismatch.'
+}
 foreach ($metadata in @($candidate, $baseline)) {
     [void][guid]::Parse($metadata.ProductCode)
     [void][guid]::Parse($metadata.UpgradeCode)
@@ -206,7 +244,7 @@ Assert ([version]$candidate.ProductVersion -gt [version]$baseline.ProductVersion
 Assert (!(Get-CimInstance Win32_Service -Filter "Name='$ServiceName'")) 'Existing user service found. No changes made.'
 foreach ($root in @($installRoot, $dataRoot)) { Assert (!(Get-Item -LiteralPath $root -Force -ErrorAction SilentlyContinue)) "Existing user path: $root" }
 Assert (@($wi.RelatedProducts($candidate.UpgradeCode)).Count -eq 0) 'Related product already registered.'
-foreach ($port in @(8088,8089)) {
+foreach ($port in @(8088,8089,8091)) {
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $port)
     $listener.Server.ExclusiveAddressUse = $true
     try { $listener.Start() } catch { throw "Required service port $port is already in use. No changes made." }
@@ -243,15 +281,21 @@ try {
     [IO.File]::WriteAllText($sentinel, [guid]::NewGuid().ToString(), [Text.UTF8Encoding]::new($false))
     Start-Service -Name $ServiceName
     Assert-Running $baseline
-    $baselineFiles = Snapshot @($exe, $config, $token, $sentinel)
-    $preservedFiles = Snapshot @($config, $token, $sentinel)
+    $preserved = @($config, $token, $sentinel)
+    $baselineHasAdmin = Test-Path -LiteralPath $adminToken
+    if ($baselineHasAdmin) { $preserved += $adminToken }
+    $baselineFiles = Snapshot ($preserved + @($exe))
+    $preservedFiles = Snapshot $preserved
     Invoke-Msi $candidate '/i' '03-fail-after-start-services' 1603 'afterStartServices'
     Assert (!(Registered $candidate.ProductCode)) 'Failed candidate stayed registered.'
     Assert-Running $baseline
     Assert-Snapshot $baselineFiles
+    Assert ((Test-Path -LiteralPath $adminToken) -eq $baselineHasAdmin) 'Rollback changed the administration credential.'
     Invoke-Msi $candidate '/i' '04-upgrade-same-candidate'
     Assert (!(Registered $baseline.ProductCode)) 'Baseline remained registered after upgrade.'
     Assert-Running $candidate
+    Assert-Administration
+    if (!$baselineHasAdmin) { $preservedFiles += Snapshot @($adminToken) }
     Assert-Snapshot $preservedFiles
     Invoke-Msi $candidate '/x' '05-uninstall'
     Wait-Absent
@@ -279,7 +323,7 @@ finally {
     } catch { $cleanupFailures.Add($_.Exception.Message) }
     @{ Passed = (!$failure -and !$cleanupFailures.Count); Candidate = $candidate; Baseline = $baseline;
        ScriptSha256 = $scriptSha256; PowerShellVersion = $PSVersionTable.PSVersion.ToString();
-       PowerShellEdition = $PSVersionTable.PSEdition; BaselineSource = $baselineSource;
+       PowerShellEdition = $PSVersionTable.PSEdition;
        StopSeconds = $stopSeconds; WindowsBuild = $osInfo.BuildNumber; WindowsProductType = $osInfo.ProductType;
        CleanupErrors = @($cleanupFailures); Error = "$failure" } |
         ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $runDir 'result.json') -Encoding UTF8

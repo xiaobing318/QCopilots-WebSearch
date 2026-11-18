@@ -13,8 +13,7 @@ applicable GPL-3.0 terms incorporated by that license.
 
 Each release includes the unmodified matching `qtbase-everywhere-src-6.12.0`
 archive, its SHA-256, upstream license texts, Qt build options and original Qt
-SBOM. The vendor SBOM describes the larger qtbase distribution. Our package SBOM
-separately inventories the files actually shipped.
+SBOM. The upstream SBOM describes the larger qtbase distribution.
 
 The installed program does not authenticate Qt DLLs or require a vendor signature.
 Users may rebuild Qt and replace its shared libraries and corresponding plugins.
@@ -43,9 +42,11 @@ Linux Qt also ships ICU 73.2 libraries, with their Unicode/ICU notices.
 
 Linux uses distribution-managed OpenSSL shared libraries. The DEB records its
 system dependencies. Apply Ubuntu security updates and restart the service to
-load updated libraries. Windows dynamically links the bundled OpenSSL 3.5.9
-libraries under Apache-2.0. Packages include their license and release assets
-include the matching fixed-version source archive.
+load updated libraries. Windows uses system Schannel.
+
+The web bundle provides a `THIRD_PARTY_NOTICES.txt` for frontend dependencies.
+The automatic search provider and SERP handling draw on Strata. Its MIT license
+and copyright notice are installed under `licenses/strata`.
 
 The cpp-httplib 0.66.0 header is modified to bound request-input lifetime and
 interrupt owned sockets on shutdown. Its MIT license still applies. Packages
@@ -53,8 +54,7 @@ include the modified header, patch script and modification notice under `share`.
 
 Windows packages include the permitted Microsoft Visual C++ runtime DLLs from
 the licensed Visual Studio redistribution directory. These DLLs are proprietary
-Microsoft components. They are not Apache-licensed. The distribution's NOTICE
-and SBOM identify them separately. No Windows system DLLs are copied.
+Microsoft components. They are not Apache-licensed. The distribution's NOTICE identifies them separately. No Windows system DLLs are copied.
 
 SearXNG (AGPL-3.0-or-later), Caddy (Apache-2.0) and Valkey (BSD-3-Clause) run as
 separate services in the team deployment. Their images and licenses are identified

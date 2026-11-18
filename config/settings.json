@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "tools": {
+    "search": {
+      "enabled": true
+    },
+    "open": {
+      "enabled": true
+    }
+  },
+  "search_without_asking": false,
+  "search": {
+    "provider": "auto",
+    "searxng": {
+      "url": "http://127.0.0.1:8080/search",
+      "engines": [
+        "google",
+        "bing",
+        "duckduckgo"
+      ]
+    }
+  }
+}

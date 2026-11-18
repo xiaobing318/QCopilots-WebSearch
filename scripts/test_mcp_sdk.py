@@ -23,8 +23,9 @@ from mcp import Client
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError
-from soak import ROOT, Fault, digest, environment, start_process, stop_process
-from runtime_evidence import fingerprint, host_info
+from testkit import (
+    ROOT, Fault, admin_smoke, digest, environment, fingerprint, host_info, start_process, stop_process,
+)
 from process_cleanup import wait_owned
 
 EXPECTED = {"web_search", "web_open", "web_find", "web_search_status"}
@@ -192,6 +193,7 @@ async def exercise(client, fixture, label, public_url):
     args = {"query": query, "limit": 10, "language": "zh-CN"}
     result = payload(await client.call_tool("web_search", args))
     require(result["status"] == "ok" and len(result["results"]) == 10, "search_results")
+    require(result["provider"] == "searxng", "unexpected_search_provider")
     require(result["cache"]["hit"] is False, "cold_cache")
     require(payload(await client.call_tool("web_search", args))["cache"]["hit"] is True, "warm_cache")
     payload(await client.call_tool("web_open",
@@ -307,6 +309,66 @@ async def exercise_stdio(executable, config, tokens, fixture, public_url):
         require(not wait_owned(owned, timeout=5), "stdio_child_cleanup_failed")
 
 
+async def exercise_live_provider(client, label):
+    status = payload(await client.call_tool("web_search_status", {}))
+    require(status["settings"]["provider"] == "auto", f"live_{label}_auto_settings")
+    result = await client.call_tool(
+        "web_search", {"query": "QGIS official documentation", "limit": 5, "language": "en"},
+        read_timeout_seconds=30,
+    )
+    if result.is_error:
+        data = result.structured_content
+        error = data.get("error", {}).get("code") if isinstance(data, dict) else None
+        known_errors = {"provider_unavailable", "rate_limited", "timeout", "upstream_http_error"}
+        raise Fault(f"live_{label}_{error}" if error in known_errors else f"live_{label}_search_failed")
+    data = payload(result)
+    require(data["results"], f"live_{label}_empty_results")
+    source = data.get("provider")
+    require(isinstance(source, str) and (source == "bing" or source.startswith("duckduckgo")),
+            f"live_{label}_unexpected_provider")
+    return {"transport": label, "provider": source, "result_count": len(data["results"])}
+
+
+async def run_live(args, template, folder, tokens, report):
+    proc, ports, _ = start_process(args.Executable, template, folder, None, tokens, 300)
+    config = folder / "runtime.json"
+    results, owned = [], []
+    report["live_provider"] = results
+    try:
+        try:
+            async with httpx2.AsyncClient(headers={"Authorization": "Bearer " + tokens[0]},
+                                          trust_env=False, follow_redirects=False, timeout=35) as http:
+                transport = streamable_http_client(f"http://127.0.0.1:{ports[0]}/mcp",
+                                                   http_client=http, terminate_on_close=True)
+                async with Client(transport, mode="legacy", read_timeout_seconds=30) as client:
+                    results.append(await exercise_live_provider(client, "http"))
+        except Exception as exc:
+            results.append({"transport": "http", "error": fault_code(exc)})
+
+        try:
+            params = StdioServerParameters(command=str(args.Executable),
+                args=["--ConfigPath", str(config), "--Stdio"], env=environment(tokens))
+            with open(os.devnull, "w", encoding="utf-8") as errlog:
+                async with Client(stdio_client(params, errlog=errlog),
+                                  mode="legacy", read_timeout_seconds=30) as client:
+                    owned.extend(stdio_children(config))
+                    require(len(owned) == 1, "live_stdio_process_not_identified")
+                    results.append(await exercise_live_provider(client, "stdio"))
+            require(not any(child.is_running() for child in owned), "live_stdio_sdk_left_process")
+        except Exception as exc:
+            results.append({"transport": "stdio", "error": fault_code(exc)})
+    finally:
+        report["live_process_stop"] = stop_process(proc)
+        for child in owned:
+            with suppress(psutil.NoSuchProcess):
+                if child.is_running():
+                    child.kill()
+        require(not wait_owned(owned, timeout=5), "live_stdio_cleanup_failed")
+    require(report["live_process_stop"]["passed"], "live_process_stop_failed")
+    failed = next((result["error"] for result in results if "error" in result), None)
+    require(failed is None, failed)
+
+
 async def run(args, report):
     template = json.loads((ROOT / "config/runtime.json").read_text("utf-8"))
     work = ROOT / "work"
@@ -318,15 +380,20 @@ async def run(args, report):
         with tempfile.TemporaryDirectory(prefix="qcws-sdk-", dir=work) as temporary:
             folder = Path(temporary).resolve()
             require(folder.is_relative_to(work.resolve()), "temporary_directory_scope")
-            tokens = [secrets.token_hex(32) for _ in range(5)]
+            tokens = [secrets.token_hex(32) for _ in range(6)]
             proc, ports, _ = start_process(args.Executable, template, folder, fixture, tokens, 300)
             try:
+                report["admin"] = admin_smoke(args.Executable, folder / "runtime.json", environment(tokens), "searxng")
                 report["transports"].append(await exercise_http(ports[0], tokens[0], fixture, args.PublicUrl))
                 report["transports"].append(await exercise_stdio(
                     args.Executable, folder / "runtime.json", tokens, fixture, args.PublicUrl))
             finally:
                 fixture.release.set()
                 report["http_process_stop"] = stop_process(proc)
+            if args.LiveProvider == "auto":
+                live_folder = folder / "live"
+                live_folder.mkdir()
+                await run_live(args, template, live_folder, tokens, report)
     finally:
         fixture.release.set()
         fixture.shutdown()
@@ -352,6 +419,7 @@ def main():
     parser.add_argument("--Executable", type=Path, required=True)
     parser.add_argument("--Output", type=Path, required=True)
     parser.add_argument("--PublicUrl", default=None)
+    parser.add_argument("--LiveProvider", choices=("auto",), default=None)
     args = parser.parse_args()
     args.Executable = args.Executable.resolve(strict=True)
     output = args.Output.resolve()

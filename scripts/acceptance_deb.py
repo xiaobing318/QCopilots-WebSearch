@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Test unchanged candidate/baseline DEBs on a fresh disposable Ubuntu systemd VM."""
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,10 +14,13 @@ import time
 import urllib.error
 import urllib.request
 
+from testkit import admin_smoke, digest as sha
+
 PKG = "qcopilots-websearch"
 UNIT = PKG + ".service"
 APP, ETC, STATE = Path("/opt") / PKG, Path("/etc") / PKG, Path("/var/lib") / PKG
 EXE, CONFIG, TOKEN = APP / "bin" / PKG, ETC / "runtime.json", ETC / "client.token"
+ADMIN_TOKEN = ETC / "admin.token"
 DB = STATE / "cache/cache-v1.sqlite"
 LOG = []
 ENV = {k: v for k, v in os.environ.items() if not k.startswith(("QT_", "QML", "LD_"))}
@@ -38,11 +40,6 @@ def run(*args, check=True, timeout=300):
     if check:
         require(result.returncode == 0, f"Command failed ({result.returncode}): {args}")
     return result
-
-
-def sha(path):
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def metadata(package, field):
@@ -114,9 +111,12 @@ def health():
     else:
         raise RuntimeError("Health accepted no credential")
     require(active() and pid() > 0, "Health did not come from systemd service")
-    info = TOKEN.stat()
-    require(not TOKEN.is_symlink() and stat.S_IMODE(info.st_mode) == 0o600
-            and info.st_uid == pwd.getpwnam(PKG).pw_uid, "Unsafe credential ownership/mode")
+    service_uid = pwd.getpwnam(PKG).pw_uid
+    for token_path in (TOKEN, ADMIN_TOKEN):
+        info = token_path.stat()
+        require(not token_path.is_symlink() and stat.S_ISREG(info.st_mode)
+                and stat.S_IMODE(info.st_mode) == 0o600 and info.st_uid == service_uid,
+                f"Unsafe credential ownership or mode: {token_path.name}")
     require(os.readlink(f"/proc/{pid()}/exe") == str(EXE)
             and sha(Path(f"/proc/{pid()}/exe")) == sha(EXE), "Wrong installed executable bytes")
     maps = Path(f"/proc/{pid()}/maps").read_text().splitlines()
@@ -132,12 +132,14 @@ def health():
 def configure_dynamic_ports():
     require(not active(), "Initial mask did not prevent startup")
     config, info = json.loads(CONFIG.read_bytes()), CONFIG.stat()
-    with socket.socket() as first, socket.socket() as second:
+    with socket.socket() as first, socket.socket() as second, socket.socket() as admin:
         first.bind(("127.0.0.1", 0))
         second.bind(("127.0.0.1", 0))
+        admin.bind(("127.0.0.1", 0))
         for name, sock in (("business", first), ("control", second)):
             port = sock.getsockname()[1]
             config[name].update(host="127.0.0.1", port=port, allowed_hosts=[f"127.0.0.1:{port}"])
+        config["admin"] = {"enabled": True, "port": admin.getsockname()[1]}
         config["cache"]["search_ttl_seconds"] = 321
         temporary = CONFIG.with_name("runtime.json.acceptance-new")
         with temporary.open("x", encoding="utf-8") as stream:
@@ -179,23 +181,99 @@ def preflight(args, candidate, baseline):
         pass
     else:
         raise RuntimeError("Pre-existing service account refused")
-    for package, digest in ((candidate, args.PackageSHA256), (baseline, args.BaselineSHA256)):
+    packages = [(candidate, args.PackageSHA256)]
+    if baseline is not None:
+        packages.append((baseline, args.BaselineSHA256))
+    for package, digest in packages:
         require(re.fullmatch(r"[0-9a-f]{64}", digest) is not None, "Invalid expected SHA-256")
         require(package.is_file() and sha(package) == digest, "Package SHA-256 mismatch")
         require(metadata(package, "Package") == PKG and metadata(package, "Architecture") == "amd64",
                 "Wrong package identity")
-    run("dpkg", "--compare-versions", metadata(baseline, "Version"), "lt", metadata(candidate, "Version"))
+    if baseline is not None:
+        require(baseline != candidate, "Baseline and candidate must differ")
+        run("dpkg", "--compare-versions", metadata(baseline, "Version"), "lt", metadata(candidate, "Version"))
+
+
+def upgrade_checks(candidate, baseline, args, passed):
+    elapsed = stop()
+    sentinel, key = STATE / "acceptance-retained-data", os.urandom(32).hex()
+    payload = json.dumps({"acceptance": key}).encode()
+    sentinel.write_bytes(os.urandom(48))
+    with sqlite3.connect(DB) as database:
+        database.execute("INSERT INTO entries VALUES(?,?,?,?,?)",
+                         (key, payload, len(payload), int(time.time()) + 86400, 0))
+    expected = {path: sha(path) for path in (CONFIG, TOKEN, ADMIN_TOKEN, STATE / "settings.json", sentinel)}
+    run("systemctl", "start", UNIT)
+    health()
+    passed("stop-start", stopSeconds=elapsed)
+    install(baseline)
+    health()
+    install(candidate)
+    health()
+    preserved(expected, key, payload)
+    passed("upgrade")
+    install(baseline)
+    health()
+    stop()
+    backup = TOKEN.with_name("client.token.acceptance-original")
+    TOKEN.rename(backup)
+    try:
+        TOKEN.mkdir(mode=0o700)
+        rejected = install(candidate, check=False)
+        require(rejected.returncode != 0 and "Credential is not a regular file" in rejected.stdout,
+                "Intended postinst failure was not observed")
+        require(package_state() == ["install ok half-configured", metadata(candidate, "Version")],
+                "Failed postinst did not leave expected dpkg state")
+    finally:
+        if TOKEN.is_dir() and not TOKEN.is_symlink():
+            TOKEN.rmdir()
+        require(not TOKEN.exists() and not TOKEN.is_symlink(), "Cannot safely restore token")
+        backup.rename(TOKEN)
+    install(baseline)
+    health()
+    preserved(expected, key, payload)
+    passed("rollback", mode="original baseline reinstall after failed candidate postinst",
+           failedInstallExitCode=rejected.returncode)
+    run("systemctl", "disable", UNIT)
+    require(active() and enabled() == "disabled", "Disabled-active setup failed")
+    install(candidate)
+    health()
+    require(enabled() == "disabled", "Upgrade re-enabled disabled-active service")
+    passed("disabled-active")
+    stop()
+    install(baseline)
+    install(candidate)
+    require(not active() and enabled() == "disabled", "Upgrade changed disabled-inactive state")
+    preserved(expected, key, payload)
+    passed("disabled-inactive")
+    run("systemctl", "enable", "--now", UNIT)
+    health()
+    old = pid()
+    apt("remove", PKG)
+    require(not EXE.exists() and not active() and not Path(f"/proc/{old}").exists(), "Removal left service")
+    preserved(expected, key, payload)
+    passed("uninstall")
+    apt("purge", PKG)
+    require(not CONFIG.exists(), "Purge did not remove conffile")
+    preserved({path: expected[path] for path in (TOKEN, ADMIN_TOKEN, STATE / "settings.json", sentinel)}, key, payload)
+    passed("purge")
+    require(sha(candidate) == args.PackageSHA256 and sha(baseline) == args.BaselineSHA256,
+            "Original package changed during acceptance")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("Package", "BaselinePackage", "OutputPath"):
-        parser.add_argument("--" + name, type=Path, required=True)
-    for name in ("PackageSHA256", "BaselineSHA256"):
-        parser.add_argument("--" + name, required=True)
+    parser.add_argument("--Package", type=Path, required=True)
+    parser.add_argument("--PackageSHA256", required=True)
+    parser.add_argument("--BaselinePackage", type=Path)
+    parser.add_argument("--BaselineSHA256")
+    parser.add_argument("--OutputPath", type=Path, required=True)
     parser.add_argument("--DisposableMachine", action="store_true", required=True)
     args = parser.parse_args()
-    candidate, baseline = args.Package.resolve(strict=True), args.BaselinePackage.resolve(strict=True)
+    if bool(args.BaselinePackage) != bool(args.BaselineSHA256):
+        parser.error("Provide both --BaselinePackage and --BaselineSHA256 for upgrade checks")
+    candidate = args.Package.resolve(strict=True)
+    baseline = args.BaselinePackage.resolve(strict=True) if args.BaselinePackage else None
     output = args.OutputPath.resolve()
     require(output not in (candidate, baseline, Path(__file__).resolve()), "Output would overwrite input")
     preflight(args, candidate, baseline)
@@ -211,70 +289,15 @@ def main():
         install(candidate)
         configure_dynamic_ports()
         passed("install", initialStart="masked until dynamic ports were configured")
-        elapsed = stop()
-        sentinel, key = STATE / "acceptance-retained-data", os.urandom(32).hex()
-        payload = json.dumps({"acceptance": key}).encode()
-        sentinel.write_bytes(os.urandom(48))
-        with sqlite3.connect(DB) as database:
-            database.execute("INSERT INTO entries VALUES(?,?,?,?,?)",
-                             (key, payload, len(payload), int(time.time()) + 86400, 0))
-        expected = {path: sha(path) for path in (CONFIG, TOKEN, sentinel)}
-        run("systemctl", "start", UNIT)
-        health()
-        passed("stop-start", stopSeconds=elapsed)
-        install(baseline)
-        health()
-        install(candidate)
-        health()
-        preserved(expected, key, payload)
-        passed("upgrade")
-        install(baseline)
-        health()
-        stop()
-        backup = TOKEN.with_name("client.token.acceptance-original")
-        TOKEN.rename(backup)
-        try:
-            TOKEN.mkdir(mode=0o700)
-            rejected = install(candidate, check=False)
-            require(rejected.returncode != 0 and "Credential is not a regular file" in rejected.stdout,
-                    "Intended postinst failure was not observed")
-            require(package_state() == ["install ok half-configured", metadata(candidate, "Version")],
-                    "Failed postinst did not leave expected dpkg state")
-        finally:
-            if TOKEN.is_dir() and not TOKEN.is_symlink():
-                TOKEN.rmdir()
-            require(not TOKEN.exists() and not TOKEN.is_symlink(), "Cannot safely restore token")
-            backup.rename(TOKEN)
-        install(baseline)
-        health()
-        preserved(expected, key, payload)
-        passed("rollback", mode="original baseline reinstall after failed candidate postinst",
-               failedInstallExitCode=rejected.returncode)
-        run("systemctl", "disable", UNIT)
-        require(active() and enabled() == "disabled", "Disabled-active setup failed")
-        install(candidate)
-        health()
-        require(enabled() == "disabled", "Upgrade re-enabled disabled-active service")
-        passed("disabled-active")
-        stop()
-        install(baseline)
-        install(candidate)
-        require(not active() and enabled() == "disabled", "Upgrade changed disabled-inactive state")
-        preserved(expected, key, payload)
-        passed("disabled-inactive")
-        run("systemctl", "enable", "--now", UNIT)
-        health()
-        old = pid()
-        apt("remove", PKG)
-        require(not EXE.exists() and not active() and not Path(f"/proc/{old}").exists(), "Removal left service")
-        preserved(expected, key, payload)
-        passed("uninstall")
-        apt("purge", PKG)
-        require(not CONFIG.exists(), "Purge did not remove conffile")
-        preserved({TOKEN: expected[TOKEN], sentinel: expected[sentinel]}, key, payload)
-        passed("purge")
-        require(sha(candidate) == args.PackageSHA256 and sha(baseline) == args.BaselineSHA256,
-                "Original package changed during acceptance")
+        settings = admin_smoke(EXE, CONFIG, ENV, "auto", persist_in=STATE)
+        passed("admin", provider=settings["provider"])
+        if baseline is None:
+            stop()
+            apt("purge", PKG)
+            require(not EXE.exists() and not active(), "Smoke test cleanup left the service")
+        else:
+            upgrade_checks(candidate, baseline, args, passed)
+        require(sha(candidate) == args.PackageSHA256, "Package changed during acceptance")
         report["status"] = "passed"
     except Exception as error:
         failure = error

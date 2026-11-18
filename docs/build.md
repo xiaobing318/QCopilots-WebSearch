@@ -1,11 +1,14 @@
 # Build and package
 
-Supported runtime targets are Windows 11 amd64 and Ubuntu 26.04 amd64. Automated
-Windows build and installer tests run on Windows Server 2022. That CI coverage
-does not establish Windows 11 desktop-specific behavior.
-Use C++20, Qt 6.12.0 shared libraries, CMake and Ninja.
+The service supports Windows 11 and Ubuntu 26.04 on amd64. Automated Windows builds run on Windows Server 2025. A local Windows 11 run checks the portable ZIP.
 
-## One entry point on each platform
+## Prerequisites
+
+- Windows needs Visual Studio 2022 or 2026 with Desktop development with C++, a Windows SDK, CMake 3.30 or newer, Ninja, Git and Python 3.12 or newer. The pipeline discovers the x64 tools and can use CMake and Ninja from Visual Studio. TLS uses Schannel.
+- Ubuntu needs Python 3.12 or newer with venv and pip before running the Bash entry point. Bootstrap installs GCC, CMake, Ninja, Git, distribution OpenSSL development files and other native requirements with apt. System package installation requires root or noninteractive sudo.
+- Bootstrap prepares Qt 6.12.0, Node 24.22.3 and isolated Python tooling. Node is a build-time dependency of the embedded settings UI. The native installed service includes the UI and uses shared Qt libraries.
+
+## Build and configure
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/BuildPipeline.ps1 --ConfigPath config/BuildPipeline.json --Profile windows-x64 --Stages bootstrap,doctor,configure,build,test,install,publish
@@ -15,117 +18,47 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/BuildPipeline.ps
 bash scripts/BuildPipeline.sh --ConfigPath config/BuildPipeline.json --Profile ubuntu-x64 --Stages bootstrap,doctor,configure,build,test,install,publish
 ```
 
-Both wrappers call the same Python implementation. Parameters use the same
-spelling and case. Stages execute in the supplied order and must be unique.
-`doctor,bootstrap,configure,build,test,install,publish` are the supported stages.
-There is no implicit clean step.
+Both wrappers call the same Python implementation. The requested stages run in order. `--CheckOnly` reports prerequisites without installing and `--DryRun` prints the proposed commands.
 
-`--CheckOnly` runs diagnostics without installation. `--DryRun` prints planned
-commands without downloading or changing the toolchain. Full schema validation
-requires the pinned Python tooling installed by bootstrap.
+Use a private copy of the configuration ending in `.local.json` to change local build, install, cache or tool paths. Relative paths resolve from the repository and environment variables in profile values are expanded. The default Windows Qt root is `C:/Softwares/Qt`. Select only ZIP by setting a Windows profile's `packageGenerators` to `["ZIP"]`.
 
-Windows needs VS2022 with Desktop development with C++, a Windows SDK, CMake
-3.30 or newer for MSI, Ninja, Git and Python 3.12 or newer. The script discovers
-VS2022 and imports its x64 environment, including its bundled CMake/Ninja.
-Windows bootstrap downloads Qt and isolated Python tooling. It does not install
-Visual Studio or a Windows compiler. Missing prerequisites produce diagnostics.
+The configure step uses CMake Presets `windows-x64`, `ubuntu-x64` and `ubuntu-x64-quality`. Native CI profiles set `QCWS_BUILD_WEB=OFF` and point `QCWS_WEB_DIST_DIR` to the prebuilt bundle from the web job. Local configuration builds the frontend by default.
 
-The Windows OpenSSL build also requires native Windows Perl, such as Strawberry
-Perl 5.42.3.1. Set `tools.perl` or put its `perl.exe` on PATH. Git/MSYS/Cygwin Perl
-is rejected because its path model does not match the MSVC build. Bootstrap does
-not install this toolchain prerequisite. CI prepares pinned official packages
-using `scripts/ci_windows_tools.py --IncludePerl` in a private tools directory.
-
-Ubuntu bootstrap uses apt to install GCC, CMake, Ninja, Git, Python and runtime
-development dependencies, then installs the same fixed Qt version from its
-verified archive. Root or noninteractive sudo is required for missing system
-packages. Linux does not use MSVC. Qt's vendor platform table is distinct from
-this project's Ubuntu 26.04 build and runtime checks.
-
-On a minimal Ubuntu image without Python, the Bash entry point uses the bundled
-JSON::PP parser and the Essential `perl-base` package to read the selected profile.
-Only an online `bootstrap` stage installs Python. `--CheckOnly` reports the
-missing interpreter and `--DryRun` prints the installation plan without running
-APT. An offline bootstrap requires Python and other system packages to be present.
-The APT calls explicitly apply the profile proxy through sudo. An empty proxy
-selects direct access, including when the host has other proxy settings.
-Pinned archive downloads and pip also use the profile's proxy. Inherited
-`ALL_PROXY` and bypass lists do not override it. An empty profile proxy forces
-direct access. Pip machine/user configuration files are disabled for isolated
-tool bootstrap, so their proxy settings cannot silently change this decision.
-
-## Configuration and downloads
-
-Copy `config/BuildPipeline.json` to a file ending in `.local.json`. That suffix
-is ignored by Git. Select it with `--ConfigPath`. Paths for build, installation,
-download cache and Qt can be changed independently. Relative paths resolve from
-the source repository. The Windows Qt default is `C:/Softwares/Qt`.
-
-`tools` allows explicit executable paths and a VS2022 installation root. Empty
-values use discovery. `proxy` accepts an HTTP(S) proxy such as
-`http://127.0.0.1:7897`. It affects downloads, not runtime public-page fetching.
-Do not put credentials in committed proxy URLs.
-
-Archives and Python packages use committed versions and hashes. Downloads are
-retried and verified before extraction. Corrupt cached files are not trusted.
-Qt and source caches can be reused across builds. Complete an online bootstrap
-and configure, copy the cache and matching Qt installation, then set `offline`
-to true to reuse them without network downloads. Missing system packages or
-verified cache entries fail explicitly. Python wheel caches are platform- and
-Python-minor-version-specific.
-
-The schema documents each field's purpose, allowed values and effect. Unknown
-fields fail validation. Do not reuse a source root as an install/cache directory.
+Tool and source downloads are verified against committed hashes. Set `proxy` in a private profile to control downloads. An empty value selects direct access. The profile proxy also applies to apt, pip and npm. Runtime outbound requests independently use direct connections. Use `offline: true` with preinstalled system tools and verified caches. Building the frontend offline requires an npm cache populated with the locked packages, or a prebuilt bundle.
 
 ## Windows MSI tooling
 
-Use official WiX 7.0.1, WixToolset.UI.wixext 7.0.1 and .NET 10 LTS. Install tools
-into a dedicated directory and add it to PATH, or specify executable paths in
-the private build configuration. For example, with a .NET 10 SDK available:
+With a .NET 10 SDK available, install official WiX 7.0.1 and its matching UI extension.
 
 ```text
 dotnet tool install --tool-path <tool-directory> wix --version 7.0.1
 wix extension add -g WixToolset.UI.wixext/7.0.1 -acceptEula wix7
 ```
 
-CPack's `CPACK_WIX_VERSION=4` selects its modern .NET WiX driver. It does not mean
-the installed WiX tool is version 4. The build checks for 7.0.1 and passes the
-official WiX 7 EULA acknowledgment required by that tool. Review the fee terms
-described in [licensing](licensing.md) before use.
+Add the tool directory to PATH or set `tools.wix` in the private profile. CPack uses its WiX .NET driver with `CPACK_WIX_VERSION=4`. See [licensing](licensing.md) for the WiX terms.
 
-`publish` builds local ZIP/MSI or DEB files. It never uploads a GitHub Release.
-Each completed configure/build/test/install stage writes a receipt binding the
-source bytes and selected profile. Tests also bind their executables and runtime
-libraries. A source or profile change requires repeating these stages before
-packaging. Failed stages invalidate prior receipts. ZIP and MSI payloads must
-match, and each package receives its own file inventory and SBOM.
-MSI installation requires elevation because it registers a machine service.
-Packages are unsigned unless a release explicitly supplies signing evidence.
+The `publish` stage produces local packages in the profile's `buildDir/packages/<timestamp>`. MSI installation needs elevation to register the machine service. The [GitHub release workflow](release.md) publishes packages after building and testing a version tag.
 
-## Tests
+## Test
 
-The core CTest suite uses temporary storage, dynamic ports, local HTTP/TLS
-fixtures and injected clocks. It does not require public search engines.
+CTest uses local deterministic fixtures for TLS, HTTP, settings, search providers and MCP. To check the frontend separately, use the Node pin in `.nvmrc`.
 
-For additional installed-binary tests, create an isolated Python environment
-and install `tests/requirements.lock` with `pip --require-hashes`. Then run:
+```bash
+cd web
+npm ci --ignore-scripts
+npm run lint
+npm run format:check
+npm run typecheck
+npm run test:ci
+npm run build
+```
+
+For installed binaries, install `tests/requirements.lock` in an isolated Python environment with `pip --require-hashes`, then run the SDK check.
 
 ```text
 python scripts/test_mcp_sdk.py --Executable <installed-binary> --Output <report.json>
-python scripts/soak.py --Executable <installed-binary> --Output <report.json>
 ```
 
-The soak default is 300 seconds (five minutes) per phase, cold then hot. `--Seconds 10` is a
-smoke test and cannot satisfy the full stability gate. It removes its temporary
-state and stops only child processes that it created.
+Add `--LiveProvider auto` to exercise actual public search sources. Keep those results separate from the deterministic suite.
 
-Windows CI also tests the final portable ZIP with a clean system PATH and runs
-the MSI install, failed-upgrade rollback, upgrade and uninstall checks on its
-disposable runner. Run `scripts/AcceptWindowsMsi.ps1` only in a clean disposable
-environment with elevated 64-bit PowerShell. It refuses pre-existing products,
-service state, installation/data directories or occupied ports. Local test
-reports may be written to an ignored working directory. They are not source
-files or release attachments.
-
-The low-version installer baseline is a test artifact built from the same source
-with `-DQCWS_VERSION=0.0.1`. It is not an earlier supported public release.
+CI tests the Windows ZIP and Ubuntu DEB against their installed executables. Release and manual CI additionally run the MSI and DEB installer lifecycle checks and Caddy acceptance. Use an elevated disposable Windows environment for `scripts/AcceptWindowsMsi.ps1`. The older installer in these tests is a fixture built from the same source at version 0.0.1.

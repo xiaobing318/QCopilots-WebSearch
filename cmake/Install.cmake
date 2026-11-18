@@ -23,6 +23,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   file(READ "${PROJECT_SOURCE_DIR}/config/runtime.json" _runtime)
   string(JSON _runtime SET "${_runtime}" clients "[{\"id\":\"local\",\"token_file\":\"client.token\"}]")
   string(JSON _runtime SET "${_runtime}" cache directory "\"/var/lib/qcopilots-websearch/cache\"")
+  string(JSON _runtime SET "${_runtime}" settings "{\"directory\":\"/var/lib/qcopilots-websearch\"}")
   file(WRITE "${PROJECT_BINARY_DIR}/debian/runtime.json" "${_runtime}\n")
   install(FILES "${PROJECT_BINARY_DIR}/debian/runtime.json" DESTINATION "etc/qcopilots-websearch"
     PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ)
@@ -32,11 +33,12 @@ else()
   install(TARGETS qcopilots-websearch RUNTIME DESTINATION bin)
   qt_generate_deploy_app_script(TARGET qcopilots-websearch OUTPUT_SCRIPT _deploy_script
     NO_TRANSLATIONS NO_COMPILER_RUNTIME
-    EXCLUDE_PLUGINS qsqlibase qsqlmimer qsqlmysql qsqloci qsqlodbc qsqlpsql)
+    EXCLUDE_PLUGINS qopensslbackend qsqlibase qsqlmimer qsqlmysql qsqloci qsqlodbc qsqlpsql)
   install(SCRIPT "${_deploy_script}")
 endif()
 install(DIRECTORY contracts/ DESTINATION "${_app_share}/contracts")
-install(FILES config/runtime.json config/runtime.schema.json DESTINATION "${_app_share}/config")
+install(FILES config/runtime.json config/runtime.schema.json config/settings.json
+  config/settings.schema.json config/secrets.schema.json DESTINATION "${_app_share}/config")
 install(FILES LICENSE README.md README.zh-CN.md DESTINATION "${_app_share}")
 install(DIRECTORY docs/ DESTINATION "${_app_share}/docs" FILES_MATCHING PATTERN "*.md")
 include("${PROJECT_SOURCE_DIR}/cmake/Licenses.cmake")

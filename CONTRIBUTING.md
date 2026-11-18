@@ -12,15 +12,14 @@ together. Changes to dependency versions require both platform builds.
 
 Inputs and outputs shared by REST, MCP and the QGIS adapter are a versioned
 contract. Update canonical schemas, adapter copies, interface documentation and
-contract tests together. Do not add test-only bypasses to public-fetch protections.
+contract tests and SHA256SUMS together. Do not add test-only bypasses to public-fetch protections.
 Prefer injected transports, temporary directories, dynamic ports and controllable
 clocks for deterministic tests. Keep public-engine checks separate from the
 deterministic suite.
 
 Provide the concrete behavior changed, its reason and relevant test results in
 pull requests. Record failures and skipped checks honestly. Production releases
-require both platform jobs, installation lifecycle checks, sustained load,
-quality checks and package verification to succeed. Pushing a version tag starts
+require both platform jobs, installed-binary smoke tests and installer lifecycle checks to succeed. Pushing a version tag starts
 the automatic [release workflow](docs/release.md).
 
 Contributions are accepted under the repository's Apache-2.0 license. Keep

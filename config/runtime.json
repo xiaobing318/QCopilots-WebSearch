@@ -22,15 +22,11 @@
       "token_env": "QCWS_CLIENT_TOKEN"
     }
   ],
-  "provider": {
-    "url": "http://127.0.0.1:8080/search",
-    "ca_file": ""
-  },
   "cache": {
     "directory": "../runtime/cache",
     "max_bytes": 268435456,
     "max_entries": 10000,
-    "search_ttl_seconds": 300,
+    "search_ttl_seconds": 1800,
     "page_ttl_seconds": 1800
   },
   "limits": {

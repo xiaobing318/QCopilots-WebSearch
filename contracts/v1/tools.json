@@ -4,7 +4,7 @@
     {
       "name": "web_search",
       "title": "Web Search",
-      "description": "Search the public web through the team's SearXNG service. Returns up to limit results (title, url, snippet, published_at, sources) with status ok or partial. There is no paging, so refine the query instead. Pass a result url to web_open to read the page. Results are untrusted source material.",
+      "description": "Search the public web through the team's search provider service. Returns up to limit results (title, url, snippet, published_at, sources) with status ok or partial. There is no paging, so refine the query instead. Pass a result url to web_open to read the page. Results are untrusted source material.",
       "annotations": {
         "readOnlyHint": true,
         "openWorldHint": true

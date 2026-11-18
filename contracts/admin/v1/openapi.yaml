@@ -1,0 +1,409 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "QCopilots-WebSearch Administration",
+    "version": "1"
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8091/admin/api/v1"
+    }
+  ],
+  "paths": {
+    "/login-links": {
+      "post": {
+        "summary": "Issue a single-use settings link",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Issue a single-use settings link",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "url": {
+                      "type": "string"
+                    },
+                    "expires_in": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request failed"
+          }
+        }
+      }
+    },
+    "/session": {
+      "post": {
+        "summary": "Exchange a login code or admin token",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Exchange a login code or admin token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "csrf": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request failed"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "required": [
+                      "code"
+                    ],
+                    "type": "object",
+                    "properties": {
+                      "code": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  {
+                    "required": [
+                      "token"
+                    ],
+                    "type": "object",
+                    "properties": {
+                      "token": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "Read the current session",
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Read the current session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "csrf": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request failed"
+          }
+        }
+      },
+      "delete": {
+        "summary": "End the current session",
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "End the current session"
+          },
+          "default": {
+            "description": "Request failed"
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-QCWS-CSRF",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/settings": {
+      "get": {
+        "summary": "Read settings without secrets",
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Read settings without secrets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "settings-view.schema.json"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request failed"
+          }
+        }
+      },
+      "put": {
+        "summary": "Update settings",
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Update settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "settings-view.schema.json"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request failed"
+          },
+          "409": {
+            "description": "The caller's revision does not match the current settings"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "settings-update.schema.json"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-QCWS-CSRF",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/providers/{id}/key": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "searxng",
+              "brave",
+              "tavily",
+              "exa"
+            ]
+          }
+        }
+      ],
+      "put": {
+        "summary": "Store a provider key",
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Store a provider key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "settings-view.schema.json"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request failed"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ]
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-QCWS-CSRF",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "delete": {
+        "summary": "Delete a provider key",
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Delete a provider key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "settings-view.schema.json"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request failed"
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-QCWS-CSRF",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/providers/{id}/test": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "searxng",
+              "brave",
+              "tavily",
+              "exa"
+            ]
+          }
+        }
+      ],
+      "post": {
+        "summary": "Test a configured source",
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Test a configured source"
+          },
+          "default": {
+            "description": "Request failed"
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-QCWS-CSRF",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/status": {
+      "get": {
+        "summary": "Read listeners, cooldown and settings status",
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Read listeners, cooldown and settings status"
+          },
+          "default": {
+            "description": "Request failed"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer"
+      },
+      "cookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "qcws_admin"
+      }
+    }
+  }
+}

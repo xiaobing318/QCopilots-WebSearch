@@ -22,8 +22,7 @@
         "git": "",
         "wix": "",
         "dotnet": "",
-        "visualStudio": "",
-        "perl": ""
+        "visualStudio": ""
       }
     },
     "ubuntu-x64": {
@@ -36,6 +35,59 @@
       "proxy": "",
       "jobs": 5,
       "cmakeArgs": [],
+      "packageGenerators": [
+        "DEB"
+      ],
+      "offline": false,
+      "tools": {
+        "cmake": "",
+        "ninja": "",
+        "git": "",
+        "wix": "",
+        "dotnet": "",
+        "visualStudio": ""
+      }
+    },
+    "ci-windows-x64": {
+      "platform": "windows-x64",
+      "qtRoot": ".cache/qt",
+      "buildDir": "build/ci-windows-x64",
+      "installDir": "install/ci-windows-x64",
+      "cacheDir": ".cache",
+      "buildType": "RelWithDebInfo",
+      "proxy": "",
+      "jobs": 2,
+      "cmakeArgs": [
+        "-DQCWS_BUILD_WEB=OFF",
+        "-DQCWS_WEB_DIST_DIR=${QCWS_WEB_DIST_DIR}"
+      ],
+      "packageGenerators": [
+        "ZIP",
+        "WIX"
+      ],
+      "offline": false,
+      "tools": {
+        "cmake": "",
+        "ninja": "",
+        "git": "",
+        "wix": "",
+        "dotnet": "",
+        "visualStudio": ""
+      }
+    },
+    "ci-ubuntu-x64": {
+      "platform": "ubuntu-x64",
+      "qtRoot": ".cache/qt",
+      "buildDir": "build/ci-ubuntu-x64",
+      "installDir": "install/ci-ubuntu-x64",
+      "cacheDir": ".cache",
+      "buildType": "RelWithDebInfo",
+      "proxy": "",
+      "jobs": 2,
+      "cmakeArgs": [
+        "-DQCWS_BUILD_WEB=OFF",
+        "-DQCWS_WEB_DIST_DIR=${QCWS_WEB_DIST_DIR}"
+      ],
       "packageGenerators": [
         "DEB"
       ],

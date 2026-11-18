@@ -36,22 +36,25 @@ if [ -e "$config_file" ] || [ -L "$config_file" ]; then
     chown root:"$account" "$config_file"
     chmod 0640 "$config_file"
 fi
-if [ -e "$token_file" ] || [ -L "$token_file" ]; then
-    [ -f "$token_file" ] && [ ! -L "$token_file" ] || fail "Credential is not a regular file."
-else
-    umask 077
-    token_tmp=$(mktemp "$config_dir/.client.token.XXXXXXXX")
-    trap 'test -z "${token_tmp:-}" || rm -f -- "$token_tmp"' 0
-    env -u LD_LIBRARY_PATH -u QT_PLUGIN_PATH -u QML2_IMPORT_PATH "$program" --GenerateToken >"$token_tmp"
-    [ -s "$token_tmp" ] || fail "Credential generation failed."
-    chown "$account:$account" "$token_tmp"
-    chmod 0600 "$token_tmp"
-    ln -T -- "$token_tmp" "$token_file"
-    rm -f -- "$token_tmp"
-    token_tmp=
-fi
-chown "$account:$account" "$token_file"
-chmod 0600 "$token_file"
+ensure_credential() (
+    path=$1
+    if [ -e "$path" ] || [ -L "$path" ]; then
+        [ -f "$path" ] && [ ! -L "$path" ] || fail "Credential is not a regular file."
+    else
+        umask 077
+        token_tmp=$(mktemp "$config_dir/.${path##*/}.XXXXXXXX")
+        trap 'rm -f -- "$token_tmp"' 0
+        env -u LD_LIBRARY_PATH -u QT_PLUGIN_PATH -u QML2_IMPORT_PATH "$program" --GenerateToken >"$token_tmp"
+        [ -s "$token_tmp" ] || fail "Credential generation failed."
+        chown "$account:$account" "$token_tmp"
+        chmod 0600 "$token_tmp"
+        ln -T -- "$token_tmp" "$path"
+    fi
+    chown "$account:$account" "$path"
+    chmod 0600 "$path"
+)
+ensure_credential "$token_file"
+ensure_credential "$config_dir/admin.token"
 deb-systemd-helper unmask "$unit" >/dev/null || true
 if deb-systemd-helper --quiet was-enabled "$unit"; then
     deb-systemd-helper enable "$unit" >/dev/null || true

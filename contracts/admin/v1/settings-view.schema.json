@@ -1,0 +1,165 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "tools": {
+      "type": "object",
+      "properties": {
+        "search": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "enabled"
+          ],
+          "additionalProperties": false
+        },
+        "open": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "enabled"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "search",
+        "open"
+      ],
+      "additionalProperties": false
+    },
+    "search_without_asking": {
+      "type": "boolean"
+    },
+    "search": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "searxng",
+            "brave",
+            "tavily",
+            "exa"
+          ]
+        },
+        "searxng": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "engines": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              },
+              "minItems": 1,
+              "maxItems": 20,
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "url",
+            "engines"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "provider",
+        "searxng"
+      ],
+      "additionalProperties": false
+    },
+    "revision": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{16}$"
+    },
+    "providers": {
+      "type": "object",
+      "properties": {
+        "searxng": {
+          "type": "object",
+          "properties": {
+            "key_set": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "key_set"
+          ],
+          "additionalProperties": false
+        },
+        "brave": {
+          "type": "object",
+          "properties": {
+            "key_set": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "key_set"
+          ],
+          "additionalProperties": false
+        },
+        "tavily": {
+          "type": "object",
+          "properties": {
+            "key_set": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "key_set"
+          ],
+          "additionalProperties": false
+        },
+        "exa": {
+          "type": "object",
+          "properties": {
+            "key_set": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "key_set"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "searxng",
+        "brave",
+        "tavily",
+        "exa"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema_version",
+    "tools",
+    "search_without_asking",
+    "search",
+    "revision",
+    "providers"
+  ],
+  "additionalProperties": false
+}

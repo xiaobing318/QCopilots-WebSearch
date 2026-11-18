@@ -16,7 +16,7 @@
     },
     "language": {
       "type": "string",
-      "description": "Language hint. Accepts all or a SearXNG language code such as en or zh-CN. all avoids a language preference.",
+      "description": "Language hint. Accepts all or a the search provider language code such as en or zh-CN. all avoids a language preference.",
       "default": "all",
       "pattern": "^(all|[A-Za-z]{2,3}(-[A-Za-z]{2,4})?)$"
     },

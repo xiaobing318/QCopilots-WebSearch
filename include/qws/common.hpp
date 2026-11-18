@@ -42,12 +42,14 @@ inline Json parseBoundedJson(std::string_view input) {
 
 class Error final : public std::runtime_error {
 public:
-  Error(std::string value, std::string safeMessage, int httpStatus = 400, bool canRetry = false)
+  Error(std::string value, std::string safeMessage, int httpStatus = 400, bool canRetry = false,
+        int retryAfter = 0)
       : std::runtime_error(std::move(safeMessage)), code(std::move(value)), status(httpStatus),
-        retryable(canRetry) {}
+        retryable(canRetry), retryAfterSeconds(retryAfter) {}
   const std::string code;
   const int status;
   const bool retryable;
+  const int retryAfterSeconds;
 };
 
 struct CancelToken {
@@ -59,6 +61,9 @@ struct CancelToken {
 };
 
 inline Json errorPayload(const Error &error) {
-  return {{"error", {{"code", error.code}, {"message", error.what()}, {"retryable", error.retryable}}}};
+  Json details = {{"code", error.code}, {"message", error.what()}, {"retryable", error.retryable}};
+  if (error.retryAfterSeconds > 0)
+    details["retry_after_seconds"] = error.retryAfterSeconds;
+  return {{"error", std::move(details)}};
 }
 } // namespace qws

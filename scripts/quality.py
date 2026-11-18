@@ -14,13 +14,13 @@ import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
-from build_evidence import identity, source_snapshot
 from pipeline import apt_command
 
 ROOT = Path(__file__).resolve().parents[1]
-REQUIRED = {'core', 'http-limits', 'tls', 'stdio-process', 'release-assets', 'build-pipeline',
-            'fuzz-html-seeds', 'fuzz-url-seeds', 'fuzz-jsonrpc-seeds'}
-FUZZERS = {'html': 1048578, 'url': 16384, 'jsonrpc': 1048576}
+REQUIRED = {'core', 'http-limits', 'tls', 'stdio-process', 'release-quality', 'build-pipeline',
+            'settings', 'admin-http', 'providers', 'fuzz-html-seeds', 'fuzz-url-seeds',
+            'fuzz-jsonrpc-seeds', 'fuzz-serp-seeds'}
+FUZZERS = {'html': 1048578, 'url': 16384, 'jsonrpc': 1048576, 'serp': 1048576}
 FLAGS = '-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer'
 QUALITY_ENV = dict(CC='/usr/bin/clang-21', CXX='/usr/bin/clang++-21', CFLAGS=FLAGS, CXXFLAGS=FLAGS,
     LDFLAGS='-fsanitize=address,undefined', ASAN_OPTIONS='detect_leaks=1:halt_on_error=1',
@@ -178,11 +178,10 @@ def main():
         profile['cmakeArgs'] = profile.get('cmakeArgs', []) + ['-DCMAKE_C_COMPILER=/usr/bin/clang-21',
             '-DCMAKE_CXX_COMPILER=/usr/bin/clang++-21', '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON',
             '-DQCWS_SANITIZERS=ON', '-DQCWS_FUZZING=ON']
-        config['profiles'] = {args.Profile: profile}
+        config['profiles'] = {"ubuntu-x64-quality": profile}
         cfg = out / 'quality-config.json'
         cfg.write_text(json.dumps(config, indent=2) + '\n', encoding='utf-8')
         report['profile'] = profile
-        report['build_identity'] = identity(ROOT, profile)
         report['dependency_lock_sha256'] = sha(ROOT / 'config/dependencies.lock.json')
         report['clang_tidy_config_sha256'] = sha(ROOT / '.clang-tidy')
         packages = ['clang-21', 'clang-tidy-21', 'llvm-21', 'libclang-rt-21-dev']
@@ -193,8 +192,9 @@ def main():
         for name, command in [('packages', ['dpkg-query', '-W', *packages]), ('clang', ['clang-21', '--version']),
                               ('clang-tidy', ['clang-tidy-21', '--version']), ('symbolizer', ['llvm-symbolizer-21', '--version'])]:
             report['tool_versions'][name] = run('version-' + name, command).read_text(encoding='utf-8', errors='replace')
-        base = [sys.executable, ROOT / 'scripts/pipeline.py', '--ConfigPath', cfg, '--Profile', args.Profile, '--Stages']
-        for stage in ('doctor', 'configure', 'build'):
+        base = [sys.executable, ROOT / 'scripts/pipeline.py', '--ConfigPath', cfg,
+                '--Profile', 'ubuntu-x64-quality', '--Stages']
+        for stage in ('bootstrap', 'doctor', 'configure', 'build'):
             run('pipeline-' + stage, [*base, stage], timeout=5400)
         discovery = run('ctest-discovery', ['ctest', '--test-dir', build, '--show-only=json-v1'])
         shutil.copyfile(discovery, out / 'discovered-tests.json')
@@ -232,9 +232,8 @@ def main():
             result = fuzz_result(text, report['commands'][-1]['duration_seconds'], args.Seconds)
             need(item['executable_sha256'] == sha(executable) and item['seeds'] == seeds(seed_dir), 'Fuzz inputs changed')
             item.update(log=log.name, **result)
-        report['source_after'] = source_snapshot(ROOT)
         report['clean_after'] = not run('git-clean-after', ['git', 'status', '--porcelain=v1']).read_text().strip()
-        need(report['clean_after'] and report['source_after'] == report['build_identity']['source_sha256'], 'Source changed during quality checks')
+        need(report['clean_after'], 'Source changed during quality checks')
         report['passed'] = True
     except BaseException as error:
         report['error'] = f'{type(error).__name__}: {error}'

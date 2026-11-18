@@ -1,0 +1,13 @@
+{
+  "invalid_argument": 400,
+  "unauthorized": 401,
+  "forbidden": 403,
+  "not_found": 404,
+  "revision_conflict": 409,
+  "payload_too_large": 413,
+  "rate_limited": 429,
+  "internal_error": 500,
+  "provider_unavailable": 502,
+  "provider_not_configured": 503,
+  "timeout": 504
+}

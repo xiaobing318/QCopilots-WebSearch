@@ -1,0 +1,98 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 28,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-x64",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "QCWS_BUILD_TESTING": true
+      }
+    },
+    {
+      "name": "ubuntu-x64",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "QCWS_BUILD_TESTING": true
+      }
+    },
+    {
+      "name": "ubuntu-x64-quality",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "QCWS_BUILD_TESTING": true,
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "QCWS_SANITIZERS": true,
+        "QCWS_FUZZING": true
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-x64",
+      "configurePreset": "windows-x64"
+    },
+    {
+      "name": "ubuntu-x64",
+      "configurePreset": "ubuntu-x64"
+    },
+    {
+      "name": "ubuntu-x64-quality",
+      "configurePreset": "ubuntu-x64-quality"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-x64",
+      "configurePreset": "windows-x64"
+    },
+    {
+      "name": "ubuntu-x64",
+      "configurePreset": "ubuntu-x64"
+    },
+    {
+      "name": "ubuntu-x64-quality",
+      "configurePreset": "ubuntu-x64-quality"
+    }
+  ],
+  "packagePresets": [
+    {
+      "name": "windows-x64",
+      "configurePreset": "windows-x64"
+    },
+    {
+      "name": "ubuntu-x64",
+      "configurePreset": "ubuntu-x64"
+    },
+    {
+      "name": "ubuntu-x64-quality",
+      "configurePreset": "ubuntu-x64-quality"
+    }
+  ]
+}

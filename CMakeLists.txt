@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-set(QCWS_VERSION "0.1.4" CACHE STRING "Three-part release or isolated installer-test version")
+set(QCWS_VERSION "0.2.0" CACHE STRING "Three-part release or isolated installer-test version")
 project(QCopilotsWebSearch VERSION ${QCWS_VERSION} LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,9 +19,18 @@ if(QCWS_FUZZING AND (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CMAKE_CXX_COM
   message(FATAL_ERROR "Fuzzing requires Linux, Clang and QCWS_SANITIZERS")
 endif()
 include(cmake/Dependencies.cmake)
-add_library(qcws_core STATIC src/network.cpp src/cache.cpp src/config.cpp src/html.cpp src/service.cpp src/protocol.cpp src/server.cpp src/stdio_output.cpp)
+add_library(qcws_core STATIC src/core/network.cpp src/core/cache.cpp src/core/config.cpp src/core/html.cpp src/core/service.cpp src/server/protocol.cpp src/server/server.cpp src/server/stdio_output.cpp
+  src/core/settings.cpp src/server/admin_api.cpp src/server/admin_sessions.cpp
+  src/server/admin_client.cpp src/server/static_assets.cpp
+  src/providers/registry.cpp src/providers/searxng.cpp src/providers/auto_provider.cpp
+  src/providers/pacing.cpp src/providers/duckduckgo.cpp src/providers/bing.cpp
+  src/providers/serp_parsers.cpp src/providers/brave.cpp src/providers/tavily.cpp
+  src/providers/exa.cpp src/providers/locale_map.cpp)
+include(cmake/WebUi.cmake)
 set(_schemas config/runtime.json config/runtime.schema.json contracts/v1/web_search.schema.json contracts/v1/web_open.schema.json
-  contracts/v1/web_find.schema.json contracts/v1/web_search_status.schema.json contracts/v1/tools.json)
+  contracts/v1/web_find.schema.json contracts/v1/web_search_status.schema.json contracts/v1/tools.json
+  config/settings.json config/settings.schema.json config/secrets.schema.json
+  contracts/admin/v1/settings-update.schema.json contracts/admin/v1/settings-view.schema.json)
 foreach(schema IN LISTS _schemas)
   get_filename_component(alias "${schema}" NAME)
   set_source_files_properties("${schema}" PROPERTIES QT_RESOURCE_ALIAS "${alias}")
@@ -38,9 +47,9 @@ if(UNIX)
   set_target_properties(qcopilots-websearch PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
 endif()
 if(WIN32)
-  target_sources(qcws_core PRIVATE src/windows.cpp)
+  target_sources(qcws_core PRIVATE src/platform/windows.cpp)
   target_link_libraries(qcws_core PUBLIC advapi32)
-  target_link_libraries(qcopilots-websearch PRIVATE advapi32)
+  target_link_libraries(qcopilots-websearch PRIVATE advapi32 shell32)
   set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION bin)
   include(InstallRequiredSystemLibraries)
 endif()
@@ -55,7 +64,11 @@ endif()
 if(QCWS_FUZZING)
   target_compile_options(qcws_core PRIVATE -fsanitize=fuzzer-no-link)
   target_compile_options(lexbor_static PRIVATE -fsanitize=fuzzer-no-link)
-  foreach(kind html url jsonrpc)
+  set(_fuzz_targets html url jsonrpc)
+  if(EXISTS "${PROJECT_SOURCE_DIR}/tests/fuzz/serp.cpp")
+    list(APPEND _fuzz_targets serp)
+  endif()
+  foreach(kind IN LISTS _fuzz_targets)
     add_executable(qcws_${kind}_fuzz tests/fuzz/${kind}.cpp tests/fuzz/qt_init.cpp)
     target_link_libraries(qcws_${kind}_fuzz PRIVATE qcws_core)
     target_compile_options(qcws_${kind}_fuzz PRIVATE -fsanitize=fuzzer-no-link)
@@ -72,63 +85,5 @@ if(QCWS_FUZZING)
 endif()
 if(QCWS_BUILD_TESTING)
   enable_testing()
-  add_executable(qcws_tests tests/test_core.cpp)
-  target_link_libraries(qcws_tests PRIVATE qcws_core httplib::httplib ZLIB::ZLIB)
-  if(MSVC)
-    target_compile_options(qcws_tests PRIVATE /utf-8)
-  endif()
-  add_test(NAME core COMMAND qcws_tests)
-  # The disk-backed cache pressure suite performs durable commits. Allow slower
-  # hosted disks without changing the per-operation deadlines asserted in tests.
-  set_tests_properties(core PROPERTIES TIMEOUT 180)
-  add_executable(qcws_http_tests tests/test_http_limits.cpp)
-  target_link_libraries(qcws_http_tests PRIVATE qcws_core httplib::httplib)
-  add_test(NAME http-limits COMMAND qcws_http_tests "${PROJECT_SOURCE_DIR}/config/runtime.json")
-  set_tests_properties(http-limits PROPERTIES TIMEOUT 45)
-  find_package(Python3 3.12 REQUIRED COMPONENTS Interpreter)
-  find_program(QCWS_TEST_PERL NAMES perl REQUIRED)
-  add_test(NAME build-pipeline COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_pipeline.py"
-    --Perl "${QCWS_TEST_PERL}")
-  set_tests_properties(build-pipeline PROPERTIES TIMEOUT 30)
-  add_test(NAME release-assets COMMAND "${Python3_EXECUTABLE}" -m unittest discover
-    -s "${CMAKE_CURRENT_SOURCE_DIR}/tests" -p "test_release*.py")
-  set_tests_properties(release-assets PROPERTIES TIMEOUT 30)
-  find_package(Git REQUIRED)
-  get_filename_component(_git_bin "${GIT_EXECUTABLE}" DIRECTORY)
-  find_program(QCWS_TEST_OPENSSL NAMES openssl HINTS "${_git_bin}/../usr/bin" REQUIRED)
-  add_test(NAME tls COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/tls_fixture.py"
-    --OpenSSL "${QCWS_TEST_OPENSSL}" --Probe "$<TARGET_FILE:qcws_tests>")
-  set_tests_properties(tls PROPERTIES TIMEOUT 90)
-  add_executable(qcws_process_tests tests/test_process.cpp)
-  target_link_libraries(qcws_process_tests PRIVATE qcws_core)
-  add_test(NAME stdio-process COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_stdio_transport.py"
-    --CppTests "$<TARGET_FILE:qcws_process_tests>" --Executable "$<TARGET_FILE:qcopilots-websearch>"
-    --Template "${PROJECT_SOURCE_DIR}/config/runtime.json")
-  set_tests_properties(stdio-process PROPERTIES TIMEOUT 90)
-  if(WIN32)
-    add_executable(qcws_windows_security_tests tests/test_windows_security.cpp)
-    target_link_libraries(qcws_windows_security_tests PRIVATE qcws_core advapi32)
-    target_compile_options(qcws_windows_security_tests PRIVATE /W4 /utf-8 /permissive-)
-    add_test(NAME windows-security COMMAND qcws_windows_security_tests)
-    set_tests_properties(windows-security PROPERTIES TIMEOUT 45)
-    # Give every registered test Qt's DLL directory, so direct ctest runs work
-    # without the build pipeline's PATH.
-    get_property(_qcws_test_names DIRECTORY PROPERTY TESTS)
-    set_property(TEST ${_qcws_test_names} APPEND PROPERTY ENVIRONMENT_MODIFICATION
-      "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
-  endif()
-endif()
-if(WIN32)
-  foreach(_executable qcopilots-websearch qcws_tests qcws_http_tests qcws_process_tests qcws_windows_security_tests)
-    if(TARGET ${_executable})
-      target_link_libraries(${_executable} PRIVATE OpenSSL::applink)
-      add_custom_command(TARGET ${_executable} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-          "${QCWS_OPENSSL_PREFIX}/bin/libssl-3-x64.dll"
-          "${QCWS_OPENSSL_PREFIX}/bin/libcrypto-3-x64.dll"
-          "$<TARGET_FILE_DIR:${_executable}>")
-    endif()
-  endforeach()
-  install(FILES "${QCWS_OPENSSL_PREFIX}/bin/libssl-3-x64.dll"
-    "${QCWS_OPENSSL_PREFIX}/bin/libcrypto-3-x64.dll" DESTINATION bin)
+  add_subdirectory(tests)
 endif()

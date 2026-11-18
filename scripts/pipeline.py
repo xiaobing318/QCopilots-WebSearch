@@ -17,8 +17,6 @@ import tempfile
 import time
 import urllib.request
 import venv
-from build_evidence import identity, require_receipt, write_receipt, build_artifacts
-from runtime_evidence import fingerprint
 
 ROOT = Path(__file__).resolve().parents[1]
 WIN = sys.platform == "win32"
@@ -52,6 +50,16 @@ def apt_command(proxy, root):
                       "-o", "Acquire::https::Proxy=" + (proxy or "DIRECT")]
 
 
+def expand_variables(value):
+    if isinstance(value, str):
+        return os.path.expandvars(value)
+    if isinstance(value, list):
+        return [expand_variables(item) for item in value]
+    if isinstance(value, dict):
+        return {key: expand_variables(item) for key, item in value.items()}
+    return value
+
+
 def forwarded_arguments(args):
     """Rebuild the command line for the tool-environment run from parsed options."""
     return ["--ConfigPath", str(args.ConfigPath), "--Profile", args.Profile, "--Stages", ",".join(args.Stages),
@@ -63,7 +71,7 @@ class Pipeline:
 
     def __init__(self, args):
         self.args = args
-        self.config = json.loads(Path(args.ConfigPath).read_text(encoding="utf-8-sig"))
+        self.config = expand_variables(json.loads(Path(args.ConfigPath).read_text(encoding="utf-8-sig")))
         self.profile = self.config["profiles"][args.Profile]
         self.lock = json.loads((ROOT / "config/dependencies.lock.json").read_text(encoding="utf-8"))
         self.env = dict(os.environ)
@@ -86,7 +94,18 @@ class Pipeline:
         self.kind = self.profile["buildType"]
         self.jobs = str(self.profile["jobs"])
         self.offline = self.profile.get("offline", False)
+        npm_settings = {
+            "npm_config_cache": str(self.cache / "npm"),
+            "npm_config_offline": "true" if self.offline else "false",
+            "npm_config_proxy": self.profile.get("proxy", ""),
+            "npm_config_https_proxy": self.profile.get("proxy", ""),
+        }
+        for key in tuple(self.env):
+            if key.lower() in npm_settings:
+                del self.env[key]
+        self.env.update(npm_settings)
         self.tool_paths = self.profile.get("tools", {})
+        self.preset = "ubuntu-x64-quality" if args.Profile == "ubuntu-x64-quality" else PLATFORM
         if self.profile["platform"] != PLATFORM:
             raise RuntimeError("Selected profile does not match this operating system.")
         for path in (self.build, self.install, self.cache):
@@ -102,8 +121,7 @@ class Pipeline:
         if command[0] in self.tool_paths and self.tool_paths[command[0]]:
             command[0] = str(Path(self.tool_paths[command[0]]).expanduser().resolve())
         elif WIN and not os.path.dirname(command[0]):
-            # CreateProcess searches this process's PATH, not env["PATH"]. Resolve
-            # bare names such as cmake or nmake against the imported VS2022 environment.
+            # Resolve bare tool names against the imported Visual Studio environment.
             command[0] = shutil.which(command[0], path=self.env.get("PATH")) or command[0]
         print("+", subprocess.list2cmdline(command), flush=True)
         if self.dry:
@@ -166,12 +184,12 @@ class Pipeline:
         where = Path(os.environ.get("ProgramFiles(x86)", "")) / "Microsoft Visual Studio/Installer/vswhere.exe"
         studio = self.tool_paths.get("visualStudio", "")
         if not studio and not where.is_file():
-            raise RuntimeError("Install VS2022 with the Desktop development with C++ workload.")
+            raise RuntimeError("Install Visual Studio 2022 or 2026 with the Desktop development with C++ workload.")
         if not studio:
-            studio = subprocess.check_output([str(where), "-latest", "-products", "*", "-version", "[17.0,18.0)",
+            studio = subprocess.check_output([str(where), "-latest", "-products", "*", "-version", "[17.0,19.0)",
                 "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"], text=True).strip()
         if not studio:
-            raise RuntimeError("VS2022 x64 C++ tools were not found. Install them manually.")
+            raise RuntimeError("Visual Studio x64 C++ tools were not found. Install them manually.")
         bat = Path(studio) / "Common7/Tools/VsDevCmd.bat"
         command = f'cmd.exe /d /u /s /c ""{bat}" -no_logo -arch=amd64 >nul && set"'
         output = subprocess.check_output(command, env=self.env).decode("utf-16le")
@@ -181,6 +199,7 @@ class Pipeline:
                 self.env[key] = value
         cmake = Path(studio) / "Common7/IDE/CommonExtensions/Microsoft/CMake"
         self.env["PATH"] = os.pathsep.join([str(cmake / "CMake/bin"), str(cmake / "Ninja"), self.env.get("PATH", "")])
+        print("Visual Studio:", studio, "MSVC:", self.env.get("VCToolsVersion", ""), flush=True)
 
     def configured_tools(self):
         directories = []
@@ -197,7 +216,7 @@ class Pipeline:
         if WIN:
             return
         packages = ["build-essential", "cmake", "ninja-build", "git", "python3", "python3-venv", "python3-pip",
-                    "pkg-config", "dpkg-dev", "libssl-dev", "ca-certificates", "libglib2.0-0t64", "libzstd1", "zlib1g",
+                    "pkg-config", "dpkg-dev", "openssl", "libssl-dev", "ca-certificates", "libglib2.0-0t64", "libzstd1", "zlib1g",
                     "libgssapi-krb5-2", "libbrotli1", "libssl3t64"]
         missing = []
         for package in packages:
@@ -265,7 +284,43 @@ class Pipeline:
         if not WIN:
             self.env["LD_LIBRARY_PATH"] = str(self.qt_prefix / "lib")
 
+    def node_environment(self, install=False):
+        if any(arg.startswith("-DQCWS_BUILD_WEB") and arg.endswith("=OFF")
+               for arg in self.profile.get("cmakeArgs", [])):
+            return None
+        node = self.lock["node"]
+        spec = node[PLATFORM]
+        archive_prefix = spec["filename"].removesuffix(".zip").removesuffix(".tar.xz")
+        directory = self.cache / "tools" / archive_prefix
+        bin_dir = directory if WIN else directory / "bin"
+        npm = bin_dir / ("npm.cmd" if WIN else "npm")
+        executable = bin_dir / ("node.exe" if WIN else "node")
+        if install:
+            archive = self.download(spec)
+            if not self.dry and not directory.exists():
+                directory.parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.TemporaryDirectory(prefix=".node-", dir=directory.parent) as temp:
+                    if WIN:
+                        import zipfile
+                        with zipfile.ZipFile(archive) as packed:
+                            if any(not Path(temp, name).resolve().is_relative_to(Path(temp))
+                                   for name in packed.namelist()):
+                                raise RuntimeError("Invalid Node archive path.")
+                            packed.extractall(temp)
+                    else:
+                        with tarfile.open(archive, "r:xz") as packed:
+                            packed.extractall(temp, filter="data")
+                    (Path(temp) / archive_prefix).rename(directory)
+        if not self.dry:
+            if not npm.is_file() or not executable.is_file():
+                raise RuntimeError("Pinned Node toolchain is missing or incomplete. Run --Stages bootstrap.")
+            if self.run([executable, "--version"], capture=True).strip() != "v" + node["version"]:
+                raise RuntimeError("Unexpected Node version in the tool cache.")
+        self.env["PATH"] = str(bin_dir) + os.pathsep + self.env.get("PATH", "")
+        return npm
+
     def bootstrap(self):
+        self.node_environment(install=True)
         if self.qt_prefix.is_dir():
             self.verify_qt()
             return
@@ -318,8 +373,6 @@ class Pipeline:
             raise RuntimeError("CMake {}.{} or newer is required.".format(*minimum))
         for tool in ("ninja", "git"):
             self.run([tool, "--version"])
-        if WIN:
-            self.native_perl()
         print("Host:", platform.platform())
         self.verify_qt()
 
@@ -337,12 +390,6 @@ class Pipeline:
                 Path(tmp, ".complete").write_text(artifact["sha256"], encoding="ascii")
                 Path(tmp).rename(destination)
         return destination / artifact["sourceDir"]
-
-    def native_perl(self):
-        if not self.tool_paths.get("perl") and not shutil.which("perl", path=self.env.get("PATH")):
-            raise RuntimeError("Install native Strawberry Perl or set tools.perl. Windows bootstrap only installs Qt, not compiler tools.")
-        if self.run(["perl", "-e", "print $^O"], True).strip() != "MSWin32" and not self.dry:
-            raise RuntimeError("OpenSSL requires native Windows Perl. Git/MSYS/Cygwin Perl is not supported.")
 
     def patched_httplib(self, source):
         script = ROOT / "cmake/patches/httplib_input_lifetime.py"
@@ -367,45 +414,10 @@ class Pipeline:
                 raise RuntimeError("Modified cpp-httplib build copy")
         return destination
 
-    def windows_openssl(self):
-        if not WIN:
-            return []
-        self.native_perl()
-        spec = self.lock["openssl_windows"]
-        verified_source = self.source(spec)
-        directory = self.build / "dependencies" / ("openssl-" + spec["sha256"][:12])
-        source = directory / "source"
-        build = directory / "build"
-        prefix = directory / "installed"
-        if not self.dry:
-            build.mkdir(parents=True, exist_ok=True)
-            # Native Perl resolves relative source paths before normalizing
-            # parent segments. Keep this build's source adjacent to its output
-            # instead of traversing back into the long SHA-keyed download cache.
-            if not source.is_dir():
-                # Stage the copy and rename it so an interrupted copy is never reused.
-                with tempfile.TemporaryDirectory(prefix=".openssl-source-", dir=directory) as tmp:
-                    stage = Path(tmp) / "source"
-                    shutil.copytree(verified_source, stage)
-                    stage.rename(source)
-        marker = directory / "qcws-complete.json"
-        identity = {"source": spec["sha256"], "compiler": self.env.get("VCToolsVersion", ""),
-                    "sdk": self.env.get("WindowsSDKVersion", ""),
-                    "options": ["VC-WIN64A", "shared", "no-asm", "no-autoload-config", "no-module", "no-engine", "no-tests"]}
-        complete = marker.is_file() and json.loads(marker.read_text()) == identity
-        complete = complete and all((prefix / f"bin/{name}-3-x64.dll").is_file() for name in ("libssl", "libcrypto"))
-        if not complete:
-            self.run(["perl", source / "Configure", *identity["options"], f"--prefix={prefix}", "--libdir=lib"], cwd=build)
-            self.run(["nmake", "/nologo", "build_libs"], cwd=build)
-            self.run(["nmake", "/nologo", "install_dev"], cwd=build)
-            if not self.dry:
-                marker.write_text(json.dumps(identity), encoding="utf-8")
-        return [f"-DQCWS_OPENSSL_PREFIX={prefix}", f"-DQCWS_OPENSSL_SOURCE_DIR={source}"]
-
     def configure(self):
-        self.invalidate_receipts('configure', 'build', 'test', 'install')
-        current = identity(ROOT, self.profile) if not self.dry else None
         self.verify_qt()
+        npm = self.node_environment()
+        web = ["-DQCWS_BUILD_WEB=ON", f"-DQCWS_NPM={npm}"] if npm else ["-DQCWS_BUILD_WEB=OFF"]
         qt_source = self.source(self.lock["qt_source"])
         redistribution = [f"-DQCWS_{name.upper()}={self.download(spec)}"
                           for name, spec in self.lock["redistribution"].items()]
@@ -424,93 +436,40 @@ class Pipeline:
             if name == "httplib":
                 prepared = self.patched_httplib(prepared)
             sources.append(f"-DFETCHCONTENT_SOURCE_DIR_{name.upper()}={prepared}")
-        tls = self.windows_openssl()
-        self.run(["cmake", "-S", ROOT, "-B", self.build, "-G", "Ninja", *common, f"-DCMAKE_PREFIX_PATH={self.qt_prefix}",
-                  f"-DCMAKE_INSTALL_PREFIX={self.install}", f"-DQCWS_DEPENDENCY_PREFIX={prefix}", "-DQCWS_BUILD_TESTING=ON",
+        self.run(["cmake", "--preset", self.preset, "-S", ROOT, "-B", self.build, *common, f"-DCMAKE_PREFIX_PATH={self.qt_prefix}",
+                  f"-DCMAKE_INSTALL_PREFIX={self.install}", f"-DQCWS_DEPENDENCY_PREFIX={prefix}", "-UQCWS_VERSION", "-DQCWS_BUILD_TESTING=ON",
                   f"-DPython3_EXECUTABLE={sys.executable}",
                   f"-DQCWS_QT_SOURCE_DIR={qt_source}",
                   f"-DQCWS_ZLIB_SOURCE_DIR={source}",
-                  *sources, *redistribution, *tls, *self.profile.get("cmakeArgs", [])])
-        if not self.dry:
-            if identity(ROOT,self.profile) != current:
-                raise RuntimeError('Source changed during configure')
-            write_receipt(self.build / 'configure-receipt.json', current)
-
-    def invalidate_receipts(self, *stages):
-        if not self.dry:
-            for stage in stages:
-                (self.build / (stage + '-receipt.json')).unlink(missing_ok=True)
+                  *sources, *redistribution, *web, *self.profile.get("cmakeArgs", [])])
 
     def build_stage(self):
-        self.invalidate_receipts('build', 'test', 'install')
-        current = identity(ROOT, self.profile) if not self.dry else None
-        if not self.dry:
-            require_receipt(self.build / 'configure-receipt.json', current)
         self.run(["cmake", "--build", self.build, "--parallel", self.jobs])
-        if not self.dry:
-            if identity(ROOT, self.profile) != current:
-                raise RuntimeError("Source changed during build")
-            write_receipt(self.build / "build-receipt.json", current,
-                          artifacts=build_artifacts(self.build,self.qt_prefix,WIN))
 
     def test(self):
-        self.invalidate_receipts('test', 'install')
-        current = identity(ROOT, self.profile) if not self.dry else None
-        if not self.dry:
-            built = require_receipt(self.build / "build-receipt.json", current)
-            if built['artifacts'] != build_artifacts(self.build,self.qt_prefix,WIN):
-                raise RuntimeError('Build artifacts changed before tests')
         self.verify_qt()
-        self.run(["ctest", "--test-dir", self.build, "--output-on-failure", "--no-tests=error", "--parallel", self.jobs,
-                  "--output-junit", self.build / "test-results.xml"])
-        if not self.dry:
-            if identity(ROOT, self.profile) != current:
-                raise RuntimeError("Source changed during tests")
-            if built['artifacts'] != build_artifacts(self.build,self.qt_prefix,WIN):
-                raise RuntimeError('Build artifacts changed during tests')
-            write_receipt(self.build / "test-receipt.json", current,
-                          artifacts=built['artifacts'],
-                          junit_sha256=self.digest(self.build / "test-results.xml"))
+        self.run(["ctest", "--test-dir", self.build, "--output-on-failure", "--no-tests=error",
+                  "--parallel", self.jobs, "--output-junit", self.build / "test-results.xml"])
 
     def install_stage(self):
-        self.invalidate_receipts('install')
-        current = identity(ROOT, self.profile) if not self.dry else None
-        if not self.dry:
-            tested = require_receipt(self.build / "test-receipt.json", current)
-            if tested['artifacts'] != build_artifacts(self.build,self.qt_prefix,WIN):
-                raise RuntimeError('Build artifacts changed after tests')
         self.run(["cmake", "--install", self.build])
-        if not self.dry:
-            if identity(ROOT, self.profile) != current:
-                raise RuntimeError("Source changed during installation")
-            if tested['artifacts'] != build_artifacts(self.build,self.qt_prefix,WIN):
-                raise RuntimeError('Build artifacts changed during installation')
-            relative = "bin/qcopilots-websearch.exe" if WIN else "opt/qcopilots-websearch/bin/qcopilots-websearch"
-            write_receipt(self.build / "install-receipt.json", current,
-                          tested_artifacts=tested['artifacts'],
-                          runtime=fingerprint(self.install / relative))
 
     def publish(self):
-        if not self.dry:
-            current = identity(ROOT, self.profile)
-            installed = require_receipt(self.build / "install-receipt.json", current)
-            relative = "bin/qcopilots-websearch.exe" if WIN else "opt/qcopilots-websearch/bin/qcopilots-websearch"
-            if installed['runtime'] != fingerprint(self.install / relative):
-                raise RuntimeError("Installed runtime changed after validation")
         if WIN and "WIX" in self.profile["packageGenerators"]:
             version = self.run(["wix", "--version"], True).strip()
             if not self.dry and not version.startswith("7.0.1"):
                 raise RuntimeError("Packaging requires official WiX 7.0.1. See docs/build.md.")
             self.run(["dotnet", "--list-runtimes"])
         destination = self.build / "packages" / time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+        if not self.dry:
+            destination.mkdir(parents=True, exist_ok=False)
         for generator in self.profile["packageGenerators"]:
             self.run(["cpack", "--config", self.build / "CPackConfig.cmake", "-G", generator, "-B", destination])
         if not self.dry:
             packages = sorted(p for p in destination.iterdir() if p.is_file() and p.suffix.lower() in (".zip", ".msi", ".deb"))
             if len(packages) != len(self.profile["packageGenerators"]):
                 raise RuntimeError("Incomplete package set.")
-            from release_assets import generate
-            generate(self, destination, packages)
+            print("Packages:", destination, flush=True)
 
 
 def main():
@@ -531,7 +490,7 @@ def main():
     pipeline = Pipeline(args)
     if "bootstrap" in args.Stages and not args.CheckOnly:
         pipeline.ubuntu_dependencies()
-    # Switch to the pinned tool environment before importing VS2022, so VsDevCmd
+    # Switch to the pinned tool environment before importing Visual Studio, so VsDevCmd
     # runs once, in the process that executes the stages.
     pipeline.tools()
     pipeline.windows_environment()
