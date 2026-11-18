@@ -27,13 +27,14 @@ bool allowed(const Json &list, const std::string &value, bool fold = false) {
 std::string requestCookie(const Request &req) {
   if (req.get_header_value_count("Cookie") != 1)
     return {};
+  const auto prefix = QString::fromLatin1(Cookie) + '=';
   std::string result;
   for (const auto &part : QString::fromStdString(req.get_header_value("Cookie")).split(';')) {
     const auto entry = part.trimmed();
-    if (entry.startsWith(QString::fromLatin1(Cookie) + "=")) {
-      if (!result.empty() || entry.size() != qsizetype(std::char_traits<char>::length(Cookie) + 1 + 64))
+    if (entry.startsWith(prefix)) {
+      if (!result.empty() || entry.size() != prefix.size() + 64)
         return {};
-      result = entry.mid(int(std::char_traits<char>::length(Cookie)) + 1).toStdString();
+      result = entry.mid(prefix.size()).toStdString();
     }
   }
   return result;
