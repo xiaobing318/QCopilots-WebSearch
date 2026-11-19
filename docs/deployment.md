@@ -9,9 +9,11 @@ CAPTCHAs or throttling. The service never bypasses those restrictions.
 
 MSI and DEB packages install each project version as a separate service. A new
 version starts with fresh deployment configuration, client and admin credentials,
-settings, provider keys and cache. Reinstalling an existing version reuses that
-version's data. Installing a different version leaves earlier services running
-with their existing configuration.
+settings, provider keys and cache. Each version's `bin/data` directory holds
+the runtime file and credentials, with settings, provider keys and cache under
+`bin/data/state`. Reinstalling into the same installation directory reuses
+that version's data. Earlier versions keep their existing directories and
+configuration.
 
 The installer tries the default business, control and admin loopback ports
 (8088, 8089 and 8091). It skips ports in use or already recorded by another
@@ -28,17 +30,16 @@ filename. Each package creates a version-specific unprivileged service account
 and systemd unit.
 
 ```bash
-version=0.2.0
+version=0.2.1
 package=qcopilots-websearch-$version
 sudo apt install "./${package}_${version}_amd64.deb"
 sudo systemctl status "$package.service"
 ```
 
-The deployment file is `/etc/qcopilots-websearch-<version>/runtime.json`. The
-administrator can edit it, and the corresponding service account can read it.
-That account owns the adjacent `client.token` and `admin.token` with mode 0600.
-Settings, provider keys and cache live under
-`/var/lib/qcopilots-websearch-<version>`.
+The systemd service loads
+`/opt/qcopilots-websearch-<version>/bin/data/runtime.json`. The administrator
+can edit it, and the corresponding service account can read it. That account
+owns the adjacent `client.token` and `admin.token` with mode 0600.
 
 Run the executable for the selected version to create its one-time management
 link.
@@ -86,7 +87,7 @@ restart that version.
 
 ```bash
 account=$(systemctl show --property=User --value "$package.service")
-sudo -u "$account" "/opt/$package/bin/qcopilots-websearch" --ConfigPath "/etc/$package/runtime.json" --CheckConfig
+sudo -u "$account" "/opt/$package/bin/qcopilots-websearch" --CheckConfig
 sudo systemctl restart "$package.service"
 ```
 
@@ -105,13 +106,18 @@ in `compose.yml`. Upgrade them deliberately and repeat acceptance.
 
 The MSI installs the `QCopilotsWebSearch-<version>` machine service under the
 virtual account `NT SERVICE\QCopilotsWebSearch-<version>`. Its default program
-directory is `%ProgramFiles%\QCopilots-WebSearch-<version>`. If you customize
-the program directory, use a separate path for each version.
+directory is `%ProgramFiles%\QCopilots-WebSearch-<version>`. The service loads
+`bin\data\runtime.json` within that directory.
 
-The service loads `%ProgramData%\QCopilots-WebSearch-<version>\service.json`.
-Client and admin tokens live beside that file. The `state` subdirectory
-contains that version's settings, provider keys and cache. Windows uses
-Schannel.
+To use a different directory, set `INSTALL_ROOT` from an elevated Command
+Prompt. The program and its `bin\data` directory both use that location.
+Choose a separate root for each version.
+
+```cmd
+msiexec.exe /i "C:\Downloads\QCopilots-WebSearch-0.2.1-win64.msi" INSTALL_ROOT="C:\Program Files\QCopilots-WebSearch-Custom-0.2.1"
+```
+
+Windows uses Schannel.
 
 Local interactive users can read `admin.token` to open the settings page and
 manage search settings. Runtime configuration, the client token and provider
@@ -125,13 +131,17 @@ notes. Use the version shown in Installed apps to select an MSI to uninstall.
 Uninstall removes that version's program files and service and retains its
 configuration and data.
 
-Extract the portable ZIP to a writable directory, including one with spaces or
-Unicode. Use a separate configuration directory for each portable instance.
-Pass `--ConfigPath FILE` when initializing, starting or requesting a Settings
-link. Add `--SelectAvailablePorts` to `--InitializeConfig` to reserve free
-loopback ports when creating the configuration. The ZIP runs as a foreground
-process. New configurations use the automatic source, so a SearXNG instance is
-optional.
+Extract the portable ZIP to a private writable directory. Use a separate
+extraction directory for each portable instance. From its root, run
+`.\bin\qcopilots-websearch.exe` to start in the foreground. The first launch
+creates `bin\data\runtime.json` and generates client and admin credentials.
+Run `.\bin\qcopilots-websearch.exe --SettingsUrl` from another terminal to
+open Settings for that instance.
+
+Use `--ConfigPath FILE` to select another file. To initialize a custom path,
+pass `--InitializeConfig --ConfigPath FILE`. Add `--SelectAvailablePorts` to
+choose free loopback ports for the new configuration. New configurations use
+the automatic search source, so a private SearXNG instance is optional.
 
 ## Manage client tokens
 
@@ -163,26 +173,29 @@ For the DEB installation, generate a credential as an administrator, check the
 configuration as that version's service account, then restart.
 
 ```bash
-version=0.2.0
+version=0.2.1
 package=qcopilots-websearch-$version
 executable="/opt/$package/bin/qcopilots-websearch"
-config_path="/etc/$package/runtime.json"
+config_path="/opt/$package/bin/data/runtime.json"
 account=$(systemctl show --property=User --value "$package.service")
 sudo "$executable" --ConfigPath "$config_path" --GenerateToken --ClientId team-alice
 sudo -u "$account" "$executable" --ConfigPath "$config_path" --CheckConfig
 sudo systemctl restart "$package.service"
 ```
 
-For the MSI installation, run these commands from the installed `bin` directory
-in an elevated PowerShell session. For a portable installation, use its runtime
-configuration path and omit `--ServiceName`.
+For the MSI installation, set `installRoot` to the directory used by the
+installer. Run these commands from an elevated PowerShell session. For a
+portable installation, use its runtime configuration path and omit
+`--ServiceName`.
 
 ```powershell
-$version = '0.2.0'
+$version = '0.2.1'
 $serviceName = "QCopilotsWebSearch-$version"
-$configPath = Join-Path $env:ProgramData "QCopilots-WebSearch-$version\service.json"
-.\qcopilots-websearch.exe --ConfigPath $configPath --ServiceName $serviceName --GenerateToken --ClientId team-alice
-.\qcopilots-websearch.exe --ConfigPath $configPath --ServiceName $serviceName --CheckConfig
+$installRoot = Join-Path $env:ProgramFiles "QCopilots-WebSearch-$version"
+$executable = Join-Path $installRoot 'bin\qcopilots-websearch.exe'
+$configPath = Join-Path $installRoot 'bin\data\runtime.json'
+& $executable --ConfigPath $configPath --ServiceName $serviceName --GenerateToken --ClientId team-alice
+& $executable --ConfigPath $configPath --ServiceName $serviceName --CheckConfig
 Restart-Service -Name $serviceName
 ```
 

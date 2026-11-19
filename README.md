@@ -11,20 +11,22 @@ Search works without an API key through DuckDuckGo HTML, DuckDuckGo Lite and Bin
 | Platform | Package | Settings command |
 | --- | --- | --- |
 | Windows 11 | MSI. Registers a service for the installed version | Run `qcopilots-websearch.exe --SettingsUrl` from that version's installed `bin` directory |
-| Windows 11 | ZIP. Extract and initialize in a private writable directory | Run `bin/qcopilots-websearch.exe --ConfigPath <file> --SettingsUrl` |
+| Windows 11 | ZIP. Extract to a private writable directory and start the executable | Run `.\bin\qcopilots-websearch.exe --SettingsUrl` |
 | Ubuntu 26.04 | DEB. Install `qcopilots-websearch-<version>_<version>_amd64.deb` with apt | Run `sudo /opt/qcopilots-websearch-<version>/bin/qcopilots-websearch --SettingsUrl` |
 
-Different MSI or DEB versions can run on the same host. Each version starts with
-its own configuration, random client and admin tokens, settings and cache. The
-installer selects free loopback ports on first install. Use the ports and
-credentials recorded for the version you want to access.
+Different MSI or DEB versions can run on the same host. Each version keeps
+its configuration, credentials, settings and cache in its own `bin/data`
+directory. The installer selects free loopback ports on first install. Use the
+ports and credentials recorded for the version you want to access.
 
-For a portable installation, initialize the configuration and start the service first.
+To start the portable Windows service, run this from the extracted directory.
 
-```text
-qcopilots-websearch --InitializeConfig --ConfigPath /private/path/service.json
-qcopilots-websearch --ConfigPath /private/path/service.json
+```powershell
+.\bin\qcopilots-websearch.exe
 ```
+
+The first launch initializes `bin/data/runtime.json`. Run the Settings command
+from a separate terminal while the portable service runs.
 
 The Settings command prints a one-time link. Open it within two minutes, or append `--Open` to launch the browser. You can also open `/settings/` on the instance's admin listener and sign in with its `admin.token`.
 

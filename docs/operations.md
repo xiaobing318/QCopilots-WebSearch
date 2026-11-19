@@ -81,15 +81,17 @@ corrupt or locked cache. Repair filesystem permissions or disk capacity first.
 
 Runtime configuration uses `schema_version: 1` for its JSON format.
 The `project_version` field records the exact release that generated the
-configuration, such as `"0.2.0"`. A build rejects a stamped configuration
-from a different release. Run `--CheckConfig` with the executable for the
-version you want to check. Explicit `--ConfigPath` continues to accept legacy
-files without `project_version`.
+configuration, such as `"0.2.1"`. A build rejects a stamped configuration from
+a different release. Run `--CheckConfig` with the executable for the version
+you want to check. It reads that executable's adjacent `data/runtime.json`
+by default. Explicit `--ConfigPath` continues to accept legacy files without
+`project_version`.
 
-MSI and DEB put each installed version in its own service, program directory,
-configuration directory and state directory. Every new version gets fresh
-credentials, provider settings and cache. The existing service keeps running
-while the new one is installed. The new service records its own loopback ports.
+MSI and DEB register a separate service and program directory for each version.
+Each service loads `bin/data/runtime.json` from its own installation root.
+Every new version gets fresh credentials, provider settings, cache and
+loopback ports. The existing service keeps running while the new one is
+installed.
 
 To switch clients, install the complete target package. Verify the version,
 service identity, authentication, health, and one search and page read. Update
@@ -130,10 +132,11 @@ automation. It permits rollback tests using exactly the candidate MSI bytes.
 
 Select the exact version to remove. On Windows, uninstall the corresponding MSI
 entry in Installed apps. On Ubuntu, use the package name including its version,
-for example `sudo apt remove qcopilots-websearch-0.2.0`. Both uninstall paths
-retain that version's runtime configuration, credentials and state. A DEB purge removes that
-version's runtime JSON and retains its tokens, state and service account. Remove
-retained files only when intentionally resetting that version after backups.
+for example `sudo apt remove qcopilots-websearch-0.2.1`. Both uninstall paths
+retain that version's `bin/data` directory. A DEB purge removes the version's
+`bin/data/runtime.json` and retains its tokens, state and service account.
+Remove retained files only when intentionally resetting that version after
+backups.
 
 `docker compose down` keeps persistent certificates and data. Do not use `down -v`
 as a routine upgrade or uninstall step. Keep Caddy certificate storage and the

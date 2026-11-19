@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 #include <windows.h>
+#include <shellapi.h>
 namespace qws {
 namespace {
 struct Handle {
@@ -34,6 +35,75 @@ struct FreeLocal {
   }
 };
 using Local = std::unique_ptr<void, FreeLocal>;
+struct ServiceHandle {
+  SC_HANDLE value;
+  explicit ServiceHandle(SC_HANDLE h) : value(h) {}
+  ServiceHandle(const ServiceHandle &) = delete;
+  ~ServiceHandle() {
+    if (value)
+      CloseServiceHandle(value);
+  }
+};
+
+QString localAbsolutePath(QString path) {
+  path = QDir::fromNativeSeparators(path);
+  if (path.startsWith("//?/"))
+    path.remove(0, 4);
+  if (path.size() < 3 || !path[0].isLetter() || path[1] != ':' || path[2] != '/' || path.indexOf(':', 2) >= 0)
+    return {};
+  return QDir::cleanPath(path);
+}
+
+QString registeredConfigPath(SC_HANDLE manager, const QString &name, const QString &expectedExecutable) {
+  const ServiceHandle service(OpenServiceW(manager, name.toStdWString().c_str(), SERVICE_QUERY_CONFIG));
+  if (!service.value)
+    return {};
+  // QueryServiceConfig documents an 8 KiB maximum.
+  alignas(QUERY_SERVICE_CONFIGW) BYTE buffer[8192];
+  auto *configuration = reinterpret_cast<QUERY_SERVICE_CONFIGW *>(buffer);
+  DWORD required = 0;
+  if (!QueryServiceConfigW(service.value, configuration, static_cast<DWORD>(sizeof(buffer)), &required) ||
+      !(configuration->dwServiceType & SERVICE_WIN32_OWN_PROCESS) || !configuration->lpBinaryPathName ||
+      !*configuration->lpBinaryPathName)
+    return {};
+
+  int count = 0;
+  const Local arguments(CommandLineToArgvW(configuration->lpBinaryPathName, &count));
+  if (!arguments || count < 2)
+    return {};
+  const auto argv = static_cast<LPWSTR *>(arguments.get());
+  const QFileInfo program(localAbsolutePath(QString::fromWCharArray(argv[0])));
+  const auto canonical = localAbsolutePath(program.canonicalFilePath());
+  if (canonical.isEmpty() || !program.isFile() ||
+      QFileInfo(canonical).fileName().compare("qcopilots-websearch.exe", Qt::CaseInsensitive) != 0)
+    return {};
+  if (!expectedExecutable.isEmpty()) {
+    const auto expected = localAbsolutePath(QFileInfo(expectedExecutable).canonicalFilePath());
+    if (canonical.compare(expected, Qt::CaseInsensitive) != 0)
+      return {};
+  }
+
+  bool serviceFlag = false, named = false;
+  QString path;
+  for (int i = 1; i < count; ++i) {
+    const auto argument = QString::fromWCharArray(argv[i]);
+    if (argument == "--WindowsService" && !serviceFlag) {
+      serviceFlag = true;
+    } else if (argument == "--ServiceName" && !named && i + 1 < count) {
+      if (QString::fromWCharArray(argv[++i]).compare(name, Qt::CaseInsensitive) != 0)
+        return {};
+      named = true;
+    } else if (argument == "--ConfigPath" && path.isEmpty() && i + 1 < count) {
+      path = localAbsolutePath(QString::fromWCharArray(argv[++i]));
+      if (path.isEmpty())
+        return {};
+    } else {
+      return {};
+    }
+  }
+  return serviceFlag ? path : QString{};
+}
+
 bool installed = false;
 std::string serviceName;
 QByteArray serviceSid;
@@ -293,6 +363,44 @@ void checkConfiguration(const QString &path) {
   checkSettings(c);
 }
 } // namespace
+QString windowsServiceConfigPath(const QString &name, const QString &executable) {
+  const ServiceHandle manager(OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
+  return manager.value ? registeredConfigPath(manager.value, name, executable) : QString{};
+}
+
+QStringList windowsServiceConfigPaths() {
+  const ServiceHandle manager(OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT | SC_MANAGER_ENUMERATE_SERVICE));
+  if (!manager.value)
+    return {};
+  static const QRegularExpression servicePattern(
+      "\\AQCopilotsWebSearch(?:PoC)?(?:-[0-9]+\\.[0-9]+\\.[0-9]+)?\\z", QRegularExpression::CaseInsensitiveOption);
+  // Use paging for hosts with more than the documented maximum per page.
+  std::vector<BYTE> buffer(256 * 1024);
+  QStringList paths;
+  DWORD resume = 0;
+  do {
+    DWORD required = 0, count = 0;
+    const auto previous = resume;
+    const bool complete = EnumServicesStatusExW(manager.value, SC_ENUM_PROCESS_INFO, SERVICE_WIN32_OWN_PROCESS,
+                                                SERVICE_STATE_ALL, buffer.data(), static_cast<DWORD>(buffer.size()),
+                                                &required, &count, &resume, nullptr) != FALSE;
+    if (!complete && GetLastError() != ERROR_MORE_DATA)
+      break;
+    const auto *services = reinterpret_cast<const ENUM_SERVICE_STATUS_PROCESSW *>(buffer.data());
+    for (DWORD i = 0; i < count; ++i) {
+      const auto name = QString::fromWCharArray(services[i].lpServiceName);
+      if (!servicePattern.match(name).hasMatch())
+        continue;
+      const auto path = registeredConfigPath(manager.value, name, {});
+      if (!path.isEmpty())
+        paths.push_back(path);
+    }
+    if (complete || resume == previous)
+      break;
+  } while (resume != 0);
+  return paths;
+}
+
 void configureWindowsCredentialPolicy(bool service, const std::string &name) {
   installed = service;
   serviceName = name;

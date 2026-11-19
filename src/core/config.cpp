@@ -7,6 +7,8 @@
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QSet>
+#include <QStringList>
 #include <QTcpServer>
 #include <QUrl>
 #include <algorithm>
@@ -116,16 +118,27 @@ void validateCredential(const QByteArray &token, bool required, const char *erro
 
 const QRegularExpression &packageDirectoryPattern() {
   static const QRegularExpression pattern(
-      "\\Aqcopilots-websearch(?:-poc)?-([0-9]+\\.[0-9]+\\.[0-9]+)\\z",
+      "\\Aqcopilots-websearch(?:-poc)?-([0-9]+\\.[0-9]+\\.[0-9]+)(?:-win64)?\\z",
       QRegularExpression::CaseInsensitiveOption);
   return pattern;
 }
 
+QDir deploymentDirectory(const QFileInfo &config) {
+  const QFileInfo folder(config.absolutePath());
+  const QFileInfo bin(folder.absolutePath());
+  if (config.fileName().compare("runtime.json", Qt::CaseInsensitive) == 0 &&
+      folder.fileName().compare("data", Qt::CaseInsensitive) == 0 &&
+      bin.fileName().compare("bin", Qt::CaseInsensitive) == 0)
+    return bin.absoluteDir();
+  return config.absoluteDir();
+}
+
 QString packageDirectoryRelease(const QString &path) {
   const QFileInfo info(path);
-  if (info.fileName() != "runtime.json" && info.fileName() != "service.json")
+  if (info.fileName().compare("runtime.json", Qt::CaseInsensitive) != 0 &&
+      info.fileName().compare("service.json", Qt::CaseInsensitive) != 0)
     return {};
-  return packageDirectoryPattern().match(info.absoluteDir().dirName()).captured(1);
+  return packageDirectoryPattern().match(deploymentDirectory(info).dirName()).captured(1);
 }
 
 Config validatedConfiguration(Json value, const QString &path) {
@@ -153,22 +166,50 @@ Config validatedConfiguration(Json value, const QString &path) {
 }
 
 std::set<int> installedListenerPorts(const QString &configPath) {
-  auto root = QFileInfo(configPath).absoluteDir();
-  if (packageDirectoryRelease(configPath).isEmpty() || !root.cdUp())
-    return {};
+  QStringList candidates;
+  const auto addPeers = [&](const QDir &root) {
+    for (const auto &directory : root.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks)) {
+      const auto name = directory.fileName();
+      if (directory.isJunction() ||
+          (!packageDirectoryPattern().match(name).hasMatch() &&
+           name.compare("qcopilots-websearch", Qt::CaseInsensitive) != 0 &&
+           name.compare("qcopilots-websearch-poc", Qt::CaseInsensitive) != 0))
+        continue;
+      const QDir release(directory.absoluteFilePath());
+      candidates.append({release.filePath("bin/data/runtime.json"), release.filePath("runtime.json"),
+                         release.filePath("service.json")});
+    }
+  };
+  auto root = deploymentDirectory(QFileInfo(configPath));
+  if (!packageDirectoryRelease(configPath).isEmpty() && root.cdUp())
+    addPeers(root);
+#ifdef _WIN32
+  candidates.append(windowsServiceConfigPaths());
+  const auto programData = qEnvironmentVariable("ProgramData");
+  if (QDir::isAbsolutePath(programData))
+    addPeers(QDir(programData));
+#else
+  addPeers(QDir("/opt"));
+  addPeers(QDir("/etc"));
+#endif
 
+  QSet<QString> visited;
   std::set<int> ports;
-  const auto fileName = QFileInfo(configPath).fileName();
-  for (const auto &directory : root.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks)) {
-    if (directory.isJunction() ||
-        (!packageDirectoryPattern().match(directory.fileName()).hasMatch() &&
-         directory.fileName().compare("qcopilots-websearch", Qt::CaseInsensitive) != 0))
-      continue;
-    const QFileInfo peer(QDir(directory.absoluteFilePath()).filePath(fileName));
+  for (const auto &path : candidates) {
+    const QFileInfo peer(path);
     if (!peer.isFile() || peer.isSymLink())
       continue;
+    const auto canonical = peer.canonicalFilePath();
+#ifdef _WIN32
+    const auto key = canonical.toCaseFolded();
+#else
+    const auto &key = canonical;
+#endif
+    if (key.isEmpty() || visited.contains(key))
+      continue;
+    visited.insert(key);
     try {
-      const auto value = readJson(peer.absoluteFilePath());
+      const auto value = readJson(canonical);
       for (const auto *name : {"business", "control", "admin"}) {
         const auto listener = value.find(name);
         const bool isAdmin = std::string_view(name) == "admin";
@@ -289,6 +330,9 @@ void initializeConfiguration(const std::string &destination, bool selectAvailabl
 #endif
   if (!QDir().mkpath(info.absolutePath()))
     throw Error("invalid_configuration", "Cannot create configuration directory.");
+  QLockFile initializationLock(info.absoluteFilePath() + ".initialize.lock");
+  if (!initializationLock.tryLock(5000))
+    throw Error("invalid_configuration", "Cannot lock the configuration directory for initialization.");
   const auto writeAdmin = [&] {
     const auto path = info.absoluteDir().filePath("admin.token");
     if (QFileInfo::exists(path))
@@ -312,6 +356,7 @@ void initializeConfiguration(const std::string &destination, bool selectAvailabl
   }
   writeAdmin();
   auto value = defaultConfiguration();
+  value["settings"]["directory"] = "state";
   value["cache"]["directory"] = "state";
   if (!stateDirectory.isEmpty()) {
     value["settings"]["directory"] = stateDirectory.toStdString();

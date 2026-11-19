@@ -1,13 +1,29 @@
 #!/bin/sh
 set -eu
 unit=@QCWS_DEB_BASENAME@.service
+check_purge_directory() {
+    directory=$1
+    if [ -L "$directory" ]; then
+        return 1
+    fi
+    if [ ! -e "$directory" ]; then
+        return 0
+    fi
+    [ -d "$directory" ] && [ "$(stat -c %u -- "$directory")" -eq 0 ] || return 1
+    mode=$(stat -c %a -- "$directory")
+    [ "$((0$mode & 0022))" -eq 0 ]
+}
 if [ "${1:-}" = purge ]; then
     if [ -z "${DPKG_ROOT:-}" ]; then
-        config_dir=/etc/@QCWS_DEB_BASENAME@
-        if [ -L "$config_dir" ]; then
-            echo 'QCopilots-WebSearch: Cannot purge a symbolic-link configuration directory.' >&2
-            exit 1
-        fi
+        install_dir=/opt/@QCWS_DEB_BASENAME@
+        program_dir=$install_dir/bin
+        config_dir=$program_dir/data
+        for directory in /opt "$install_dir" "$program_dir" "$config_dir"; do
+            if ! check_purge_directory "$directory"; then
+                echo 'QCopilots-WebSearch: Cannot purge through an unsafe installation directory.' >&2
+                exit 1
+            fi
+        done
         if [ -d "$config_dir" ]; then
             rm -f -- "$config_dir/runtime.json"
         fi

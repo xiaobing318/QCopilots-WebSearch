@@ -10,39 +10,51 @@ if [ -n "${DPKG_ROOT:-}" ]; then
 fi
 account=@QCWS_DEB_ACCOUNT@
 unit=@QCWS_DEB_BASENAME@.service
-config_dir=/etc/@QCWS_DEB_BASENAME@
+install_dir=/opt/@QCWS_DEB_BASENAME@
+program_dir=$install_dir/bin
+config_dir=$program_dir/data
 config_file=$config_dir/runtime.json
 token_file=$config_dir/client.token
 admin_token_file=$config_dir/admin.token
-state_dir=/var/lib/@QCWS_DEB_BASENAME@
-program=/opt/@QCWS_DEB_BASENAME@/bin/qcopilots-websearch
+state_dir=$config_dir/state
+program=$program_dir/qcopilots-websearch
 fail() { echo "QCopilots-WebSearch: $1" >&2; exit 1; }
+check_root_directory() {
+    directory=$1
+    [ ! -L "$directory" ] && [ -d "$directory" ] || fail "An installation directory is not a real directory."
+    [ "$(stat -c %u -- "$directory")" -eq 0 ] || fail "An installation directory is not root-owned."
+    mode=$(stat -c %a -- "$directory")
+    [ "$((0$mode & 0022))" -eq 0 ] || fail "An installation directory allows non-owner writes."
+}
+for directory in /opt "$install_dir" "$program_dir"; do
+    check_root_directory "$directory"
+done
+if [ -e "$config_dir" ] || [ -L "$config_dir" ]; then
+    check_root_directory "$config_dir"
+fi
 if ! getent passwd "$account" >/dev/null; then
     adduser --system --group --home "$state_dir" --no-create-home --disabled-login "$account"
 fi
 [ "$(id -u "$account")" -ne 0 ] || fail "The service account must not be root."
 [ "$(id -gn "$account")" = "$account" ] || fail "Unexpected primary service group."
-for directory in "$config_dir" "$state_dir"; do
-    [ ! -L "$directory" ] || fail "A managed directory is a symbolic link."
-    if [ -e "$directory" ] && [ ! -d "$directory" ]; then
-        fail "A managed directory path is not a directory."
-    fi
-done
 # Never recursively chown retained user data.
 install -d -o root -g "$account" -m 0750 "$config_dir"
+[ ! -L "$state_dir" ] || fail "The state directory is a symbolic link."
+if [ -e "$state_dir" ] && [ ! -d "$state_dir" ]; then
+    fail "The state path is not a directory."
+fi
 install -d -o "$account" -g "$account" -m 0700 "$state_dir"
-for credential in "$token_file" "$admin_token_file"; do
-    if [ -e "$credential" ] || [ -L "$credential" ]; then
-        [ -f "$credential" ] && [ ! -L "$credential" ] || fail "Credential is not a regular file."
+for file in "$config_file" "$token_file" "$admin_token_file"; do
+    if [ -e "$file" ] || [ -L "$file" ]; then
+        [ -f "$file" ] && [ ! -L "$file" ] && [ "$(stat -c %h -- "$file")" -eq 1 ] \
+            || fail "A runtime configuration or credential is not a regular file with one link."
     fi
 done
 # Each package initializes only its own version. A reinstall preserves any
 # existing runtime and credentials for that version.
-if [ ! -e "$config_file" ] && [ ! -L "$config_file" ]; then
+if [ ! -e "$config_file" ]; then
     env -u LD_LIBRARY_PATH -u QT_PLUGIN_PATH -u QML2_IMPORT_PATH "$program" \
         --ConfigPath "$config_file" --InitializeConfig --SelectAvailablePorts --StateDirectory "$state_dir"
-else
-    [ -f "$config_file" ] && [ ! -L "$config_file" ] || fail "Configuration is not a regular file."
 fi
 chown root:"$account" "$config_file"
 chmod 0640 "$config_file"

@@ -2,8 +2,11 @@
 #ifdef _WIN32
 #include <QByteArray>
 #include <QString>
+#include <QStringList>
 #include <string>
 namespace qws {
+QString windowsServiceConfigPath(const QString &name, const QString &executable = {});
+QStringList windowsServiceConfigPaths();
 // Set once at startup. Runtime JSON cannot relax the credential policy.
 void configureWindowsCredentialPolicy(bool installedService, const std::string &serviceName);
 QByteArray readWindowsCredential(const QString &path);

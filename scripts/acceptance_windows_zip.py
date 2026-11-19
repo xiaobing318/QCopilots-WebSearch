@@ -1,18 +1,249 @@
 """Exercise exact portable ZIP bytes from a relocated path without development PATH entries."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, contextmanager
+import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
+import re
+import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from urllib.parse import urlsplit
 import zipfile
 import psutil
 from package_inventory import package_files
-from testkit import digest, need
+from testkit import Fault, MIB, digest, hidden_console, need, request, stop_process
 from process_cleanup import wait_owned
+
+DEFAULT_PORTS = (8088, 8089, 8091)
+PROTOCOL = '2025-06-18'
+INITIALIZE = {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {
+    'protocolVersion': PROTOCOL, 'capabilities': {},
+    'clientInfo': {'name': 'portable-acceptance', 'version': '1'},
+}}
+
+
+def cli(executable, cwd, env, *args, reply=b''):
+    return subprocess.run([executable, *args], input=reply, capture_output=True, cwd=cwd,
+                          env=env, timeout=12, creationflags=subprocess.CREATE_NO_WINDOW)
+
+
+def generated_token(result):
+    raw = result.stdout.strip()
+    need(result.returncode == 0 and re.fullmatch(rb'[a-f0-9]{64}\r?\n', result.stdout) and raw not in result.stderr,
+         'Portable generator did not produce exactly one private token')
+    return raw.decode('ascii')
+
+
+def system_tool(name):
+    return Path(os.environ['SystemRoot']) / 'System32' / name
+
+
+def check_read_only(executable, cwd, env, data):
+    whoami = subprocess.check_output([system_tool('whoami.exe'), '/user', '/fo', 'csv', '/nh'], env=env, timeout=8)
+    sid = re.search(rb'"(S-1-[0-9-]+)"', whoami)
+    need(sid is not None, 'Could not identify the portable fixture account')
+    principal = '*' + sid[1].decode('ascii')
+    data.mkdir()
+    acl = [system_tool('icacls.exe'), str(data)]
+    subprocess.run(acl + ['/deny', principal + ':(WD,AD)'], env=env, capture_output=True, check=True, timeout=8)
+    try:
+        probe = data / 'write probe'
+        try:
+            probe.touch(exist_ok=False)
+        except PermissionError:
+            pass
+        else:
+            probe.unlink()
+            need(False, 'The portable data fixture is still writable')
+        result = cli(executable, cwd, env)
+        need(result.returncode != 0 and b'invalid_configuration:' in result.stderr and not any(data.iterdir()),
+             'Read-only portable startup did not fail without creating files')
+    finally:
+        subprocess.run(acl + ['/remove:d', principal], env=env, capture_output=True, check=True, timeout=8)
+        data.rmdir()
+
+
+@contextmanager
+def occupy_default_ports():
+    with ExitStack() as sockets:
+        for port in DEFAULT_PORTS:
+            listener = sockets.enter_context(socket.socket())
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            try:
+                listener.bind(('127.0.0.1', port))
+                listener.listen()
+            except OSError as exc:
+                # Existing listeners or OS port reservations also force fallback.
+                if exc.winerror not in (10013, 10048):
+                    raise
+        yield
+
+
+@contextmanager
+def running_portable(executable, cwd, env, runtime, racers=1):
+    processes = []
+    gate = threading.Barrier(racers, timeout=4)
+
+    def launch():
+        gate.wait()
+        proc = subprocess.Popen([executable], cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **hidden_console())
+        processes.append(proc)
+
+    try:
+        with ThreadPoolExecutor(max_workers=racers) as pool:
+            list(pool.map(lambda _: launch(), range(racers)))
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            running = [proc for proc in processes if proc.poll() is None]
+            need(running, 'Every portable process exited before readiness')
+            if len(running) == 1 and runtime.is_file():
+                need(all(proc.returncode != 0 for proc in processes if proc is not running[0]),
+                     'A second portable process exited as if it had served')
+                try:
+                    config = json.loads(runtime.read_bytes())
+                    token = (runtime.parent / 'client.token').read_text('ascii').strip()
+                    if request(config['control']['port'], token, timeout=0.5).get('live') is True:
+                        break
+                except (Fault, OSError, ValueError):
+                    pass
+            time.sleep(0.05)
+        else:
+            need(False, 'Portable startup did not yield exactly one ready process')
+        yield config, token
+        need(running[0].poll() is None, 'The portable server exited before shutdown')
+    finally:
+        stopped = [stop_process(proc) for proc in processes if proc.poll() is None]
+        need(all(report['passed'] for report in stopped), 'Portable server cleanup failed')
+
+
+def mcp_request(port, token='', payload=None, session=''):
+    connection = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
+    headers = {'Accept': 'application/json, text/event-stream'}
+    if token:
+        headers['Authorization'] = 'Bearer ' + token
+    if session:
+        headers.update({'Mcp-Session-Id': session, 'MCP-Protocol-Version': PROTOCOL})
+    if payload is not None:
+        headers['Content-Type'] = 'application/json'
+    try:
+        connection.request('POST' if payload is not None else 'DELETE', '/mcp',
+                           json.dumps(payload).encode() if payload is not None else None, headers)
+        response = connection.getresponse()
+        raw = response.read(MIB + 1)
+        need(len(raw) <= MIB, 'Portable MCP response exceeded the fixture limit')
+        return response.status, response.getheader('Mcp-Session-Id'), json.loads(raw) if response.status == 200 else {}
+    finally:
+        connection.close()
+
+
+def verify_mcp(port, token):
+    status, session, value = mcp_request(port, token, INITIALIZE)
+    need(status == 200 and session and value['result']['protocolVersion'] == PROTOCOL,
+         'Portable MCP initialization failed')
+    try:
+        status, _, _ = mcp_request(port, token, {'jsonrpc': '2.0', 'method': 'notifications/initialized'}, session)
+        need(status == 202, 'Portable MCP initialized notification failed')
+        status, _, value = mcp_request(port, token, {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list'}, session)
+        need(status == 200 and any(tool['name'] == 'web_search_status' for tool in value['result']['tools']),
+             'Portable MCP tool discovery failed')
+        status, _, value = mcp_request(port, token, {'jsonrpc': '2.0', 'id': 3, 'method': 'tools/call',
+            'params': {'name': 'web_search_status', 'arguments': {}}}, session)
+        need(status == 200 and value['result']['structuredContent']['contract_version'] == 1,
+             'Portable MCP tool call failed')
+    finally:
+        need(mcp_request(port, token, session=session)[0] == 204, 'Portable MCP session cleanup failed')
+
+
+def snapshot(directory):
+    return {path.relative_to(directory): digest(path) if path.is_file() else None for path in directory.rglob('*')}
+
+
+def verify_portable(executable, folder, cwd, env):
+    data = executable.parent / 'data'
+    runtime = data / 'runtime.json'
+    decoys = [cwd / 'runtime.json', cwd / 'data' / 'runtime.json']
+    for decoy in decoys:
+        decoy.parent.mkdir(exist_ok=True)
+        decoy.write_text('unrelated working-directory config\n', encoding='utf-8')
+    decoy_snapshot = snapshot(cwd)
+    program_data = folder / 'decoy ProgramData'
+    program_data.mkdir()
+    env = {key: value for key, value in env.items() if key.lower() != 'programdata'}
+    env['ProgramData'] = str(program_data)
+    acl = [system_tool('icacls.exe'), str(runtime)]
+
+    generated_token(cli(executable, cwd, env, '--GenerateToken'))
+    need(cli(executable, cwd, env, '--SetToken').returncode != 0,
+         'Portable token update accepted a missing explicit configuration')
+    need(not data.exists(), 'Standalone generator initialized portable data')
+    check_read_only(executable, cwd, env, data)
+
+    with occupy_default_ports(), running_portable(executable, cwd, env, runtime, racers=2) as (config, local):
+        ports = {config[role]['port'] for role in ('business', 'control', 'admin')}
+        need(len(ports) == 3 and not ports.intersection(DEFAULT_PORTS), 'Portable launch did not select free ports')
+        need(all(config[role]['host'] == '127.0.0.1' for role in ('business', 'control')),
+             'Portable service is not restricted to loopback')
+        need((data / 'state').is_dir() and re.fullmatch(r'[a-f0-9]{64}', local),
+             'Portable startup did not initialize executable-relative data')
+        token_hashes = {data / name: digest(data / name) for name in ('admin.token', 'client.token')}
+        before = digest(runtime)
+        need(cli(executable, cwd, env, '--CheckConfig').returncode == 0,
+             'Portable CheckConfig did not discover executable-relative data')
+        settings = cli(executable, cwd, env, '--SettingsUrl')
+        link = urlsplit(settings.stdout.decode('ascii').strip())
+        need(settings.returncode == 0 and link.scheme == 'http' and link.hostname == '127.0.0.1'
+             and link.port == config['admin']['port'] and link.path == '/settings/' and not link.query
+             and re.fullmatch(r'login=[a-f0-9]{64}', link.fragment), 'Default portable settings link was invalid')
+        explicit = folder / 'explicit config' / '运行.json'
+        need(cli(executable, cwd, env, '--ConfigPath', str(explicit), '--InitializeConfig', '--SelectAvailablePorts').returncode == 0,
+             'Explicit portable configuration initialization failed')
+        need(explicit.is_file() and cli(executable, cwd, env, '--ConfigPath', str(explicit), '--CheckConfig').returncode == 0,
+             'Explicit portable configuration did not take precedence')
+        need(digest(runtime) == before and all(digest(path) == value for path, value in token_hashes.items()),
+             'Portable discovery or explicit commands changed existing credentials')
+        verify_mcp(config['business']['port'], local)
+        port = config['business']['port']
+        need(mcp_request(port, payload=INITIALIZE)[0] == 401, 'Unauthenticated portable MCP was accepted')
+        original_acl = subprocess.check_output(acl, env=env, timeout=8)
+        generated = generated_token(cli(executable, cwd, env, '--ConfigPath', str(runtime), '--GenerateToken',
+                                        '--ClientId', 'acceptance', reply=b'yes\r\n'))
+        need(mcp_request(port, generated, INITIALIZE)[0] == 401, 'Generated token became active without restart')
+
+    with running_portable(executable, cwd, env, runtime) as (config, _):
+        need(config['business']['port'] == port, 'Portable restart changed the persisted listener')
+        verify_mcp(port, generated)
+        rotated = secrets.token_hex(32)
+        update = cli(executable, cwd, env, '--ConfigPath', str(runtime), '--SetToken', '--ClientId', 'acceptance',
+                     reply=(rotated + '\r\nyes\r\n').encode('ascii'))
+        need(update.returncode == 0 and not update.stdout and rotated.encode('ascii') not in update.stderr,
+             'Portable token update rejected or disclosed the submitted credential')
+        need(mcp_request(port, rotated, INITIALIZE)[0] == 401, 'Rotated token became active without restart')
+        verify_mcp(port, generated)
+
+    with running_portable(executable, cwd, env, runtime) as (config, _):
+        entry = next(client for client in config['clients'] if client['id'] == 'acceptance')
+        need(entry == {'id': 'acceptance', 'token_sha256': hashlib.sha256(rotated.encode('ascii')).hexdigest()},
+             'Portable token update did not store a digest only')
+        need(mcp_request(port, generated, INITIALIZE)[0] == 401, 'Old portable token survived restart')
+        verify_mcp(port, rotated)
+
+    need(subprocess.check_output(acl, env=env, timeout=8) == original_acl,
+         'Portable token update changed effective runtime ACLs')
+    need(all(digest(path) == value for path, value in token_hashes.items()), 'Portable restart replaced credential files')
+    need(not any(program_data.iterdir()) and snapshot(cwd) == decoy_snapshot,
+         'Portable startup wrote to ProgramData or used the working directory')
+    return {'first_run_concurrency': True, 'read_only_failure': True, 'explicit_config': True,
+            'standalone_generator': True, 'bearer_rotation_restart': True, 'runtime_acl_preserved': True}
 
 
 def run_sdk(command, env, directory, timeout=180):
@@ -71,15 +302,18 @@ def main():
     report = {'passed': False}
     code = 1
     with tempfile.TemporaryDirectory(prefix='qcws portable acceptance ') as temporary:
-        folder = Path(temporary)
+        folder = Path(temporary).resolve(strict=True)
         original = folder / 'original extraction'
         # package_files has validated all member paths, duplicates and parent collisions.
         with zipfile.ZipFile(package) as archive:
             archive.extractall(original)
-        moved = folder / 'relocated package'
+        moved = folder / 'relocated package 中文'
+        need(original.resolve(strict=True).parent == moved.resolve().parent == folder, 'Unsafe ZIP relocation path')
         shutil.move(str(original), str(moved))
         found = list(moved.rglob('qcopilots-websearch.exe'))
-        need(len(found) == 1 and ' ' in str(found[0]), 'Ambiguous relocated executable')
+        need(len(found) == 1 and ' ' in str(found[0]) and '中文' in str(found[0]), 'Ambiguous relocated executable')
+        cwd = folder / 'unrelated working directory'
+        cwd.mkdir()
         env = os.environ.copy()
         system = Path(os.environ['SystemRoot'])
         need(system.is_absolute() and (system / 'System32').is_dir(), 'Missing system runtime')
@@ -88,16 +322,18 @@ def main():
                                'qt_qpa_platform_plugin_path','ld_library_path','pythonpath'}:
                 del env[key]
         env['PATH'] = os.pathsep.join(str(path) for path in (system / 'System32', system))
-        exit_code, forced = run_sdk([sys.executable,str(Path(__file__).with_name('test_mcp_sdk.py')),
+        portable = verify_portable(found[0], folder, cwd, env)
+        exit_code, forced = run_sdk([sys.executable, '-B', str(Path(__file__).with_name('test_mcp_sdk.py')),
             '--Executable',str(found[0]),'--Output',str(folder / 'sdk.json')],
-            env,folder)
+            env,cwd)
         if (folder / 'sdk.json').exists():
             report = json.loads((folder / 'sdk.json').read_text('utf-8'))
         if exit_code or forced:
             report.update(passed=False, error='sdk_runner_or_cleanup_failed')
         report['portable'] = {'package_sha256':digest(package), 'relocated_path_with_spaces':True,
+                              'relocated_path_with_unicode':True, 'unrelated_working_directory':True,
                               'system_only_path':True, 'temporary_directory_removed':False,
-                              'forced_process_count':forced, 'runner_exit_code':exit_code}
+                              'forced_process_count':forced, 'runner_exit_code':exit_code, **portable}
         need(report['portable']['package_sha256'] == args.PackageSHA256.lower(), 'ZIP changed during acceptance')
         code = 1 if forced else exit_code
     report['portable']['temporary_directory_removed'] = not Path(temporary).exists()

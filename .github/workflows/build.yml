@@ -157,6 +157,36 @@ jobs:
               sys.executable, "scripts/pipeline.py", "--ConfigPath", str(destination),
               "--Profile", name, "--Stages", "configure,build,test,install,publish",
           ], check=True)
+      - name: Check out the system-directory release
+        if: inputs.release || inputs.deep
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Last main revision using ProgramData and /etc + /var/lib.
+          ref: 91e528fe3149230390295051862ab6ba544dd69e
+          path: build/legacy-source
+          persist-credentials: false
+      - name: Package the system-directory release
+        if: inputs.release || inputs.deep
+        shell: python
+        run: |
+          import json, os, subprocess, sys
+          from pathlib import Path
+
+          source = Path("build/legacy-source").resolve()
+          config = json.loads((source / "config/BuildPipeline.json").read_text(encoding="utf-8"))
+          name = os.environ["QCWS_PROFILE"]
+          config["profiles"][name].update(
+              buildDir=str(Path("build/legacy-baseline").resolve()),
+              installDir=str(Path("install/legacy-baseline").resolve()),
+              cacheDir=str(Path(".cache").resolve()),
+              qtRoot=str(Path(".cache/qt").resolve()),
+          )
+          destination = Path(os.environ["QCWS_ACCEPTANCE_DIR"]) / "legacy-baseline.json"
+          destination.write_text(json.dumps(config), encoding="utf-8")
+          subprocess.run([
+              sys.executable, str(source / "scripts/pipeline.py"), "--ConfigPath", str(destination),
+              "--Profile", name, "--Stages", "configure,build,install,publish",
+          ], check=True)
       - name: Verify the packaged service
         shell: python
         env:
@@ -177,6 +207,7 @@ jobs:
 
           build = Path("build", os.environ["QCWS_PROFILE"])
           baseline = Path("build/upgrade-baseline")
+          legacy = Path("build/legacy-baseline")
           output = Path(os.environ["QCWS_ACCEPTANCE_DIR"])
           deep = os.environ["QCWS_FULL_ACCEPTANCE"] == "true"
           if os.name == "nt":
@@ -186,13 +217,15 @@ jobs:
                   "--PackageSHA256", digest(zip_file), "--Output", str(output / "zip.json"),
               ], check=True)
               if deep:
-                  candidate, previous = package(build, ".msi"), package(baseline, ".msi")
-                  subprocess.run([
-                      "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-                      "scripts/AcceptWindowsMsi.ps1", "--CandidateMsi", str(candidate),
-                      "--CandidateSHA256", digest(candidate), "--BaselineMsi", str(previous),
-                      "--BaselineSHA256", digest(previous), "--OutputDir", str(output / "msi"),
-                  ], check=True)
+                  candidate = package(build, ".msi")
+                  for path, label in ((legacy, "msi-legacy"), (baseline, "msi")):
+                      previous = package(path, ".msi")
+                      subprocess.run([
+                          "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                          "scripts/AcceptWindowsMsi.ps1", "--CandidateMsi", str(candidate),
+                          "--CandidateSHA256", digest(candidate), "--BaselineMsi", str(previous),
+                          "--BaselineSHA256", digest(previous), "--OutputDir", str(output / label),
+                      ], check=True)
           else:
               candidate = package(build, ".deb")
               command = [
@@ -201,8 +234,9 @@ jobs:
                   "--DisposableMachine",
               ]
               if deep:
-                  previous = package(baseline, ".deb")
-                  command += ["--BaselinePackage", str(previous), "--BaselineSHA256", digest(previous)]
+                  for path in (legacy, baseline):
+                      previous = package(path, ".deb")
+                      command += ["--BaselinePackage", str(previous), "--BaselineSHA256", digest(previous)]
               subprocess.run(command, check=True)
           distribution = build / "release-packages"
           distribution.mkdir()

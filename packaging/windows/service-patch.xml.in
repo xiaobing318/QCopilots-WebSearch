@@ -5,37 +5,37 @@
       DisplayName="@QCWS_DATA_DIRECTORY@" Description="Web search and page reading for MCP clients"
       Type="ownProcess" Start="auto" ErrorControl="normal" Vital="yes"
       Account="NT SERVICE\@QCWS_SERVICE_NAME@"
-      Arguments="--WindowsService --ServiceName @QCWS_SERVICE_NAME@ --ConfigPath &quot;[QcwsDataRoot]service.json&quot;" />
+      Arguments="--WindowsService --ServiceName @QCWS_SERVICE_NAME@ --ConfigPath &quot;[QcwsDataRoot]runtime.json&quot;" />
     <ServiceControl Id="QcwsServiceControl" Name="@QCWS_SERVICE_NAME@"
       Start="install" Stop="both" Remove="uninstall" Wait="yes" />
   </CPackWiXFragment>
-  <CPackWiXFragment Id="#PRODUCT">
-    <StandardDirectory Id="CommonAppDataFolder">
-      <Directory Id="QcwsDataRoot" Name="@QCWS_DATA_DIRECTORY@">
-        <Component Id="QcwsDataRootComponent" Guid="@QCWS_DATA_COMPONENT_GUID@" Bitness="always64" KeyPath="yes">
+  <CPackWiXFragment Id="CM_DP_bin">
+    <Directory Id="QcwsDataRoot" Name="data">
+      <Component Id="QcwsDataRootComponent" Guid="@QCWS_DATA_COMPONENT_GUID@" Bitness="always64" KeyPath="yes">
+        <CreateFolder>
+          <PermissionEx Id="QcwsDataRootAcl"
+            Sddl="O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;@QCWS_SERVICE_SID@)" />
+        </CreateFolder>
+      </Component>
+      <Directory Id="QcwsStateRoot" Name="state">
+        <Component Id="QcwsStateRootComponent" Guid="@QCWS_STATE_COMPONENT_GUID@" Bitness="always64" KeyPath="yes">
           <CreateFolder>
-            <PermissionEx Id="QcwsDataRootAcl"
-              Sddl="O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;@QCWS_SERVICE_SID@)" />
+            <PermissionEx Id="QcwsStateRootAcl"
+              Sddl="O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;@QCWS_SERVICE_SID@)" />
           </CreateFolder>
         </Component>
-        <Directory Id="QcwsStateRoot" Name="state">
-          <Component Id="QcwsStateRootComponent" Guid="@QCWS_STATE_COMPONENT_GUID@" Bitness="always64" KeyPath="yes">
-            <CreateFolder>
-              <PermissionEx Id="QcwsStateRootAcl"
-                Sddl="O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;@QCWS_SERVICE_SID@)" />
-            </CreateFolder>
-          </Component>
-        </Directory>
       </Directory>
-    </StandardDirectory>
+    </Directory>
+  </CPackWiXFragment>
+  <CPackWiXFragment Id="#PRODUCT">
     <CustomAction Id="QcwsRollbackInitialization" FileRef="CM_FP_bin.qcopilots_websearch.exe"
-      ExeCommand="--RollbackInitialization --ConfigPath &quot;[QcwsDataRoot]service.json&quot; --TransactionId [ProductCode] --ServiceName @QCWS_SERVICE_NAME@"
+      ExeCommand="--RollbackInitialization --ConfigPath &quot;[QcwsDataRoot]runtime.json&quot; --TransactionId [ProductCode] --ServiceName @QCWS_SERVICE_NAME@"
       Execute="rollback" Impersonate="no" Return="check" />
     <CustomAction Id="QcwsInitializeConfig" FileRef="CM_FP_bin.qcopilots_websearch.exe"
-      ExeCommand="--InitializeConfig --ConfigPath &quot;[QcwsDataRoot]service.json&quot; --TransactionId [ProductCode] --ServiceName @QCWS_SERVICE_NAME@"
+      ExeCommand="--InitializeConfig --ConfigPath &quot;[QcwsDataRoot]runtime.json&quot; --TransactionId [ProductCode] --ServiceName @QCWS_SERVICE_NAME@"
       Execute="deferred" Impersonate="no" Return="check" />
     <CustomAction Id="QcwsCommitInitialization" FileRef="CM_FP_bin.qcopilots_websearch.exe"
-      ExeCommand="--CommitInitialization --ConfigPath &quot;[QcwsDataRoot]service.json&quot; --TransactionId [ProductCode] --ServiceName @QCWS_SERVICE_NAME@"
+      ExeCommand="--CommitInitialization --ConfigPath &quot;[QcwsDataRoot]runtime.json&quot; --TransactionId [ProductCode] --ServiceName @QCWS_SERVICE_NAME@"
       Execute="commit" Impersonate="no" Return="ignore" />
     <!-- Explicit administrator-only acceptance injection. Tests use the exact
          same MSI bytes as normal installation, without a shell or helper DLL. -->

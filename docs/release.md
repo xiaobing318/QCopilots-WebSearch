@@ -21,7 +21,7 @@ The release job uses the tested ZIP, MSI and DEB artifacts. It adds the matching
 Verify downloaded files against `SHA256SUMS`. GitHub CLI can verify a distribution package's provenance.
 
 ```bash
-version=0.2.0
+version=0.2.1
 gh attestation verify "./qcopilots-websearch-${version}_${version}_amd64.deb" --repo xiaobing318/QCopilots-WebSearch
 ```
 

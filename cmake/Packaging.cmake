@@ -32,8 +32,7 @@ if(WIN32)
   set(CPACK_PACKAGE_INSTALL_DIRECTORY "${QCWS_DATA_DIRECTORY}")
   string(UUID CPACK_WIX_UPGRADE_GUID NAMESPACE "${_windows_product_namespace}"
     NAME "version-${PROJECT_VERSION}-x64" TYPE SHA1 UPPER)
-  target_compile_definitions(qcopilots-websearch PRIVATE QCWS_WINDOWS_SERVICE_NAME="${QCWS_SERVICE_NAME}"
-    QCWS_WINDOWS_DATA_DIRECTORY="${QCWS_DATA_DIRECTORY}")
+  target_compile_definitions(qcopilots-websearch PRIVATE QCWS_WINDOWS_SERVICE_NAME="${QCWS_SERVICE_NAME}")
   execute_process(COMMAND sc.exe showsid "${QCWS_SERVICE_NAME}"
     RESULT_VARIABLE _sid_result OUTPUT_VARIABLE _sid_output ERROR_VARIABLE _sid_error)
   string(REGEX MATCH "S-1-5-80(-[0-9]+)+" QCWS_SERVICE_SID "${_sid_output}")
@@ -41,9 +40,9 @@ if(WIN32)
     message(FATAL_ERROR "Cannot determine Windows service SID")
   endif()
   string(UUID QCWS_DATA_COMPONENT_GUID NAMESPACE "${CPACK_WIX_UPGRADE_GUID}"
-    NAME "programdata-root-v1" TYPE SHA1 UPPER)
+    NAME "bin-data-root-v1" TYPE SHA1 UPPER)
   string(UUID QCWS_STATE_COMPONENT_GUID NAMESPACE "${CPACK_WIX_UPGRADE_GUID}"
-    NAME "programdata-state-v1" TYPE SHA1 UPPER)
+    NAME "bin-data-state-v1" TYPE SHA1 UPPER)
   string(UUID CPACK_WIX_PRODUCT_GUID NAMESPACE "${CPACK_WIX_UPGRADE_GUID}"
     NAME "product-${PROJECT_VERSION}-x64" TYPE SHA1 UPPER)
   file(MAKE_DIRECTORY "${PROJECT_BINARY_DIR}/packaging")

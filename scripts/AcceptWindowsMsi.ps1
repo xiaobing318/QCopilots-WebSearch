@@ -54,7 +54,7 @@ function Read-Msi([string]$path) {
         [void]$view.Execute()
         while ($null -ne ($record = $view.Fetch())) {
             $key = [string]$record.StringData(1)
-            if ($key -in @('INSTALL_ROOT', 'QcwsDataRoot')) {
+            if ($key -in @('INSTALL_ROOT', 'CM_DP_bin', 'QcwsDataRoot', 'QcwsStateRoot')) {
                 $properties["${key}Parent"] = [string]$record.StringData(2)
                 $target = ([string]$record.StringData(3) -split ':')[0]
                 $properties["${key}Name"] = ($target -split '\|')[-1]
@@ -68,7 +68,7 @@ function Read-Msi([string]$path) {
         return $properties
     } finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($db) }
 }
-function Set-ExpectedInstance([hashtable]$metadata) {
+function Set-ExpectedInstance([hashtable]$metadata, [bool]$overrideInstallRoot, [bool]$legacyLayout = $false) {
     $version = $metadata.ProductVersion
     [void][guid]::Parse($metadata.ProductCode)
     [void][guid]::Parse($metadata.UpgradeCode)
@@ -76,16 +76,31 @@ function Set-ExpectedInstance([hashtable]$metadata) {
     Assert ($metadata.ProductName -eq 'QCopilots-WebSearch') 'Expected a production package.'
     $directory = "QCopilots-WebSearch-$version"
     $name = "QCopilotsWebSearch-$version"
-    $arguments = '--WindowsService --ServiceName {0} --ConfigPath "[QcwsDataRoot]service.json"' -f $name
+    $configName = if ($legacyLayout) { 'service.json' } else { 'runtime.json' }
+    $arguments = '--WindowsService --ServiceName {0} --ConfigPath "[QcwsDataRoot]{1}"' -f $name, $configName
     Assert ($metadata.ServiceName -ceq $name -and $metadata.ServiceAccount -ceq "NT SERVICE\$name" -and
             $metadata.ServiceArguments -ceq $arguments) 'Unexpected versioned service identity or startup command.'
-    Assert ($metadata.INSTALL_ROOTName -ceq $directory -and $metadata.QcwsDataRootName -ceq $directory -and
+    Assert ($metadata.INSTALL_ROOTName -ceq $directory -and
             $metadata.INSTALL_ROOTParent -in @('ProgramFiles6432Folder', 'ProgramFiles64Folder') -and
-            $metadata.QcwsDataRootParent -ceq 'CommonAppDataFolder') 'Unexpected versioned installation or data directory.'
-    $metadata.InstallRoot = [IO.Path]::GetFullPath((Join-Path $env:ProgramFiles $directory))
-    $metadata.DataRoot = [IO.Path]::GetFullPath((Join-Path $env:ProgramData $directory))
-    $metadata.Executable = Join-Path $metadata.InstallRoot 'bin\qcopilots-websearch.exe'
-    $metadata.Config = Join-Path $metadata.DataRoot 'service.json'
+            $metadata.CM_DP_binName -ceq 'bin' -and $metadata.CM_DP_binParent -ceq 'INSTALL_ROOT' -and
+            $metadata.QcwsStateRootName -ceq 'state' -and $metadata.QcwsStateRootParent -ceq 'QcwsDataRoot') 'Unexpected versioned installation or data directory.'
+    $metadata.OverrideInstallRoot = $overrideInstallRoot
+    $metadata.DefaultInstallRoot = [IO.Path]::GetFullPath((Join-Path $env:ProgramFiles $directory))
+    $metadata.InstallRoot = $metadata.DefaultInstallRoot
+    if ($overrideInstallRoot) {
+        $custom = "$directory Acceptance " + [guid]::NewGuid().ToString('N')
+        $metadata.InstallRoot = [IO.Path]::GetFullPath((Join-Path $env:ProgramFiles $custom))
+    }
+    $metadata.BinRoot = Join-Path $metadata.InstallRoot 'bin'
+    if ($legacyLayout) {
+        Assert ($metadata.QcwsDataRootName -ceq $directory -and $metadata.QcwsDataRootParent -ceq 'CommonAppDataFolder') 'Unexpected legacy data directory.'
+        $metadata.DataRoot = [IO.Path]::GetFullPath((Join-Path $env:ProgramData $directory))
+    } else {
+        Assert ($metadata.QcwsDataRootName -ceq 'data' -and $metadata.QcwsDataRootParent -ceq 'CM_DP_bin') 'Unexpected data directory beside the binary.'
+        $metadata.DataRoot = Join-Path $metadata.BinRoot 'data'
+    }
+    $metadata.Executable = Join-Path $metadata.BinRoot 'qcopilots-websearch.exe'
+    $metadata.Config = Join-Path $metadata.DataRoot $configName
     $metadata.Token = Join-Path $metadata.DataRoot 'client.token'
     $metadata.AdminToken = Join-Path $metadata.DataRoot 'admin.token'
     $metadata.AdminEndpoint = Join-Path $metadata.DataRoot 'state\admin-port'
@@ -145,8 +160,10 @@ function Invoke-Msi([hashtable]$metadata, [string]$mode, [string]$label, [int]$e
     $log = Join-Path $runDir ($label + '.log')
     $msiArgs = @($mode, ('"' + $metadata.Path + '"'), '/qn', '/norestart', 'REBOOT=ReallySuppress', '/L*v', ('"' + $log + '"'))
     if ($failpoint) { $msiArgs += "QCWS_TEST_FAILPOINT=$failpoint" }
-    if ($mode -eq '/i') { [void]$ownedProducts.Add($metadata.ProductCode) }
-    else { [void](Owned-Service $metadata) }
+    if ($mode -eq '/i') {
+        if ($metadata.OverrideInstallRoot) { $msiArgs += ('INSTALL_ROOT="' + $metadata.InstallRoot + '"') }
+        [void]$ownedProducts.Add($metadata.ProductCode)
+    } else { [void](Owned-Service $metadata) }
     Write-Host $label
     $process = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" -ArgumentList $msiArgs -WindowStyle Hidden -PassThru
     try {
@@ -174,6 +191,9 @@ function Assert-Running([hashtable]$metadata) {
     Wait-Service $metadata 'Running' 30
     $service = Owned-Service $metadata
     Assert ($service.StartName -eq $metadata.ServiceAccount -and $service.StartMode -eq 'Auto') 'Service account/start mode changed.'
+    if ($metadata.OverrideInstallRoot) {
+        Assert (!(Test-Path -LiteralPath $metadata.DefaultInstallRoot)) 'Custom INSTALL_ROOT did not contain the whole installation.'
+    }
     $version = & $metadata.Executable --Version 2>&1
     $versionPattern = '^QCopilots-WebSearch ' + [regex]::Escape($metadata.ProductVersion) + ', Qt '
     Assert ($LASTEXITCODE -eq 0 -and "$version" -match $versionPattern) 'Installed binary version mismatch.'
@@ -212,6 +232,18 @@ function Get-InstalledSettingsLink([hashtable]$metadata, [string]$origin) {
     return $url
 }
 function Assert-Administration([hashtable]$metadata, [bool]$editBaseline = $false) {
+    $sidInfo = & "$env:SystemRoot\System32\sc.exe" showsid $metadata.ServiceName | Out-String
+    $serviceSid = [regex]::Match($sidInfo, 'S-1-5-80(-[0-9]+)+').Value
+    Assert ($LASTEXITCODE -eq 0 -and $serviceSid) 'The service SID was unavailable.'
+    foreach ($directory in @(@{ Path = $metadata.DataRoot; Rights = 0x1200a9 },
+                              @{ Path = (Join-Path $metadata.DataRoot 'state'); Rights = 0x1301bf })) {
+        $acl = Get-Acl -LiteralPath $directory.Path
+        $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) |
+            Where-Object { $_.IdentityReference.Value -eq $serviceSid })
+        Assert ($acl.AreAccessRulesProtected -and $rules.Count -eq 1 -and !$rules[0].IsInherited -and
+                $rules[0].AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+                [int]$rules[0].FileSystemRights -eq $directory.Rights) "The installed service directory ACL changed: $($directory.Path)"
+    }
     $adminAcl = Get-Acl -LiteralPath $metadata.AdminToken
     Assert $adminAcl.AreAccessRulesProtected 'The administration credential inherits permissions.'
     $grants = @(Grant-ToInteractive $metadata.AdminToken)
@@ -359,11 +391,15 @@ function New-McpInitialize {
         protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'msi-acceptance'; version = '1' }
     } }
 }
-function Assert-SeparateInstances([hashtable]$baseline, [hashtable]$candidate) {
+function Assert-SeparatePorts([hashtable]$baseline, [hashtable]$candidate) {
     $old = [IO.File]::ReadAllText($baseline.Config) | ConvertFrom-Json
     $new = [IO.File]::ReadAllText($candidate.Config) | ConvertFrom-Json
     $ports = @($old.business.port, $old.control.port, $old.admin.port, $new.business.port, $new.control.port, $new.admin.port)
     Assert (@($ports | Select-Object -Unique).Count -eq 6) 'The two installed versions share listener ports.'
+}
+function Assert-SeparateInstances([hashtable]$baseline, [hashtable]$candidate) {
+    $old = [IO.File]::ReadAllText($baseline.Config) | ConvertFrom-Json
+    $new = [IO.File]::ReadAllText($candidate.Config) | ConvertFrom-Json
     Assert ($old.cache.search_ttl_seconds -ne $new.cache.search_ttl_seconds) 'The candidate copied the baseline deployment configuration.'
     Assert (!(Test-Path -LiteralPath (Join-Path $candidate.DataRoot 'state\acceptance-baseline.txt'))) 'The candidate copied the baseline state.'
     foreach ($property in @('Token', 'AdminToken')) {
@@ -433,6 +469,9 @@ function Remove-OwnedTree([hashtable]$metadata, [string]$root) {
             (@($metadata.InstallRoot, $metadata.DataRoot) -contains $absolute)) 'Refusing unowned delete.'
     if (!(Test-Path -LiteralPath $absolute)) { return }
     Assert ((Resolve-Path -LiteralPath $absolute).ProviderPath.TrimEnd('\') -eq $absolute) 'Cleanup root changed.'
+    for ($parent = [IO.Path]::GetDirectoryName($absolute); $parent; $parent = [IO.Path]::GetDirectoryName($parent)) {
+        Assert (!((Get-Item -LiteralPath $parent -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) 'Reparse point in cleanup ancestry.'
+    }
     $pending = [Collections.Generic.Stack[string]]::new()
     $pending.Push($absolute)
     while ($pending.Count) {
@@ -455,15 +494,18 @@ function Assert-RolledBack([hashtable]$metadata, [bool]$serviceStarted) {
     Wait-Absent $metadata
     Assert (!(Registered $metadata.ProductCode)) 'Rollback left a product registration.'
     Assert (@(Owned-Processes $metadata).Count -eq 0) 'Rollback left an installed process.'
-    foreach ($path in @($metadata.InstallRoot, $metadata.Config, $metadata.Token, $metadata.AdminToken)) {
+    foreach ($path in @($metadata.Executable, $metadata.Config, $metadata.Token, $metadata.AdminToken)) {
         Assert (!(Test-Path -LiteralPath $path)) "Rollback left an installer-created path: $path"
     }
     if ($serviceStarted -and (Test-Path -LiteralPath $metadata.DataRoot)) {
         # The service can generate state after StartServices, outside the MSI file receipt.
         # Delete it only after verifying rollback and ownership so the next install starts fresh.
         Remove-OwnedTree $metadata $metadata.DataRoot
+        foreach ($ancestor in @($metadata.BinRoot, $metadata.InstallRoot)) {
+            if ([IO.Directory]::Exists($ancestor)) { [IO.Directory]::Delete($ancestor) }
+        }
     }
-    Assert (!(Test-Path -LiteralPath $metadata.DataRoot)) 'Rollback left unexpected initialized deployment data.'
+    Assert (!(Test-Path -LiteralPath $metadata.InstallRoot)) 'Rollback left unexpected installed files or deployment data.'
 }
 $candidate = Read-Msi $options['--CandidateMsi']
 $baseline = Read-Msi $options['--BaselineMsi']
@@ -472,10 +514,13 @@ foreach ($pair in @(@{ Key = '--CandidateSHA256'; Msi = $candidate },
     $expected = $options[$pair.Key]
     Assert ($expected -match '^[a-fA-F0-9]{64}$' -and $pair.Msi.Sha256 -eq $expected) 'MSI SHA-256 mismatch.'
 }
-foreach ($metadata in @($candidate, $baseline)) { Set-ExpectedInstance $metadata }
+$legacyBaseline = $baseline.QcwsDataRootParent -ceq 'CommonAppDataFolder'
+Set-ExpectedInstance $candidate $legacyBaseline
+Set-ExpectedInstance $baseline (!$legacyBaseline) $legacyBaseline
 Assert ($candidate.ProductCode -ne $baseline.ProductCode -and $candidate.UpgradeCode -ne $baseline.UpgradeCode) 'The installed versions require distinct product and upgrade identities.'
 Assert ([version]$candidate.ProductVersion -gt [version]$baseline.ProductVersion) 'Candidate version must increase.'
-$roots = @($candidate.InstallRoot, $candidate.DataRoot, $baseline.InstallRoot, $baseline.DataRoot)
+$roots = @($candidate.InstallRoot, $candidate.DefaultInstallRoot, $candidate.DataRoot,
+           $baseline.InstallRoot, $baseline.DefaultInstallRoot, $baseline.DataRoot) | Select-Object -Unique
 foreach ($metadata in @($candidate, $baseline)) {
     Assert (!(Get-CimInstance Win32_Service -Filter "Name='$($metadata.ServiceName)'")) 'Existing service with a test version identity found. No changes made.'
     Assert (!(Registered $metadata.ProductCode)) 'Test version product already registered.'
@@ -513,19 +558,27 @@ try {
     Assert-RolledBack $candidate $true
     Assert-BaselineUnchanged $baseline $baselinePid $baselineFiles
 
-    Invoke-Msi $candidate '/i' '04-install-candidate-alongside-baseline'
+    [void](Stop-OwnedService $baseline)
+    Invoke-Msi $candidate '/i' '04-install-candidate-with-baseline-stopped'
     Assert-Running $candidate
+    Assert ((Owned-Service $baseline).State -eq 'Stopped') 'The candidate started the baseline service.'
+    Assert-SeparatePorts $baseline $candidate
+    Start-Service -Name $baseline.ServiceName
+    Wait-Service $baseline 'Running' 30
+    $baselinePid = (Owned-Service $baseline).ProcessId
     Assert-BaselineUnchanged $baseline $baselinePid $baselineFiles
     Assert-SeparateInstances $baseline $candidate
     Assert-Administration $candidate
     Assert-InstalledTokenRotation $candidate
     Assert-BaselineUnchanged $baseline $baselinePid $baselineFiles
-    $candidateFiles = Snapshot @($candidate.Config, $candidate.Token, $candidate.AdminToken)
+    $candidateFiles = Snapshot @($candidate.Config, $candidate.Token, $candidate.AdminToken,
+        (Join-Path $candidate.DataRoot 'state\secrets.json'))
 
     Invoke-Msi $candidate '/x' '05-uninstall-candidate'
     Wait-Absent $candidate
     Assert (!(Registered $candidate.ProductCode)) 'Uninstall left a candidate product registration.'
     Assert (@(Owned-Processes $candidate).Count -eq 0) 'Uninstall left a candidate process.'
+    Assert (!(Test-Path -LiteralPath $candidate.Executable)) 'Uninstall left the candidate executable.'
     Assert-Snapshot $candidateFiles
     Assert-BaselineUnchanged $baseline $baselinePid $baselineFiles
 } catch { $failure = $_ }
