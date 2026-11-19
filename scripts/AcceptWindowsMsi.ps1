@@ -197,6 +197,10 @@ function Assert-Running([hashtable]$metadata) {
     $version = & $metadata.Executable --Version 2>&1
     $versionPattern = '^QCopilots-WebSearch ' + [regex]::Escape($metadata.ProductVersion) + ', Qt '
     Assert ($LASTEXITCODE -eq 0 -and "$version" -match $versionPattern) 'Installed binary version mismatch.'
+    if ($metadata.QcwsDataRootParent -ceq 'CM_DP_bin') {
+        $configCheck = & $metadata.Executable --CheckConfig 2>&1
+        Assert ($LASTEXITCODE -eq 0 -and "$configCheck" -ceq 'Configuration valid.') 'Default configuration check failed for the installed binary.'
+    }
     $settings = [IO.File]::ReadAllText($metadata.Config) | ConvertFrom-Json
     Assert ($settings.project_version -ceq $metadata.ProductVersion) 'Runtime configuration release does not match the MSI.'
     $ports = @($settings.business.port, $settings.control.port, $settings.admin.port)
@@ -572,6 +576,7 @@ try {
     Assert-InstalledTokenRotation $candidate
     Assert-BaselineUnchanged $baseline $baselinePid $baselineFiles
     $candidateFiles = Snapshot @($candidate.Config, $candidate.Token, $candidate.AdminToken,
+        (Join-Path $candidate.DataRoot 'state\settings.json'),
         (Join-Path $candidate.DataRoot 'state\secrets.json'))
 
     Invoke-Msi $candidate '/x' '05-uninstall-candidate'
@@ -579,6 +584,11 @@ try {
     Assert (!(Registered $candidate.ProductCode)) 'Uninstall left a candidate product registration.'
     Assert (@(Owned-Processes $candidate).Count -eq 0) 'Uninstall left a candidate process.'
     Assert (!(Test-Path -LiteralPath $candidate.Executable)) 'Uninstall left the candidate executable.'
+    Assert-Snapshot $candidateFiles
+    Assert-BaselineUnchanged $baseline $baselinePid $baselineFiles
+
+    Invoke-Msi $candidate '/i' '06-reinstall-candidate'
+    Assert-Running $candidate
     Assert-Snapshot $candidateFiles
     Assert-BaselineUnchanged $baseline $baselinePid $baselineFiles
 } catch { $failure = $_ }

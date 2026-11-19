@@ -306,22 +306,22 @@ int main(int argc, char **argv) {
       configPath = adjacentConfiguration().toStdString();
     const QFileInfo runtime(QString::fromStdString(configPath));
 #ifdef _WIN32
-    const auto registered = implicitConfiguration && (portableStartup || settingsUrl)
+    const auto registered = implicitConfiguration
                                 ? qws::windowsServiceConfigPath(QLatin1String(QCWS_WINDOWS_SERVICE_NAME),
                                                                 QCoreApplication::applicationFilePath())
                                 : QString{};
-    if (portableStartup && !registered.isEmpty())
+    const bool installedConfig = !registered.isEmpty();
+    if (portableStartup && installedConfig)
       throw qws::Error("invalid_argument", "Start the installed instance through Windows Services.");
-    const bool installedSettings = settingsUrl && !registered.isEmpty();
-    if (installedSettings && !sameConfiguration(registered, runtime.absoluteFilePath()))
+    if (installedConfig && !sameConfiguration(registered, runtime.absoluteFilePath()))
       throw qws::Error("invalid_configuration", "The registered Windows service uses a different configuration path.");
     if (serviceNameSpecified) {
-      if (settingsUrl && implicitConfiguration && (!installedSettings || serviceName != QCWS_WINDOWS_SERVICE_NAME))
+      if (settingsUrl && implicitConfiguration && (!installedConfig || serviceName != QCWS_WINDOWS_SERVICE_NAME))
         throw qws::Error("invalid_argument", "Provide --ConfigPath for a different Windows service.");
       windowsServiceName = QString::fromStdString(serviceName).toStdWString();
     }
     qws::configureWindowsCredentialPolicy(serviceMode || serviceNameSpecified || !transaction.isEmpty() ||
-                                              installedSettings,
+                                              installedConfig,
                                           QString::fromStdWString(windowsServiceName).toStdString());
     if (rollbackInitialization || commitInitialization) {
       qws::finishWindowsInitialization(QString::fromStdString(configPath), transaction,
@@ -354,7 +354,7 @@ int main(int argc, char **argv) {
     if (settingsUrl) {
       qws::Config config;
 #ifdef _WIN32
-      if (installedSettings) {
+      if (installedConfig) {
         const auto port = qws::readWindowsInstalledAdminPort(runtime.absoluteDir().filePath("state"));
         config = {qws::Json{{"admin", {{"port", port}}}}, runtime.absolutePath().toStdString()};
       } else

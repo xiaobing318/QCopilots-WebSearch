@@ -84,8 +84,8 @@ The `project_version` field records the exact release that generated the
 configuration, such as `"0.2.1"`. A build rejects a stamped configuration from
 a different release. Run `--CheckConfig` with the executable for the version
 you want to check. It reads that executable's adjacent `data/runtime.json`
-by default. Explicit `--ConfigPath` continues to accept legacy files without
-`project_version`.
+by default. Run this check as administrator for MSI and with `sudo` for DEB.
+Explicit `--ConfigPath` continues to accept legacy files without `project_version`.
 
 MSI and DEB register a separate service and program directory for each version.
 Each service loads `bin/data/runtime.json` from its own installation root.
