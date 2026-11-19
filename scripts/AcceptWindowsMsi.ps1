@@ -235,7 +235,7 @@ function Get-InstalledSettingsLink([hashtable]$metadata, [string]$origin) {
     Assert ($LASTEXITCODE -eq 0 -and $url -cmatch $linkPattern) 'The installed settings CLI did not return a login link for its own port.'
     return $url
 }
-function Assert-Administration([hashtable]$metadata, [bool]$editBaseline = $false) {
+function Assert-Administration([hashtable]$metadata, [bool]$keepProviderKey = $false) {
     $sidInfo = & "$env:SystemRoot\System32\sc.exe" showsid $metadata.ServiceName | Out-String
     $serviceSid = [regex]::Match($sidInfo, 'S-1-5-80(-[0-9]+)+').Value
     Assert ($LASTEXITCODE -eq 0 -and $serviceSid) 'The service SID was unavailable.'
@@ -274,18 +274,16 @@ function Assert-Administration([hashtable]$metadata, [bool]$editBaseline = $fals
     Assert ($settings.search.provider -eq $provider) 'The settings response did not load the expected source.'
     Assert (!$settings.search_without_asking -and !$settings.providers.brave.key_set) 'A new installation read another version''s settings or provider credentials.'
     $headers = @{ Origin = $origin; 'X-QCWS-CSRF' = $state.csrf }
-    if ($editBaseline) {
-        $patch = @{ revision = $settings.revision; patch = @{ search_without_asking = $true } } | ConvertTo-Json -Compress
-        $savedSettings = Invoke-RestMethod -Uri "$origin/admin/api/v1/settings" -Method Put -Headers $headers -WebSession $session -Body $patch @json
-        Assert $savedSettings.search_without_asking 'The baseline settings edit did not persist.'
-    }
+    $patch = @{ revision = $settings.revision; patch = @{ search_without_asking = $true } } | ConvertTo-Json -Compress
+    $savedSettings = Invoke-RestMethod -Uri "$origin/admin/api/v1/settings" -Method Put -Headers $headers -WebSession $session -Body $patch @json
+    Assert $savedSettings.search_without_asking 'The settings edit did not persist.'
     $keyPath = "$origin/admin/api/v1/providers/brave/key"
     $fakeKey = [guid]::NewGuid().ToString('N')
     $saved = Invoke-RestMethod -Uri $keyPath -Method Put -Headers $headers -WebSession $session -Body (@{ key = $fakeKey } | ConvertTo-Json -Compress) @json
     Assert ($saved.providers.brave.key_set -and ($saved | ConvertTo-Json -Depth 16) -notmatch $fakeKey) 'The settings response exposed or failed to save a key.'
     $secrets = Join-Path $metadata.DataRoot 'state\secrets.json'
     Assert ((Test-Path -LiteralPath $secrets) -and @(Grant-ToInteractive $secrets).Count -eq 0) 'INTERACTIVE can access the provider secret file.'
-    if (!$editBaseline) {
+    if (!$keepProviderKey) {
         [void](Invoke-RestMethod -Uri $keyPath -Method Delete -Headers $headers -WebSession $session -Body '{}' @json)
     }
     [void](Invoke-RestMethod -Uri "$origin/admin/api/v1/session" -Method Delete -Headers $headers -WebSession $session -Body '{}' @json)

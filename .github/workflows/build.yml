@@ -175,12 +175,14 @@ jobs:
           source = Path("build/legacy-source").resolve()
           config = json.loads((source / "config/BuildPipeline.json").read_text(encoding="utf-8"))
           name = os.environ["QCWS_PROFILE"]
-          config["profiles"][name].update(
+          profile = config["profiles"][name]
+          profile.update(
               buildDir=str(Path("build/legacy-baseline").resolve()),
               installDir=str(Path("install/legacy-baseline").resolve()),
               cacheDir=str(Path(".cache").resolve()),
               qtRoot=str(Path(".cache/qt").resolve()),
           )
+          profile["cmakeArgs"].append("-DQCWS_BUILD_TESTING=OFF")
           destination = Path(os.environ["QCWS_ACCEPTANCE_DIR"]) / "legacy-baseline.json"
           destination.write_text(json.dumps(config), encoding="utf-8")
           subprocess.run([
