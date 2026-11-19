@@ -284,6 +284,16 @@ function Invoke-InstalledTokenCli([hashtable]$metadata, [string]$operation, [str
         $process.Dispose()
     }
 }
+function AccessRules($acl) {
+    # Windows can change its auto-inherited bookkeeping flag after publishing
+    # an ACL. Compare the actual ACEs and inheritance protection.
+    $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0)
+    $dacl = $descriptor.DiscretionaryAcl
+    Assert ($null -ne $dacl) 'The installed configuration has no DACL.'
+    $bytes = [byte[]]::new($dacl.BinaryLength)
+    $dacl.GetBinaryForm($bytes, 0)
+    return "$($acl.AreAccessRulesProtected):$([Convert]::ToBase64String($bytes))"
+}
 function Assert-InstalledTokenConfig([hashtable]$metadata, [string]$bearer, [string]$dacl) {
     $crypto = [Security.Cryptography.SHA256]::Create()
     try {
@@ -297,7 +307,7 @@ function Assert-InstalledTokenConfig([hashtable]$metadata, [string]$bearer, [str
     $acl = Get-Acl -LiteralPath $metadata.Config
     $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
     Assert ($owner -in @('S-1-5-32-544', 'S-1-5-18')) 'Updating the installed token left an owner untrusted by the MSI installer.'
-    Assert ($acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access) -eq $dacl) 'Updating the installed token changed the runtime file DACL.'
+    Assert ((AccessRules $acl) -ceq $dacl) 'Updating the installed token changed the runtime file access rules or inheritance protection.'
 }
 function Send-InstalledMcp($http, [uri]$uri, [string]$bearer, [hashtable]$message, [string]$session = '') {
     $method = if ($null -ne $message) { [Net.Http.HttpMethod]::Post } else { [Net.Http.HttpMethod]::Delete }
@@ -380,7 +390,7 @@ function Assert-SeparateInstances([hashtable]$baseline, [hashtable]$candidate) {
 function Assert-InstalledTokenRotation([hashtable]$metadata) {
     Write-Host 'Verify installed token generation, rotation and Bearer MCP access'
     $runtime = [IO.File]::ReadAllText($metadata.Config) | ConvertFrom-Json
-    $dacl = (Get-Acl -LiteralPath $metadata.Config).GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)
+    $dacl = AccessRules (Get-Acl -LiteralPath $metadata.Config)
     $bearer = Invoke-InstalledTokenCli $metadata '--GenerateToken' @('yes')
     Assert-InstalledTokenConfig $metadata $bearer $dacl
     $http = New-McpClient
