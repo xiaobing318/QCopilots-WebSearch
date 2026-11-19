@@ -239,7 +239,9 @@
               "searxng",
               "brave",
               "tavily",
-              "exa"
+              "exa",
+              "perplexity",
+              "deepseek"
             ]
           }
         }
@@ -342,7 +344,9 @@
               "searxng",
               "brave",
               "tavily",
-              "exa"
+              "exa",
+              "perplexity",
+              "deepseek"
             ]
           }
         }

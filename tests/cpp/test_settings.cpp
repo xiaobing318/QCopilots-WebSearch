@@ -38,6 +38,22 @@ int main(int argc, char **argv) {
     reopened.reloadIfChanged();
     require(reopened.error() == "settings_error", "Invalid external edits must be reported.");
     require(reopened.provider(*reopened.current()).id == "brave", "Invalid edits must retain last settings.");
+
+    for (const auto *id : {"perplexity", "deepseek"}) {
+      const auto key = std::string("example-") + id + "-key";
+      view = reopened.update({{"search", {{"provider", id}}}}, reopened.current()->revision);
+      require(view["search"]["provider"] == id, "New providers can be selected.");
+      require(view["providers"][id]["key_set"] == false, "New providers start without a key.");
+      require(reopened.policy(*reopened.current())["provider_ready"] == false, "A key is required.");
+      view = reopened.setKey(id, key);
+      qws::validateSchema(qws::readSchema("settings-view"), view);
+      require(view["providers"][id]["key_set"] == true, "New provider key state must be reported.");
+      require(view.dump().find(key) == std::string::npos, "Settings must not expose new provider keys.");
+      qws::SettingsStore persisted(config);
+      require(persisted.provider(*persisted.current()).key == key, "The new provider key must persist.");
+      require(persisted.policy(*persisted.current())["provider_ready"] == true, "A keyed provider is ready.");
+      require(reopened.clearKey(id)["providers"][id]["key_set"] == false, "New provider keys can be cleared.");
+    }
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';
     return 1;

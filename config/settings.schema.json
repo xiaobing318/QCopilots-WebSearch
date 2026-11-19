@@ -52,7 +52,9 @@
             "searxng",
             "brave",
             "tavily",
-            "exa"
+            "exa",
+            "perplexity",
+            "deepseek"
           ]
         },
         "searxng": {

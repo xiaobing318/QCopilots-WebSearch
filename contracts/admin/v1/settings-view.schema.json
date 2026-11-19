@@ -52,7 +52,9 @@
             "searxng",
             "brave",
             "tavily",
-            "exa"
+            "exa",
+            "perplexity",
+            "deepseek"
           ]
         },
         "searxng": {
@@ -142,13 +144,39 @@
             "key_set"
           ],
           "additionalProperties": false
+        },
+        "perplexity": {
+          "type": "object",
+          "properties": {
+            "key_set": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "key_set"
+          ],
+          "additionalProperties": false
+        },
+        "deepseek": {
+          "type": "object",
+          "properties": {
+            "key_set": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "key_set"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
         "searxng",
         "brave",
         "tavily",
-        "exa"
+        "exa",
+        "perplexity",
+        "deepseek"
       ],
       "additionalProperties": false
     }

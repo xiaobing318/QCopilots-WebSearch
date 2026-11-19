@@ -12,6 +12,8 @@ const keyUrls = {
   brave: "https://brave.com/search/api/",
   tavily: "https://app.tavily.com/",
   exa: "https://dashboard.exa.ai/",
+  perplexity: "https://console.perplexity.ai/project/keys",
+  deepseek: "https://platform.deepseek.com/api_keys",
 };
 
 type Props = {

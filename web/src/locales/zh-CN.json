@@ -24,6 +24,8 @@
   "providerBrave": "Brave Search",
   "providerTavily": "Tavily",
   "providerExa": "Exa",
+  "providerPerplexity": "Perplexity",
+  "providerDeepSeek": "DeepSeek",
   "searxngUrl": "SearXNG 端点",
   "searxngEngines": "SearXNG 引擎（用英文逗号分隔）",
   "saveConfiguration": "保存来源设置",

@@ -2,9 +2,12 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QLockFile>
 #include <QRandomGenerator>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QUrl>
+#include <algorithm>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json-schema.hpp>
@@ -15,6 +18,7 @@
 #include <set>
 #ifndef _WIN32
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 // Explicitly reference the resource initializer from this static library.
@@ -99,6 +103,48 @@ std::optional<std::string> violation(const Json &schema, const Json &value) {
     return std::nullopt;
   return "at " + boundedText(errors.where, 120) + ": " + boundedText(errors.reason, 200);
 }
+
+void validateCredential(const QByteArray &token, bool required, const char *errorCode) {
+  if ((required && token.size() < 32) || token.size() > 8192)
+    throw Error(errorCode, "Client credentials must contain 32 to 8192 visible ASCII characters.");
+  for (unsigned char c : token)
+    if (c < 0x21 || c > 0x7e)
+      throw Error(errorCode, "Credentials must contain visible ASCII only.");
+}
+
+Config validatedConfiguration(Json value, const QString &path) {
+  Config c{std::move(value), QFileInfo(path).absolutePath().toStdString()};
+  if (const auto problem = violation(readSchema("runtime"), c.value))
+    throw Error("invalid_configuration", "Runtime configuration does not match its schema " + *problem + ".");
+  if (const auto p = c.value.find("provider"); p != c.value.end()) {
+    const auto &provider = *p;
+    const QUrl url(QString::fromStdString(provider["url"].get<std::string>()), QUrl::StrictMode);
+    if (!url.isValid() || url.host().isEmpty() || !url.userInfo().isEmpty() || url.hasQuery() ||
+        url.hasFragment() || (url.scheme() != "http" && url.scheme() != "https"))
+      throw Error("invalid_configuration",
+                  "Provider must be a fixed HTTP(S) endpoint without credentials or query.");
+  }
+  if (c.value["business"]["host"] == c.value["control"]["host"] &&
+      c.value["business"]["port"] == c.value["control"]["port"])
+    throw Error("invalid_configuration", "Business and control listeners need distinct ports.");
+  return c;
+}
+
+#ifndef _WIN32
+void replaceRuntimeConfiguration(const QString &path, const QByteArray &contents, const struct stat &metadata) {
+  QSaveFile file(path);
+  if (!file.open(QIODevice::WriteOnly))
+    throw Error("invalid_configuration", "Cannot open runtime configuration for atomic update.");
+  const int handle = file.handle();
+  struct stat temporary{};
+  if (handle < 0 || ::fstat(handle, &temporary) != 0 ||
+      ((temporary.st_uid != metadata.st_uid || temporary.st_gid != metadata.st_gid) &&
+       ::fchown(handle, metadata.st_uid, metadata.st_gid) != 0) ||
+      ::fchmod(handle, metadata.st_mode & 0777) != 0 || file.write(contents) != contents.size() ||
+      !file.commit())
+    throw Error("invalid_configuration", "Cannot update runtime configuration with its original permissions.");
+}
+#endif
 } // namespace
 const Json &readSchema(const std::string &name) {
   const auto path = resource(name + ".schema.json");
@@ -210,22 +256,56 @@ void validateSchema(const Json &schema, const Json &value) {
     throw Error("invalid_argument", "Input does not match the schema " + *problem + ".");
 }
 Config Config::load(const std::string &path) {
-  Config c{readJson(QString::fromStdString(path)),
-           QFileInfo(QString::fromStdString(path)).absolutePath().toStdString()};
-  if (const auto problem = violation(readSchema("runtime"), c.value))
-    throw Error("invalid_configuration", "Runtime configuration does not match its schema " + *problem + ".");
-  if (const auto p = c.value.find("provider"); p != c.value.end()) {
-    const auto &provider = *p;
-    const QUrl url(QString::fromStdString(provider["url"].get<std::string>()), QUrl::StrictMode);
-    if (!url.isValid() || url.host().isEmpty() || !url.userInfo().isEmpty() || url.hasQuery() ||
-        url.hasFragment() || (url.scheme() != "http" && url.scheme() != "https"))
-      throw Error("invalid_configuration",
-                  "Provider must be a fixed HTTP(S) endpoint without credentials or query.");
-  }
-  if (c.value["business"]["host"] == c.value["control"]["host"] &&
-      c.value["business"]["port"] == c.value["control"]["port"])
-    throw Error("invalid_configuration", "Business and control listeners need distinct ports.");
-  return c;
+  const auto filename = QString::fromStdString(path);
+  return validatedConfiguration(readJson(filename), filename);
+}
+
+void setClientToken(const std::string &path, const std::string &id, const QByteArray &token) {
+  static const QRegularExpression clientId("\\A[A-Za-z0-9_.-]{1,64}\\z");
+  if (!clientId.match(QString::fromStdString(id)).hasMatch())
+    throw Error("invalid_argument", "Invalid client ID.");
+  validateCredential(token, true, "invalid_argument");
+  const QFileInfo requested(QString::fromStdString(path));
+  const auto parent = QFileInfo(requested.absolutePath()).canonicalFilePath();
+  if (parent.isEmpty())
+    throw Error("invalid_configuration", "Cannot find runtime configuration directory.");
+  const auto filename = QDir(parent).filePath(requested.fileName());
+  QLockFile lock(filename + ".clients.lock");
+  if (!lock.tryLock(5000))
+    throw Error("invalid_configuration", "Cannot lock runtime configuration for credential update.");
+  const QFileInfo current(filename);
+  if (!current.isFile() || current.isSymLink())
+    throw Error("invalid_configuration", "Runtime configuration must be an existing regular file.");
+#ifndef _WIN32
+  struct stat metadata{};
+  const auto native = QFile::encodeName(filename);
+  if (::lstat(native.constData(), &metadata) != 0 || !S_ISREG(metadata.st_mode) || metadata.st_nlink != 1)
+    throw Error("invalid_configuration", "Runtime configuration must be a regular file without hard links.");
+#endif
+
+  auto value = readJson(filename);
+  const auto clients = value.find("clients");
+  if (clients == value.end() || !clients->is_array())
+    throw Error("invalid_configuration", "Runtime configuration must contain a clients array.");
+  const auto hash = QCryptographicHash::hash(token, QCryptographicHash::Sha256);
+  auto entry = Json{{"id", id}, {"token_sha256", hash.toHex().toStdString()}};
+  const auto found = std::find_if(clients->begin(), clients->end(), [&](const auto &client) {
+    return client.is_object() && client.contains("id") && client["id"] == id;
+  });
+  if (found != clients->end())
+    *found = std::move(entry);
+  else
+    clients->push_back(std::move(entry));
+  const auto candidate = validatedConfiguration(std::move(value), filename);
+  (void)candidate.clients();
+  const auto contents = QByteArray::fromStdString(candidate.value.dump(2) + '\n');
+  if (contents.size() > 1024 * 1024)
+    throw Error("invalid_configuration", "Updated runtime configuration exceeds its size limit.");
+#ifdef _WIN32
+  replaceWindowsRuntimeConfiguration(filename, contents);
+#else
+  replaceRuntimeConfiguration(filename, contents, metadata);
+#endif
 }
 std::string Config::path(const std::string &value) const {
   if (value.empty())
@@ -257,12 +337,9 @@ std::string Config::secret(const Json &source, bool required) const {
     if (token.endsWith('\r'))
       token.chop(1);
   }
-  if ((required && token.size() < 32) || token.size() > 8192 || (configured && token.isEmpty()))
-    throw Error("invalid_configuration",
-                "Client credentials need at least 32 characters and configured credentials must be present.");
-  for (unsigned char c : token)
-    if (c < 0x21 || c > 0x7e)
-      throw Error("invalid_configuration", "Credentials must contain visible ASCII only.");
+  if (configured && token.isEmpty())
+    throw Error("invalid_configuration", "Configured credentials must be present.");
+  validateCredential(token, required, "invalid_configuration");
   return token.toStdString();
 }
 std::vector<ClientIdentity> Config::clients() const {
@@ -271,8 +348,12 @@ std::vector<ClientIdentity> Config::clients() const {
   std::set<QByteArray> hashes;
   for (const auto &c : value["clients"]) {
     const auto id = c["id"].get<std::string>();
-    const auto hash =
-        QCryptographicHash::hash(QByteArray::fromStdString(secret(c, true)), QCryptographicHash::Sha256);
+    const auto hash = c.contains("token_sha256")
+                          ? QByteArray::fromHex(QByteArray::fromStdString(c["token_sha256"].get<std::string>()))
+                          : QCryptographicHash::hash(QByteArray::fromStdString(secret(c, true)),
+                                                     QCryptographicHash::Sha256);
+    if (hash.size() != 32)
+      throw Error("invalid_configuration", "Invalid client credential digest.");
     if (!ids.insert(id).second || !hashes.insert(hash).second)
       throw Error("invalid_configuration", "Client identities and credentials must be unique.");
     result.push_back({id, hash});

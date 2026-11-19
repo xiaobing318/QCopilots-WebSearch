@@ -25,6 +25,8 @@ const providerKeys: Record<string, string> = {
   brave: "providerBrave",
   tavily: "providerTavily",
   exa: "providerExa",
+  perplexity: "providerPerplexity",
+  deepseek: "providerDeepSeek",
 };
 
 export function providerName(t: Text, name: string): string {

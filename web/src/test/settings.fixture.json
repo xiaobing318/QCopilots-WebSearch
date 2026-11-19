@@ -29,6 +29,12 @@
     },
     "exa": {
       "key_set": false
+    },
+    "perplexity": {
+      "key_set": false
+    },
+    "deepseek": {
+      "key_set": false
     }
   }
 }

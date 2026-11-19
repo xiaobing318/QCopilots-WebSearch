@@ -4,7 +4,7 @@
 
 QCopilots-WebSearch is an Apache-2.0 C++20 and Qt 6.12 service for web search, page reading and literal text search. It ships a settings page in English and Simplified Chinese and supports Windows 11 and Ubuntu 26.04 on amd64.
 
-Search works without an API key through DuckDuckGo HTML, DuckDuckGo Lite and Bing fallback. Select a private SearXNG instance or supply your own Brave, Tavily or Exa key in Settings. Availability and rate limits depend on the selected source.
+Search works without an API key through DuckDuckGo HTML, DuckDuckGo Lite and Bing fallback. In Settings, choose a private SearXNG instance or supply an API key for Brave, Tavily, Exa, Perplexity or DeepSeek. Availability and rate limits depend on the selected source.
 
 ## Install and open Settings
 
@@ -24,6 +24,8 @@ qcopilots-websearch --ConfigPath /private/path/service.json
 The Settings command prints a one-time link. Open it within two minutes, or append `--Open` to launch the browser. You can also open [Settings](http://127.0.0.1:8091/settings/) and sign in with the separate `admin.token`. Initialization generates random client and admin tokens and preserves existing configuration.
 
 The business listener defaults to `127.0.0.1:8088`. Use its `/v1` REST routes or `/mcp` with a client Bearer token. Health and metrics use `127.0.0.1:8089`. Process-based MCP clients can use `--Stdio --ConfigPath FILE`. [Deployment and QGIS setup](docs/deployment.md)
+
+Remote MCP clients connect over HTTPS at `https://<public-host>/mcp` with a Bearer token. Configure the token with `--ConfigPath FILE --GenerateToken` or `--ConfigPath FILE --SetToken`. [Client token management](docs/deployment.md#manage-client-tokens) · [Remote client configuration](docs/deployment.md#connect-remote-clients)
 
 ## MCP tools
 

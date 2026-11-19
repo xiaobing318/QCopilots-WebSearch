@@ -324,6 +324,46 @@ void writeWindowsPrivateFile(const QString &path, const QByteArray &contents) {
     throw;
   }
 }
+
+void replaceWindowsRuntimeConfiguration(const QString &path, const QByteArray &contents) {
+  Local descriptor;
+  PACL dacl = nullptr;
+  SECURITY_DESCRIPTOR_CONTROL control{};
+  {
+    Handle original(CreateFileW(nativePath(path).c_str(), READ_CONTROL,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (original.value == INVALID_HANDLE_VALUE || !GetFileInformationByHandle(original.value, &info) ||
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
+        info.nNumberOfLinks != 1)
+      fail();
+    PSECURITY_DESCRIPTOR raw = nullptr;
+    const auto status = GetSecurityInfo(original.value, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                                        nullptr, nullptr, &dacl, nullptr, &raw);
+    descriptor.reset(raw);
+    DWORD revision = 0;
+    if (status != ERROR_SUCCESS || !dacl || !GetSecurityDescriptorControl(raw, &control, &revision))
+      fail();
+  }
+
+  // Apply the existing access rules before publishing so the service retains read access.
+  const auto temporary = path + "." + QUuid::createUuid().toString(QUuid::WithoutBraces) + ".new";
+  auto native = nativePath(temporary);
+  (void)create(temporary, contents, false);
+  try {
+    const auto inheritance = control & SE_DACL_PROTECTED ? PROTECTED_DACL_SECURITY_INFORMATION
+                                                         : UNPROTECTED_DACL_SECURITY_INFORMATION;
+    if (SetNamedSecurityInfoW(native.data(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | inheritance,
+                              nullptr, nullptr, dacl, nullptr) != ERROR_SUCCESS)
+      fail();
+    publish(temporary, path, true);
+  } catch (...) {
+    DeleteFileW(native.c_str());
+    throw;
+  }
+}
+
 QByteArray readProtectedFile(const QString &path, FilePolicy policy, qint64 limit) {
   Handle file(CreateFileW(nativePath(path).c_str(), GENERIC_READ | READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_DELETE,
                           nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));

@@ -12,7 +12,7 @@ The settings listener defaults to loopback port 8091. Qt resources serve the web
 
 The service checks search and open switches before tool execution. The QGIS adapter applies the separate confirmation preference using its shared host bridge. One authorization covers a QGIS session. Direct MCP and REST clients handle confirmation independently. Status reads local and last-known information without querying a provider.
 
-The provider registry selects DuckDuckGo HTML, DuckDuckGo Lite and Bing fallback in `auto`, or a configured SearXNG, Brave, Tavily or Exa provider. Search results pass through shared filtering, deduplication and normalization. Auto applies bounded pacing and cooldown. Provider settings and credentials are independent of a client's business token.
+The provider registry selects DuckDuckGo HTML, DuckDuckGo Lite and Bing fallback in `auto`, or a configured SearXNG, Brave, Tavily, Exa, Perplexity or DeepSeek provider. Search results pass through shared filtering, deduplication and normalization. Auto applies bounded pacing and cooldown. Provider settings and credentials are independent of a client's business token.
 
 ## Outbound HTTP and TLS
 

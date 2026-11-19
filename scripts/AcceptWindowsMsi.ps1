@@ -195,6 +195,134 @@ function Assert-Administration {
     [void](Invoke-RestMethod -Uri $keyPath -Method Delete -Headers $headers -WebSession $session -Body '{}' @json)
     [void](Invoke-RestMethod -Uri "$origin/admin/api/v1/session" -Method Delete -Headers $headers -WebSession $session -Body '{}' @json)
 }
+function Invoke-InstalledTokenCli([string]$operation, [string[]]$lines) {
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $exe
+    $start.Arguments = '--ConfigPath "{0}" --ServiceName "{1}" --ClientId msi-acceptance {2}' -f $config, $ServiceName, $operation
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::Start($start)
+    try {
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        foreach ($line in $lines) { $process.StandardInput.WriteLine($line) }
+        $process.StandardInput.Close()
+        Assert ($process.WaitForExit(10000)) 'Installed token CLI timed out.'
+        Assert ($process.ExitCode -eq 0) "Installed token CLI failed for $operation."
+        $value = $stdout.GetAwaiter().GetResult().TrimEnd([char[]]"`r`n")
+        $diagnostics = $stderr.GetAwaiter().GetResult()
+        if ($operation -eq '--GenerateToken') {
+            Assert ($value -cmatch '^[a-f0-9]{64}$' -and !$diagnostics.Contains($value)) 'Installed generator did not return a single private token.'
+        } else {
+            Assert (!$value -and !$diagnostics.Contains($lines[0])) 'Installed setter exposed the supplied token.'
+        }
+        return $value
+    } finally {
+        if (!$process.HasExited) { $process.Kill(); [void]$process.WaitForExit(5000) }
+        $process.Dispose()
+    }
+}
+function Assert-InstalledTokenConfig([string]$bearer, [string]$dacl) {
+    $crypto = [Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = [BitConverter]::ToString($crypto.ComputeHash([Text.Encoding]::ASCII.GetBytes($bearer))).Replace('-', '').ToLowerInvariant()
+    } finally { $crypto.Dispose() }
+    $text = [IO.File]::ReadAllText($config)
+    Assert (!$text.Contains($bearer)) 'The installed config contains a plaintext token.'
+    $runtime = $text | ConvertFrom-Json
+    $entry = @($runtime.clients | Where-Object id -eq 'msi-acceptance')
+    Assert ($entry.Count -eq 1 -and @($entry[0].PSObject.Properties.Name).Count -eq 2 -and $entry[0].token_sha256 -ceq $hash) 'The installed client entry does not contain only the expected digest and id.'
+    $acl = Get-Acl -LiteralPath $config
+    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    Assert ($owner -in @('S-1-5-32-544', 'S-1-5-18')) 'Updating the installed token left an owner untrusted by the MSI installer.'
+    Assert ($acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access) -eq $dacl) 'Updating the installed token changed the runtime file DACL.'
+}
+function Send-InstalledMcp($http, [uri]$uri, [string]$bearer, [hashtable]$message, [string]$session = '') {
+    $method = if ($null -ne $message) { [Net.Http.HttpMethod]::Post } else { [Net.Http.HttpMethod]::Delete }
+    $request = [Net.Http.HttpRequestMessage]::new($method, $uri)
+    try {
+        [void]$request.Headers.TryAddWithoutValidation('Accept', 'application/json, text/event-stream')
+        if ($bearer) { $request.Headers.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $bearer) }
+        if ($session) {
+            [void]$request.Headers.TryAddWithoutValidation('Mcp-Session-Id', $session)
+            [void]$request.Headers.TryAddWithoutValidation('MCP-Protocol-Version', '2025-06-18')
+        }
+        if ($null -ne $message) {
+            $request.Content = [Net.Http.StringContent]::new(($message | ConvertTo-Json -Depth 8 -Compress), [Text.Encoding]::UTF8, 'application/json')
+        }
+        $response = $http.SendAsync($request).GetAwaiter().GetResult()
+        try {
+            $body = if ($null -ne $response.Content) { $response.Content.ReadAsStringAsync().GetAwaiter().GetResult() } else { '' }
+            return @{
+                Status = [int]$response.StatusCode
+                Body = if ($body) { $body | ConvertFrom-Json } else { $null }
+                Session = if ($response.Headers.Contains('Mcp-Session-Id')) { @($response.Headers.GetValues('Mcp-Session-Id'))[0] } else { '' }
+            }
+        } finally { $response.Dispose() }
+    } finally { $request.Dispose() }
+}
+function Assert-InstalledMcp($http, [uri]$uri, [string]$bearer, [hashtable]$initialize) {
+    $result = Send-InstalledMcp $http $uri $bearer $initialize
+    $session = $result.Session
+    Assert ($result.Status -eq 200 -and $session -and $result.Body.result.protocolVersion -eq '2025-06-18') 'Installed MCP initialize did not accept the expected token.'
+    $result = Send-InstalledMcp $http $uri $bearer @{ jsonrpc = '2.0'; method = 'notifications/initialized' } $session
+    Assert ($result.Status -eq 202) 'Installed MCP did not accept the initialized notification.'
+    $result = Send-InstalledMcp $http $uri $bearer @{ jsonrpc = '2.0'; id = 2; method = 'tools/list' } $session
+    Assert ($result.Status -eq 200 -and (@($result.Body.result.tools.name | Sort-Object) -join ',') -eq 'web_find,web_open,web_search,web_search_status') 'Installed MCP returned an unexpected tools list.'
+    $call = @{ jsonrpc = '2.0'; id = 3; method = 'tools/call'; params = @{ name = 'web_search_status'; arguments = @{} } }
+    $result = Send-InstalledMcp $http $uri $bearer $call $session
+    Assert ($result.Status -eq 200 -and $result.Body.result.structuredContent.contract_version -eq 1) 'Installed MCP web_search_status failed.'
+    Assert ((Send-InstalledMcp $http $uri $bearer $null $session).Status -eq 204) 'Installed MCP session cleanup failed.'
+}
+function Assert-InstalledTokenRotation([hashtable]$metadata) {
+    Write-Host 'Verify installed token generation, rotation and Bearer MCP access'
+    [void](Stop-OwnedService)
+    $leases = @(1..3 | ForEach-Object { [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0) })
+    try {
+        foreach ($listener in $leases) { $listener.Server.ExclusiveAddressUse = $true; $listener.Start() }
+        $ports = @($leases | ForEach-Object { $_.LocalEndpoint.Port })
+    } finally { foreach ($listener in $leases) { $listener.Stop() } }
+    $runtime = [IO.File]::ReadAllText($config) | ConvertFrom-Json
+    $runtime.business.port = $ports[0]
+    $runtime.business.allowed_hosts = @("127.0.0.1:$($ports[0])")
+    $runtime.control.port = $ports[1]
+    $runtime.control.allowed_hosts = @("127.0.0.1:$($ports[1])")
+    $runtime | Add-Member -Force -NotePropertyName admin -NotePropertyValue @{ port = $ports[2] }
+    [IO.File]::WriteAllText($config, ($runtime | ConvertTo-Json -Depth 30), [Text.UTF8Encoding]::new($false))
+    $dacl = (Get-Acl -LiteralPath $config).GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)
+    $bearer = Invoke-InstalledTokenCli '--GenerateToken' @('yes')
+    Assert-InstalledTokenConfig $bearer $dacl
+    Start-Service -Name $ServiceName
+    Assert-Running $metadata
+
+    Add-Type -AssemblyName System.Net.Http
+    $handler = [Net.Http.HttpClientHandler]::new()
+    $handler.UseProxy = $false
+    $http = [Net.Http.HttpClient]::new($handler)
+    $http.Timeout = [TimeSpan]::FromSeconds(5)
+    try {
+        $uri = "http://127.0.0.1:$($ports[0])/mcp"
+        $initialize = @{ jsonrpc = '2.0'; id = 1; method = 'initialize'; params = @{
+            protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'msi-acceptance'; version = '1' }
+        } }
+        Assert ((Send-InstalledMcp $http $uri '' $initialize).Status -eq 401) 'Installed MCP accepted an unauthenticated client.'
+        Assert-InstalledMcp $http $uri $bearer $initialize
+
+        $replacement = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
+        [void](Invoke-InstalledTokenCli '--SetToken' @($replacement, 'yes'))
+        Assert-InstalledTokenConfig $replacement $dacl
+        Assert ((Send-InstalledMcp $http $uri $replacement $initialize).Status -eq 401) 'The rotated token became active before service restart.'
+        Assert-InstalledMcp $http $uri $bearer $initialize
+        [void](Stop-OwnedService)
+        Start-Service -Name $ServiceName
+        Assert-Running $metadata
+        Assert ((Send-InstalledMcp $http $uri $bearer $initialize).Status -eq 401) 'The original token remained active after service restart.'
+        Assert-InstalledMcp $http $uri $replacement $initialize
+    } finally { $http.Dispose() }
+}
 function Snapshot([string[]]$paths) {
     $result = @{}
     foreach ($path in $paths) { $result[$path] = @{ Hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash; Acl = (Get-Acl -LiteralPath $path).Sddl } }
@@ -297,6 +425,8 @@ try {
     Assert-Administration
     if (!$baselineHasAdmin) { $preservedFiles += Snapshot @($adminToken) }
     Assert-Snapshot $preservedFiles
+    Assert-InstalledTokenRotation $candidate
+    $preservedFiles[$config] = (Snapshot @($config))[$config]
     Invoke-Msi $candidate '/x' '05-uninstall'
     Wait-Absent
     Assert (!(Registered $candidate.ProductCode)) 'Uninstall left product registration.'

@@ -32,6 +32,30 @@ describe("settings contracts", () => {
       }),
     ).toBe(false);
   });
+
+  it.each(["perplexity", "deepseek"])(
+    "accepts selecting %s and exposes only its key state",
+    (provider) => {
+      const search = { ...fixture.search, provider };
+      expect(view({ ...fixture, search })).toBe(true);
+      expect(
+        update({
+          revision: fixture.revision,
+          patch: { search: { provider } },
+        }),
+      ).toBe(true);
+      expect(
+        view({
+          ...fixture,
+          search,
+          providers: {
+            ...fixture.providers,
+            [provider]: { key_set: true, key: "private" },
+          },
+        }),
+      ).toBe(false);
+    },
+  );
 });
 
 describe("settings localization", () => {

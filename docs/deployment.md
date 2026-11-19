@@ -79,8 +79,9 @@ in `compose.yml`. Upgrade them deliberately and repeat acceptance.
 The MSI installs the `QCopilotsWebSearch` machine service under the virtual
 account `NT SERVICE\QCopilotsWebSearch`. Program files and Qt libraries go under
 Program Files. Deployment configuration and credentials live in
-`%ProgramData%\QCopilots-WebSearch`, with user settings and provider keys in its
-`state` subdirectory. Windows uses Schannel.
+`%ProgramData%\QCopilots-WebSearch`. The service loads `service.json` from that
+directory. User settings and provider keys live in its `state` subdirectory.
+Windows uses Schannel.
 
 Local interactive users can read `admin.token` to open the settings page and
 manage search settings. Runtime configuration, the client token and provider
@@ -97,6 +98,65 @@ Extract the portable ZIP to a writable directory, including one with spaces or
 Unicode, and use `bin/qcopilots-websearch.exe` to initialize and run the service.
 Issue a link with `--ConfigPath FILE --SettingsUrl`. The ZIP runs as a foreground
 process. New configurations use the automatic source, so a SearXNG instance is optional.
+
+## Manage client tokens
+
+The CLI can generate a token or register one you already have for an existing
+runtime configuration. Both commands ask for confirmation on stderr and require
+`y` or `yes`. The setter reads the token from standard input and masks it in an
+interactive terminal. Enter the token as one line of 32 to 8192 visible ASCII
+characters, then confirm on the next line. The generator prints the new token
+to stdout after the configuration is saved.
+
+```text
+qcopilots-websearch --ConfigPath FILE --GenerateToken [--ClientId ID]
+qcopilots-websearch --ConfigPath FILE --SetToken [--ClientId ID]
+```
+
+The default client ID is `local`. Specify a different ID to grant an individual
+user or integration its own token. The command adds a new ID or replaces the
+credential for an existing one while preserving that client's cache identity.
+The updated entry stores only `token_sha256`. Existing entries can continue to
+use `token_env` or `token_file`. The service reads credentials at startup, so
+restart it to apply changes and invalidate any replaced token.
+
+Keep the token value in a private credential store and share it securely with
+the client. The digest in the configuration cannot be used to connect or recover
+the token. The standalone `--GenerateToken` command prints a token without
+changing any configuration.
+
+For the DEB installation, generate a credential as an administrator, check the
+configuration as the service account, then restart.
+
+```bash
+sudo /opt/qcopilots-websearch/bin/qcopilots-websearch --ConfigPath /etc/qcopilots-websearch/runtime.json --GenerateToken --ClientId team-alice
+sudo -u qcopilots-websearch /opt/qcopilots-websearch/bin/qcopilots-websearch --ConfigPath /etc/qcopilots-websearch/runtime.json --CheckConfig
+sudo systemctl restart qcopilots-websearch
+```
+
+For the MSI installation, run these commands from the installed `bin` directory
+in an elevated PowerShell session. For a portable installation, use its runtime
+configuration path and omit `--ServiceName`.
+
+```powershell
+$configPath = Join-Path $env:ProgramData 'QCopilots-WebSearch\service.json'
+.\qcopilots-websearch.exe --ConfigPath $configPath --ServiceName QCopilotsWebSearch --GenerateToken --ClientId team-alice
+.\qcopilots-websearch.exe --ConfigPath $configPath --ServiceName QCopilotsWebSearch --CheckConfig
+Restart-Service -Name QCopilotsWebSearch
+```
+
+## Connect remote clients
+
+Use the existing HTTPS endpoint for the business listener. Include its exact
+authority in `business.allowed_hosts` and the exact browser page origin in
+`business.origins` when connecting directly from a browser. The endpoint
+forwards the client's Bearer credential to QCopilots-WebSearch.
+
+In the client's MCP server settings, enter `https://search.example.org/mcp`
+using your service hostname. Enable **Authorization** and paste the token value
+into the **Bearer** field. Verify the client lists the four tools and can call
+`web_search_status`. For the [QGIS adapter](#qgis), use the HTTPS origin
+`https://search.example.org` as `backend_url`, with its existing token source.
 
 ## Runtime trust and proxies
 
@@ -121,21 +181,17 @@ The adapter authenticates to the native service as an ordinary REST client.
 Give every QGIS user a separate client identity, so that page snapshots and cache
 entries stay private to that user.
 
-1. Generate a value with `qcopilots-websearch --GenerateToken`. Keep it out of
-   shell history and logs.
-2. Store it in a token file beside the service configuration, for example
-   `clients/qgis-alice.token`, protected like `client.token`. On Ubuntu the
-   file is owned by `qcopilots-websearch` with mode 0600. On Windows only
-   administrators, SYSTEM and the service account may read it.
-3. Add `{"id": "qgis-alice", "token_file": "clients/qgis-alice.token"}` to
-   `clients`, run `--CheckConfig` and restart the service.
-4. Give the user the same value in a file only that user can read, or in the
+1. Generate and register a token with `qcopilots-websearch --ConfigPath FILE
+   --GenerateToken --ClientId qgis-alice`. Use the
+   [platform-specific steps](#manage-client-tokens) to check the configuration
+   and restart the service.
+2. Give the user the token value in a file only that user can read, or in the
    user environment variable `QCOPILOTS_WEBSEARCH_BACKEND_TOKEN`. On Linux and
    macOS the adapter rejects a token file that other users can read.
 
-A single-user setup created with `--InitializeConfig` already owns its generated
-`client.token`. Point the adapter's `auth.token_file` at that absolute path
-instead of copying the value.
+A single-user setup created with `--InitializeConfig` already has a generated
+`client.token`. If the service still uses it and QGIS can read it locally,
+point the adapter's `auth.token_file` at that absolute path.
 
 ### Adapter settings
 

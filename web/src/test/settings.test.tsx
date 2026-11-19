@@ -24,18 +24,9 @@ function json(value: unknown, status = 200) {
   });
 }
 
-function mockService({
-  signedIn = true,
-  provider = "auto",
-}: {
-  signedIn?: boolean;
-  provider?: SettingsView["search"]["provider"];
-} = {}) {
+function mockService({ signedIn = true } = {}) {
   let authenticated = signedIn;
-  let current = {
-    ...structuredClone(fixture),
-    search: { ...fixture.search, provider },
-  };
+  let current = structuredClone(fixture) as SettingsView;
   const fetcher = vi.fn((path: string, options: RequestInit) => {
     const key = options.method + " " + path;
     switch (key) {
@@ -65,12 +56,6 @@ function mockService({
       }
       case "GET /admin/api/v1/status":
         return json(defaultStatus);
-      case "PUT /admin/api/v1/providers/brave/key":
-        current.providers.brave.key_set = true;
-        return json(current);
-      case "DELETE /admin/api/v1/providers/brave/key":
-        current.providers.brave.key_set = false;
-        return json(current);
       case "POST /admin/api/v1/providers/auto/test":
         return json({
           ok: true,
@@ -82,8 +67,19 @@ function mockService({
             { title: "Invalid URL", url: "javascript:void(0)" },
           ],
         });
-      default:
+      default: {
+        const selected = current.search.provider;
+        const keyPath = "/admin/api/v1/providers/" + selected + "/key";
+        if (
+          selected !== "auto" &&
+          path === keyPath &&
+          (options.method === "PUT" || options.method === "DELETE")
+        ) {
+          current.providers[selected].key_set = options.method === "PUT";
+          return json(current);
+        }
         return json({ error: { code: "not_found" } }, 404);
+      }
     }
   });
   vi.stubGlobal("fetch", fetcher);
@@ -166,20 +162,45 @@ it("includes the current revision and only the modified preference in a write", 
   );
 });
 
-it("shows only key state after saving or removing a provider key", async () => {
-  const user = userEvent.setup();
-  mockService({ provider: "brave" });
-  render(<App />);
-  const key = await screen.findByLabelText("Provider key");
-  expect(key).toHaveAttribute("type", "password");
-  await user.type(key, "example-secret-key");
-  await user.click(screen.getByRole("button", { name: "Save key" }));
-  expect(await screen.findByText("Key configured")).toBeVisible();
-  expect(key).toHaveValue("");
-  expect(document.body).not.toHaveTextContent("example-secret-key");
-  await user.click(screen.getByRole("button", { name: "Remove key" }));
-  expect(await screen.findByText("No key configured")).toBeVisible();
-});
+it.each([
+  ["brave", "Brave Search", "https://brave.com/search/api/"],
+  ["perplexity", "Perplexity", "https://console.perplexity.ai/project/keys"],
+  ["deepseek", "DeepSeek", "https://platform.deepseek.com/api_keys"],
+] as const)(
+  "shows only key state after saving or removing a %s key",
+  async (provider, label, keyUrl) => {
+    const user = userEvent.setup();
+    const fetcher = mockService();
+    render(<App />);
+    const source = await screen.findByRole("combobox", { name: "Provider" });
+    await user.selectOptions(source, label);
+    const key = await screen.findByLabelText("Provider key");
+    expect(key).toHaveAttribute("type", "password");
+    expect(screen.getByRole("link", { name: "Get a key" })).toHaveAttribute(
+      "href",
+      keyUrl,
+    );
+    await user.type(key, "example-secret-key");
+    await user.click(screen.getByRole("button", { name: "Save key" }));
+    expect(await screen.findByText("Key configured")).toBeVisible();
+    expect(key).toHaveValue("");
+    expect(document.body).not.toHaveTextContent("example-secret-key");
+    const keyPath = "/admin/api/v1/providers/" + provider + "/key";
+    expect(fetcher).toHaveBeenCalledWith(
+      keyPath,
+      expect.objectContaining({
+        method: "PUT",
+        body: '{"key":"example-secret-key"}',
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "Remove key" }));
+    expect(await screen.findByText("No key configured")).toBeVisible();
+    expect(fetcher).toHaveBeenCalledWith(
+      keyPath,
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  },
+);
 
 it("persists the selected language and displays provider status and safe samples", async () => {
   const user = userEvent.setup();

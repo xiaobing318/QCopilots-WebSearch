@@ -1,9 +1,10 @@
 # Operations and recovery
 
 Use independent credentials per caller. A page snapshot belongs to its client
-identity, not merely to a URL. Rotate a token by updating its private file or
-environment source and restarting. Keep the identity when retaining its cache
-access is intentional. Never commit token files or copy them into diagnostics.
+identity. Rotate a token with the CLI or by updating an existing private file
+or environment source, then restart. Keep the identity to retain its cache
+access. Keep token files out of source control and diagnostics.
+[Client token management](deployment.md#manage-client-tokens)
 
 ## Capacity and monitoring
 
@@ -40,8 +41,8 @@ tokens and provider secrets out of logs.
 
 Auto uses public DuckDuckGo and Bing pages and can report `provider_unavailable`
 or `rate_limited` when they are unreachable or throttling. Use the provider test
-in Settings to diagnose a failure. For managed search, select your SearXNG endpoint
-or configure a Brave, Tavily or Exa key.
+in Settings to diagnose a failure. For managed search, select your SearXNG
+endpoint or configure a Brave, Tavily, Exa, Perplexity or DeepSeek key.
 
 ## Cache and backups
 
@@ -81,7 +82,9 @@ corrupt or locked cache. Repair filesystem permissions or disk capacity first.
 Runtime configuration uses `schema_version: 1` and rejects unknown fields.
 `--CheckConfig` names the first field that does not match the schema. Back up
 configuration before upgrading and check version compatibility before restoring
-an older package. There is no automatic configuration downgrade.
+an older package. An older executable that lacks `token_sha256` support
+requires a compatible backup of the runtime configuration. There is no
+automatic configuration downgrade.
 
 Releases after 0.1.4 use a new cached payload layout. Entries written by 0.1.4
 or earlier are no longer read and age out through normal eviction. Page IDs issued

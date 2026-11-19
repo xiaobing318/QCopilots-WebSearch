@@ -54,6 +54,10 @@ std::unique_ptr<SearchProvider> ProviderRegistry::create(const ProviderConfig &c
     return std::make_unique<KeyedProvider>(config, std::move(send), searchTavily);
   if (config.id == "exa")
     return std::make_unique<KeyedProvider>(config, std::move(send), searchExa);
+  if (config.id == "perplexity")
+    return std::make_unique<KeyedProvider>(config, std::move(send), searchPerplexity);
+  if (config.id == "deepseek")
+    return std::make_unique<KeyedProvider>(config, std::move(send), searchDeepSeek);
   throw Error("invalid_argument", "Unknown search provider.");
 }
 

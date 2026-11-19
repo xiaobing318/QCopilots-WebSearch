@@ -25,7 +25,8 @@ add_library(qcws_core STATIC src/core/network.cpp src/core/cache.cpp src/core/co
   src/providers/registry.cpp src/providers/searxng.cpp src/providers/auto_provider.cpp
   src/providers/pacing.cpp src/providers/duckduckgo.cpp src/providers/bing.cpp
   src/providers/serp_parsers.cpp src/providers/brave.cpp src/providers/tavily.cpp
-  src/providers/exa.cpp src/providers/locale_map.cpp)
+  src/providers/exa.cpp src/providers/perplexity.cpp src/providers/deepseek.cpp
+  src/providers/locale_map.cpp)
 include(cmake/WebUi.cmake)
 set(_schemas config/runtime.json config/runtime.schema.json contracts/v1/web_search.schema.json contracts/v1/web_open.schema.json
   contracts/v1/web_find.schema.json contracts/v1/web_search_status.schema.json contracts/v1/tools.json

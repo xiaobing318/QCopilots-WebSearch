@@ -544,8 +544,8 @@ Json Service::fetchSearch(const Json &args, const std::shared_ptr<CancelToken> &
     if (report)
       reportDependency(config, {{"state", failures.empty() ? "available" : "degraded"}, {"last_checked", now()}});
   } catch (const Error &e) {
-    // A caller abandoning the search says nothing about provider health.
-    if (report && e.code != "cancelled")
+    // Cancellation and invalid requests do not indicate provider health.
+    if (report && e.code != "cancelled" && e.code != "invalid_argument")
       reportDependency(config, {{"state", results.empty() ? "unavailable" : "degraded"},
                                 {"last_checked", now()}, {"error", e.code}});
     if (results.empty())
@@ -589,7 +589,8 @@ Json Service::listeningAddresses() const {
 }
 
 Json Service::testProvider(const std::string &id) {
-  if (id != "auto" && id != "searxng" && id != "brave" && id != "tavily" && id != "exa")
+  if (id != "auto" && id != "searxng" && id != "brave" && id != "tavily" && id != "exa" &&
+      id != "perplexity" && id != "deepseek")
     throw Error("invalid_argument", "Unknown search provider.");
   const auto started = Clock::now();
   auto token = std::make_shared<CancelToken>();

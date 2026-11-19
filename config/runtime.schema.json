@@ -138,6 +138,11 @@
             "description": "Credential file. Accepts a protected absolute or config-relative path. Read once at startup, so restart applies rotation.",
             "minLength": 1,
             "maxLength": 4096
+          },
+          "token_sha256": {
+            "type": "string",
+            "description": "Lowercase SHA-256 digest of a client credential. Created by the token configuration commands and read at startup.",
+            "pattern": "^[a-f0-9]{64}$"
           }
         },
         "required": [
@@ -148,22 +153,17 @@
           {
             "required": [
               "token_env"
-            ],
-            "not": {
-              "required": [
-                "token_file"
-              ]
-            }
+            ]
           },
           {
             "required": [
               "token_file"
-            ],
-            "not": {
-              "required": [
-                "token_env"
-              ]
-            }
+            ]
+          },
+          {
+            "required": [
+              "token_sha256"
+            ]
           }
         ]
       },

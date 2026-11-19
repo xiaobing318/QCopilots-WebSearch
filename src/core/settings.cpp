@@ -4,6 +4,8 @@
 #include <QRandomGenerator>
 #include <QSaveFile>
 #include <QUrl>
+#include <algorithm>
+#include <array>
 #include <qws/settings.hpp>
 #include <qws/windows.hpp>
 
@@ -11,6 +13,7 @@ namespace qws {
 namespace {
 const Json emptySecrets = {{"schema_version", 1}, {"keys", Json::object()}};
 const auto ownerReadWrite = QFileDevice::ReadOwner | QFileDevice::WriteOwner;
+constexpr std::array keyedProviders{"searxng", "brave", "tavily", "exa", "perplexity", "deepseek"};
 
 QByteArray hash(const QByteArray &data) {
   return QCryptographicHash::hash(data, QCryptographicHash::Sha256).toHex();
@@ -83,7 +86,7 @@ QString filePath(const std::string &directory, const char *name) {
 }
 
 bool providerHasKey(const std::string &id) {
-  return id == "searxng" || id == "brave" || id == "tavily" || id == "exa";
+  return std::find(keyedProviders.begin(), keyedProviders.end(), id) != keyedProviders.end();
 }
 } // namespace
 
@@ -144,7 +147,7 @@ ProviderConfig SettingsStore::provider(const SettingsSnapshot &settings, std::st
 Json SettingsStore::view(const SettingsSnapshot &settings) const {
   auto result = settings.value;
   result["revision"] = settings.revision;
-  for (const auto *id : {"searxng", "brave", "tavily", "exa"})
+  for (const auto *id : keyedProviders)
     result["providers"][id] = {{"key_set", !provider(settings, id).key.empty()}};
   return result;
 }

@@ -60,6 +60,12 @@ times out after earlier pages produced results, those results are returned as
 can retry a timeout or a 5xx response once and applies per-source pacing and
 cooldown. The response reports warnings, fetch time and cache state.
 
+Select Perplexity or DeepSeek in Settings to use its structured Search API.
+DeepSeek accepts at most 128 Unicode characters in the normalized query. The
+service rejects a longer query with `invalid_argument` and applies domain
+filtering locally. [Perplexity Search API](https://docs.perplexity.ai/api-reference/search-post)
+· [DeepSeek Search API](https://api-docs.deepseek.com/api/search/)
+
 `cache.ttl_seconds` is the configured search TTL for `ok` results and at most 30
 seconds for `partial` results with hits. A `partial` result without hits is not
 cached and reports 0. A failed cache write leaves the result uncached without

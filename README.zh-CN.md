@@ -4,7 +4,7 @@
 
 QCopilots-WebSearch 是一个使用 C++20 和 Qt 6.12 的独立服务，提供网络搜索、网页阅读与页内查找。设置页支持简体中文和英文。服务支持 Windows 11 和 Ubuntu 26.04 amd64。
 
-默认来源依次使用 DuckDuckGo HTML、DuckDuckGo Lite 和 Bing，无需 API 密钥。也可在设置页选择自部署 SearXNG，或为 Brave、Tavily、Exa 提供自己的密钥。可用性和调用限制由所选来源决定。
+默认来源依次使用 DuckDuckGo HTML、DuckDuckGo Lite 和 Bing，无需 API 密钥。也可在设置页选择自部署 SearXNG，或为 Brave、Tavily、Exa、Perplexity 或 DeepSeek 配置 API 密钥。可用性和调用限制由所选来源决定。
 
 ## 安装与打开设置
 
@@ -24,6 +24,8 @@ qcopilots-websearch --ConfigPath 私有目录/service.json
 设置命令打印一次性链接，请在两分钟内打开。添加 `--Open` 可直接启动浏览器。也可以打开[设置页](http://127.0.0.1:8091/settings/)，输入独立的管理令牌 `admin.token`。初始化生成随机客户端令牌和管理令牌，并保留已有配置。
 
 业务监听默认为 `127.0.0.1:8088`。REST 使用 `/v1` 路由，MCP HTTP 使用 `/mcp`，两者均使用客户端 Bearer 令牌。健康和指标监听为 `127.0.0.1:8089`。进程型 MCP 客户端通过 `--Stdio --ConfigPath FILE` 接入。[部署和 QGIS 接入说明](docs/deployment.md)
+
+远程 MCP 客户端通过 HTTPS 连接 `https://<公网域名>/mcp`，并填写 Bearer 令牌。使用 `--ConfigPath FILE --GenerateToken` 或 `--ConfigPath FILE --SetToken` 配置令牌。[令牌管理](docs/deployment.md#manage-client-tokens) · [远程客户端配置](docs/deployment.md#connect-remote-clients)
 
 ## MCP 工具
 

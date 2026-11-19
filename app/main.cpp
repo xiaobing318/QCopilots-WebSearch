@@ -4,6 +4,7 @@
 #include <QRegularExpression>
 #include <QTemporaryDir>
 #include <csignal>
+#include <cstdio>
 #include <iostream>
 #include <qws/admin.hpp>
 #include <qws/server.hpp>
@@ -11,11 +12,117 @@
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
+#else
+#include <termios.h>
+#include <unistd.h>
 #endif
 namespace {
 std::atomic_bool stopping = false;
 std::string configPath;
 std::wstring windowsServiceName = L"QCopilotsWebSearch";
+
+class HiddenTokenInput {
+public:
+  HiddenTokenInput() {
+#ifdef _WIN32
+    input = GetStdHandle(STD_INPUT_HANDLE);
+    if (!GetConsoleMode(input, &saved))
+      return;
+    if (!SetConsoleCtrlHandler(restoreOnInterrupt, TRUE))
+      throw qws::Error("invalid_argument", "Cannot protect console token input.");
+    if (!SetConsoleMode(input, saved & ~ENABLE_ECHO_INPUT)) {
+      SetConsoleCtrlHandler(restoreOnInterrupt, FALSE);
+      throw qws::Error("invalid_argument", "Cannot hide console token input.");
+    }
+#else
+    if (!isatty(STDIN_FILENO))
+      return;
+    if (tcgetattr(STDIN_FILENO, &saved) != 0)
+      throw qws::Error("invalid_argument", "Cannot read console input mode.");
+    struct sigaction handler{};
+    handler.sa_handler = restoreOnInterrupt;
+    sigemptyset(&handler.sa_mask);
+    if (sigaction(SIGINT, &handler, &previous) != 0)
+      throw qws::Error("invalid_argument", "Cannot protect console token input.");
+    auto mode = saved;
+    mode.c_lflag &= ~ECHO;
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &mode) != 0) {
+      sigaction(SIGINT, &previous, nullptr);
+      throw qws::Error("invalid_argument", "Cannot hide console token input.");
+    }
+#endif
+    active = true;
+  }
+  ~HiddenTokenInput() {
+    if (!active)
+      return;
+#ifdef _WIN32
+    SetConsoleMode(input, saved);
+    SetConsoleCtrlHandler(restoreOnInterrupt, FALSE);
+#else
+    tcsetattr(STDIN_FILENO, TCSANOW, &saved);
+    sigaction(SIGINT, &previous, nullptr);
+#endif
+    std::cerr << '\n';
+  }
+  HiddenTokenInput(const HiddenTokenInput &) = delete;
+  HiddenTokenInput &operator=(const HiddenTokenInput &) = delete;
+
+private:
+  bool active = false;
+#ifdef _WIN32
+  static inline HANDLE input = INVALID_HANDLE_VALUE;
+  static inline DWORD saved = 0;
+  static BOOL WINAPI restoreOnInterrupt(DWORD event) {
+    if (event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT)
+      SetConsoleMode(input, saved);
+    return FALSE;
+  }
+#else
+  static inline struct termios saved{};
+  struct sigaction previous{};
+  static void restoreOnInterrupt(int signal) {
+    tcsetattr(STDIN_FILENO, TCSANOW, &saved);
+    _exit(128 + signal);
+  }
+#endif
+};
+
+QByteArray readInputLine(qsizetype limit) {
+  QByteArray line;
+  for (auto c = std::cin.get(); c != EOF && c != '\n'; c = std::cin.get()) {
+    if (line.size() == limit + 1)
+      throw qws::Error("invalid_argument", "Console input exceeds its length limit.");
+    line += static_cast<char>(c);
+  }
+  if (line.endsWith('\r'))
+    line.chop(1);
+  if (line.size() > limit)
+    throw qws::Error("invalid_argument", "Console input exceeds its length limit.");
+  return line;
+}
+
+void configureClientToken(const std::string &clientId, bool generate) {
+  QByteArray token;
+  if (generate) {
+    token = qws::generateToken();
+  } else {
+    HiddenTokenInput hidden;
+    std::cerr << "Enter client token: " << std::flush;
+    token = readInputLine(8192);
+  }
+  std::cerr << "Write the client credential to runtime configuration? [y/N] " << std::flush;
+  const auto reply = readInputLine(32).trimmed().toLower();
+  if (reply != "y" && reply != "yes") {
+    std::cerr << "Credential was not saved.\n";
+    return;
+  }
+  qws::setClientToken(configPath, clientId, token);
+  std::cerr << "Credential saved. Restart the service to apply it.\n";
+  if (generate)
+    std::cout << token.toStdString() << '\n';
+}
+
 void signalStop(int) {
   stopping.store(true, std::memory_order_relaxed);
 }
@@ -86,6 +193,8 @@ int main(int argc, char **argv) {
   bool stdio = false, serviceMode = false, check = false, initialize = false, serviceNameSpecified = false;
   bool rollbackInitialization = false, commitInitialization = false;
   bool settingsUrl = false, openUrl = false;
+  bool generateToken = false, setToken = false, clientIdSpecified = false;
+  std::string clientId = "local";
   QString transaction;
   const auto args = application.arguments();
   try {
@@ -116,28 +225,40 @@ int main(int argc, char **argv) {
         check = true;
       else if (args[i] == "--InitializeConfig")
         initialize = true;
-      else if (args[i] == "--Version") {
+      else if (args[i] == "--GenerateToken")
+        generateToken = true;
+      else if (args[i] == "--SetToken")
+        setToken = true;
+      else if (args[i] == "--ClientId" && i + 1 < args.size()) {
+        clientId = args[++i].toStdString();
+        clientIdSpecified = true;
+      } else if (args[i] == "--Version") {
         std::cout << "QCopilots-WebSearch " << QCWS_VERSION << ", Qt " << qVersion() << '\n';
-        return 0;
-      } else if (args[i] == "--GenerateToken") {
-        std::cout << qws::generateToken().toStdString() << '\n';
         return 0;
       } else if (args[i] == "--Help") {
         std::cout << "qcopilots-websearch --ConfigPath FILE [--Stdio | --WindowsService | --CheckConfig | "
                      "--InitializeConfig | --SettingsUrl [--Open]]\n"
                      "qcopilots-websearch --SettingsUrl [--Open]\n"
+                     "qcopilots-websearch --ConfigPath FILE (--GenerateToken | --SetToken) [--ClientId ID]\n"
                      "qcopilots-websearch --GenerateToken | --Version | --Help\n";
         return 0;
       } else
         throw qws::Error("invalid_argument", "Unknown or incomplete command-line option.");
     }
-    if ((!settingsUrl && configPath.empty()) ||
+    const bool standaloneGenerate = generateToken && configPath.empty();
+    if ((!settingsUrl && !standaloneGenerate && configPath.empty()) ||
         int(stdio) + int(serviceMode) + int(check) + int(initialize) + int(rollbackInitialization) +
-                int(commitInitialization) + int(settingsUrl) >
+                int(commitInitialization) + int(settingsUrl) + int(generateToken) + int(setToken) >
             1 || (openUrl && !settingsUrl) ||
+        (clientIdSpecified && ((!generateToken && !setToken) || standaloneGenerate)) ||
+        (standaloneGenerate && serviceNameSpecified) ||
         (!transaction.isEmpty() && !initialize && !rollbackInitialization && !commitInitialization) ||
         ((rollbackInitialization || commitInitialization) && transaction.isEmpty()))
       throw qws::Error("invalid_argument", "Provide --ConfigPath and choose only one operation.");
+    if (standaloneGenerate) {
+      std::cout << qws::generateToken().toStdString() << '\n';
+      return 0;
+    }
 #ifdef _WIN32
     const bool installedSettings = settingsUrl && configPath.empty() &&
                                    !QFileInfo::exists("runtime.json");
@@ -153,6 +274,10 @@ int main(int argc, char **argv) {
     if (serviceNameSpecified || !transaction.isEmpty() || rollbackInitialization || commitInitialization)
       throw qws::Error("invalid_argument", "Installer transaction options are available only on Windows.");
 #endif
+    if (generateToken || setToken) {
+      configureClientToken(clientId, generateToken);
+      return 0;
+    }
     if (initialize) {
 #ifdef _WIN32
       if (!transaction.isEmpty())

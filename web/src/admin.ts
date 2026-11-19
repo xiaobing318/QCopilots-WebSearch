@@ -1,4 +1,12 @@
-export const providers = ["auto", "searxng", "brave", "tavily", "exa"] as const;
+export const providers = [
+  "auto",
+  "searxng",
+  "brave",
+  "tavily",
+  "exa",
+  "perplexity",
+  "deepseek",
+] as const;
 export type Provider = (typeof providers)[number];
 export type KeyedProvider = Exclude<Provider, "auto">;
 type Tool = { enabled: boolean };

@@ -223,6 +223,90 @@ void keyedSearch() {
   auto missing = registry.create(config, client);
   requireError("provider_not_configured", [&] { missing->search(query(), token); });
 }
+
+void structuredSearchProviders() {
+  const auto token = std::make_shared<CancelToken>();
+  const std::string key = "example-fake-key";
+  const auto checkRequest = [&](const HttpRequest &outgoing, const auto &received, std::string_view url) {
+    require(outgoing.url == url && outgoing.method == HttpMethod::Post && outgoing.contentType == "application/json",
+            "Structured search must use a JSON POST to its own official endpoint.");
+    require(outgoing.headers.at("Authorization") == "Bearer " + key && outgoing.redirectHosts.empty(),
+            "Structured search credential must stay on its own endpoint.");
+    require(received == token, "Structured search did not propagate its cancellation token.");
+    return parseBoundedJson(outgoing.body);
+  };
+
+  ProviderConfig perplexity{"perplexity", {}, {}, key, {}};
+  const auto perplexityResult = searchPerplexity(query(), perplexity, [&](HttpRequest outgoing, const auto &received) {
+    const auto args = checkRequest(outgoing, received, "https://api.perplexity.ai/search");
+    require(args == Json{{"query", "C++ & QGIS"}, {"max_results", 4}, {"search_recency_filter", "week"},
+                         {"search_domain_filter", Json::array({"example.com"})},
+                         {"search_language_filter", Json::array({"zh"})}}, "Incorrect Perplexity query and filters.");
+    return jsonResponse({{"results", Json::array({{{"url", "https://example.com/perplexity"}, {"title", "Search"},
+                                                       {"snippet", "Perplexity snippet"}, {"date", "2025-01-23"}},
+                                                      {{"title", "Missing URL"}}})}});
+  }, token);
+  require(perplexityResult.source == "perplexity" && perplexityResult.page["results"] == Json::array({
+      resultItem("perplexity", "https://example.com/perplexity", "Search", "Perplexity snippet", "2025-01-23")}),
+          "Incorrect Perplexity results.");
+
+  ProviderConfig deepseek{"deepseek", {}, {}, key, {}};
+  auto deepseekRequest = query();
+  deepseekRequest.arguments["domains"].push_back("example.net");
+  const auto deepseekResult = searchDeepSeek(deepseekRequest, deepseek, [&](HttpRequest outgoing, const auto &received) {
+    const auto args = checkRequest(outgoing, received, "https://api.deepseek.com/v1/tools/search");
+    require(args["query"].get<std::string>().starts_with("C++ & QGIS site:example.com OR site:example.net lang:zh after:") &&
+                args["count"] == 4 && args["need_content"] == false, "Incorrect DeepSeek query and filters.");
+    return jsonResponse({{"results", Json::array({{{"url", "https://example.com/deepseek"}, {"title", "Search"},
+                                                       {"snippet", "DeepSeek snippet"}, {"summary", "Longer summary"},
+                                                       {"date", "2026-06-01T00:00:00+00:00"}},
+                                                      {{"url", "https://example.net/no-snippet"}, {"summary", "Summary"}}})}});
+  }, token);
+  require(deepseekResult.source == "deepseek" && deepseekResult.page["results"] == Json::array({
+      resultItem("deepseek", "https://example.com/deepseek", "Search", "DeepSeek snippet", "2026-06-01T00:00:00+00:00"),
+      resultItem("deepseek", "https://example.net/no-snippet", "", "Summary")}), "Incorrect DeepSeek results.");
+
+  const auto globe = QString::fromUcs4(U"\U0001F310");
+  deepseekRequest.arguments["query"] = globe.repeated(128).toStdString();
+  int sends = 0;
+  const auto sendBoundary = [&](HttpRequest outgoing, const auto &) {
+    ++sends;
+    require(parseBoundedJson(outgoing.body)["query"] == deepseekRequest.arguments["query"],
+            "DeepSeek must preserve a query of 128 Unicode code points even if optional hints do not fit.");
+    return jsonResponse({{"results", Json::array()}});
+  };
+  require(searchDeepSeek(deepseekRequest, deepseek, sendBoundary, token).page["results"].empty(),
+          "DeepSeek empty results must succeed.");
+  deepseekRequest.arguments["query"] = globe.repeated(129).toStdString();
+  requireError("invalid_argument", [&] { (void)searchDeepSeek(deepseekRequest, deepseek, sendBoundary, token); });
+  require(sends == 1, "Too-long DeepSeek query must be rejected before network traffic.");
+
+  HttpClient client;
+  ProviderRegistry registry;
+  const auto queryWithDefaults = query();
+  for (const auto &[search, config] : {std::pair{searchPerplexity, perplexity}, std::pair{searchDeepSeek, deepseek}}) {
+    const auto empty = search(queryWithDefaults, config, [](HttpRequest, const auto &) {
+      return jsonResponse({{"results", Json::array()}});
+    }, token);
+    require(empty.page["results"].empty(), "An empty upstream result must succeed.");
+    requireError("rate_limited", [&] {
+      (void)search(queryWithDefaults, config, [](HttpRequest, const auto &) { return HttpResponse{429}; }, token);
+    });
+    requireError("provider_unavailable", [&] {
+      (void)search(queryWithDefaults, config, [](HttpRequest, const auto &) { return HttpResponse{200, "{}"}; }, token);
+    });
+    requireError("timeout", [&] {
+      (void)search(queryWithDefaults, config, [](HttpRequest, const auto &) -> HttpResponse {
+        throw Error("timeout", "Fixture timeout.", 504, true);
+      }, token);
+    });
+  }
+  for (auto config : {perplexity, deepseek}) {
+    config.key.clear();
+    auto provider = registry.create(config, client);
+    requireError("provider_not_configured", [&] { provider->search(query(), token); });
+  }
+}
 } // namespace
 
 int main(int argc, char **argv) {
@@ -234,6 +318,7 @@ int main(int argc, char **argv) {
     autoFallback(argv[1]);
     pacingLimits();
     keyedSearch();
+    structuredSearchProviders();
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';
     return 1;

@@ -31,6 +31,10 @@ SearchOutcome searchTavily(const SearchRequest &, const ProviderConfig &, const 
                            const std::shared_ptr<CancelToken> &);
 SearchOutcome searchExa(const SearchRequest &, const ProviderConfig &, const ProviderTransport &,
                         const std::shared_ptr<CancelToken> &);
+SearchOutcome searchPerplexity(const SearchRequest &, const ProviderConfig &, const ProviderTransport &,
+                               const std::shared_ptr<CancelToken> &);
+SearchOutcome searchDeepSeek(const SearchRequest &, const ProviderConfig &, const ProviderTransport &,
+                             const std::shared_ptr<CancelToken> &);
 
 struct AutoState {
   explicit AutoState(std::chrono::milliseconds interval = std::chrono::milliseconds(2500),

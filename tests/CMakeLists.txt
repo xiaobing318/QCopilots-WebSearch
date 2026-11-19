@@ -34,6 +34,9 @@ add_test(NAME settings COMMAND qcws_settings_tests)
 add_test(NAME admin-http COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/python/test_admin_http.py"
   --Executable "$<TARGET_FILE:qcopilots-websearch>")
 set_tests_properties(settings admin-http PROPERTIES TIMEOUT 35)
+add_test(NAME client-tokens COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/python/test_client_tokens.py"
+  --Executable "$<TARGET_FILE:qcopilots-websearch>")
+set_tests_properties(client-tokens PROPERTIES TIMEOUT 60)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/cpp/test_providers.cpp")
   add_executable(qcws_provider_tests cpp/test_providers.cpp)
   target_link_libraries(qcws_provider_tests PRIVATE qcws_core httplib::httplib)
