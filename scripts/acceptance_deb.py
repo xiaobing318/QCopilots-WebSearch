@@ -236,8 +236,9 @@ def check_isolation(candidate, baseline, passed):
     for own, other in ((candidate, baseline), (baseline, candidate)):
         reject_token(own, other.token())
         mismatch = run(own.exe, "--ConfigPath", other.config, "--CheckConfig", check=False)
-        require(mismatch.returncode != 0 and "version" in mismatch.stdout.lower(),
-                "An installed binary accepted another version's configuration")
+        require(mismatch.returncode != 0 and mismatch.stdout.startswith("invalid_configuration:")
+                and "different project release" in mismatch.stdout,
+                "The installed executable did not return the expected cross-release configuration error")
         # Unlike run(), this call must not put the temporary login link in the log.
         link = subprocess.run([str(own.exe), "--SettingsUrl"], env=ENV, capture_output=True,
                               text=True, timeout=8)

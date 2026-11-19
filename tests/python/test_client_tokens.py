@@ -179,7 +179,7 @@ def verify_draft(fixture):
                 "Declining generation must only prompt on stderr")
         require(fixture.runtime.read_bytes() == original, "Declining generation modified the draft")
 
-    token = generated_token(fixture.command("--GenerateToken", user_input=" YeS \n"))
+    token = generated_token(fixture.command("--GenerateToken", user_input="\ufeff YeS \n"))
     config["clients"] = [{"id": "local", "token_sha256": digest(token)}]
     require(fixture.config() == config, "Generation did not provision just the default client's hash")
     require(fixture.command("--CheckConfig").returncode == 0, "Provisioned runtime failed validation")
@@ -280,7 +280,7 @@ def verify_rotation(fixture):
         verify_business(fixture, token)
         require(fixture.public("GET", "/v1/status", fixture.environment_token)[0] == 200,
                 "An environment credential stopped working alongside hash credentials")
-        result = fixture.command("--SetToken", "--ClientId", "browser", user_input=replacement + "\n Y \n")
+        result = fixture.command("--SetToken", "--ClientId", "browser", user_input="\ufeff" + replacement + "\n Y \n")
         require(result.returncode == 0 and replacement not in result.stdout + result.stderr,
                 "Accepted rotation failed or exposed the operator's token")
         require(fixture.public("GET", "/v1/status", token)[0] == 200 and

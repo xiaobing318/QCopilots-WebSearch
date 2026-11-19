@@ -97,13 +97,18 @@ private:
 #endif
 };
 
-QByteArray readInputLine(qsizetype limit) {
+QByteArray readInputLine(qsizetype limit, bool firstLine) {
+  // Windows PowerShell can prefix redirected UTF-8 with a byte-order mark.
+  constexpr char utf8Bom[] = "\xef\xbb\xbf";
+  const auto capacity = limit + (firstLine ? 3 : 0);
   QByteArray line;
   for (auto c = std::cin.get(); c != EOF && c != '\n'; c = std::cin.get()) {
-    if (line.size() == limit + 1)
+    if (line.size() == capacity + 1)
       throw qws::Error("invalid_argument", "Console input exceeds its length limit.");
     line += static_cast<char>(c);
   }
+  if (firstLine && line.startsWith(utf8Bom))
+    line.remove(0, 3);
   if (line.endsWith('\r'))
     line.chop(1);
   if (line.size() > limit)
@@ -118,10 +123,10 @@ void configureClientToken(const std::string &clientId, bool generate) {
   } else {
     HiddenTokenInput hidden;
     std::cerr << "Enter client token: " << std::flush;
-    token = readInputLine(8192);
+    token = readInputLine(8192, true);
   }
   std::cerr << "Write the client credential to runtime configuration? [y/N] " << std::flush;
-  const auto reply = readInputLine(32).trimmed().toLower();
+  const auto reply = readInputLine(32, generate).trimmed().toLower();
   if (reply != "y" && reply != "yes") {
     std::cerr << "Credential was not saved.\n";
     return;
