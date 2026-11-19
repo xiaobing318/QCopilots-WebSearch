@@ -254,7 +254,7 @@ void structuredSearchProviders() {
   auto deepseekRequest = query();
   deepseekRequest.arguments["domains"].push_back("example.net");
   const auto deepseekResult = searchDeepSeek(deepseekRequest, deepseek, [&](HttpRequest outgoing, const auto &received) {
-    const auto args = checkRequest(outgoing, received, "https://api.deepseek.com/v1/tools/search");
+    const Json args = checkRequest(outgoing, received, "https://api.deepseek.com/v1/tools/search");
     require(args["query"].get<std::string>().starts_with("C++ & QGIS site:example.com OR site:example.net lang:zh after:") &&
                 args["count"] == 4 && args["need_content"] == false, "Incorrect DeepSeek query and filters.");
     return jsonResponse({{"results", Json::array({{{"url", "https://example.com/deepseek"}, {"title", "Search"},
