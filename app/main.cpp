@@ -19,7 +19,16 @@
 namespace {
 std::atomic_bool stopping = false;
 std::string configPath;
-std::wstring windowsServiceName = L"QCopilotsWebSearch";
+#ifdef _WIN32
+std::wstring windowsServiceName = QString::fromLatin1(QCWS_WINDOWS_SERVICE_NAME).toStdWString();
+
+QString installedDataDirectory() {
+  const auto sharedData = qEnvironmentVariable("ProgramData");
+  if (sharedData.isEmpty())
+    throw qws::Error("invalid_configuration", "Cannot locate the installed administration credential.");
+  return QDir(sharedData).filePath(QCWS_WINDOWS_DATA_DIRECTORY);
+}
+#endif
 
 class HiddenTokenInput {
 public:
@@ -176,6 +185,14 @@ void WINAPI serviceMain(DWORD, wchar_t **) {
     qws::Service service(config);
     qws::HttpServer server(service, config);
     server.start();
+    if (QString::fromStdWString(windowsServiceName) == QLatin1String(QCWS_WINDOWS_SERVICE_NAME)) {
+      const QDir directory(installedDataDirectory());
+      const auto installed = QFileInfo(directory.filePath("service.json")).absoluteFilePath();
+      if (QFileInfo(QString::fromStdString(configPath)).absoluteFilePath().compare(installed, Qt::CaseInsensitive) == 0) {
+        const auto admin = qws::adminConfiguration(config, false);
+        qws::publishWindowsInstalledAdminPort(directory.filePath("state"), admin.enabled ? admin.port : 0);
+      }
+    }
     report(SERVICE_RUNNING);
     waitForStop(service);
     server.stop();
@@ -194,8 +211,10 @@ int main(int argc, char **argv) {
   bool rollbackInitialization = false, commitInitialization = false;
   bool settingsUrl = false, openUrl = false;
   bool generateToken = false, setToken = false, clientIdSpecified = false;
+  bool selectAvailablePorts = false;
   std::string clientId = "local";
-  QString transaction;
+  std::string serviceName;
+  QString transaction, stateDirectory;
   const auto args = application.arguments();
   try {
     for (int i = 1; i < args.size(); ++i) {
@@ -219,12 +238,19 @@ int main(int argc, char **argv) {
         const auto name = args[++i];
         if (!QRegularExpression("^[A-Za-z][A-Za-z0-9_.-]{0,63}$").match(name).hasMatch())
           throw qws::Error("invalid_argument", "Invalid Windows service name.");
-        windowsServiceName = name.toStdWString();
+        serviceName = name.toStdString();
         serviceNameSpecified = true;
       } else if (args[i] == "--CheckConfig")
         check = true;
       else if (args[i] == "--InitializeConfig")
         initialize = true;
+      else if (args[i] == "--SelectAvailablePorts")
+        selectAvailablePorts = true;
+      else if (args[i] == "--StateDirectory" && i + 1 < args.size()) {
+        stateDirectory = args[++i];
+        if (!QDir::isAbsolutePath(stateDirectory))
+          throw qws::Error("invalid_argument", "State directory must be an absolute path.");
+      }
       else if (args[i] == "--GenerateToken")
         generateToken = true;
       else if (args[i] == "--SetToken")
@@ -238,6 +264,8 @@ int main(int argc, char **argv) {
       } else if (args[i] == "--Help") {
         std::cout << "qcopilots-websearch --ConfigPath FILE [--Stdio | --WindowsService | --CheckConfig | "
                      "--InitializeConfig | --SettingsUrl [--Open]]\n"
+                     "qcopilots-websearch --ConfigPath FILE --InitializeConfig "
+                     "[--SelectAvailablePorts] [--StateDirectory DIR]\n"
                      "qcopilots-websearch --SettingsUrl [--Open]\n"
                      "qcopilots-websearch --ConfigPath FILE (--GenerateToken | --SetToken) [--ClientId ID]\n"
                      "qcopilots-websearch --GenerateToken | --Version | --Help\n";
@@ -252,6 +280,7 @@ int main(int argc, char **argv) {
             1 || (openUrl && !settingsUrl) ||
         (clientIdSpecified && ((!generateToken && !setToken) || standaloneGenerate)) ||
         (standaloneGenerate && serviceNameSpecified) ||
+        ((selectAvailablePorts || !stateDirectory.isEmpty()) && (!initialize || !transaction.isEmpty())) ||
         (!transaction.isEmpty() && !initialize && !rollbackInitialization && !commitInitialization) ||
         ((rollbackInitialization || commitInitialization) && transaction.isEmpty()))
       throw qws::Error("invalid_argument", "Provide --ConfigPath and choose only one operation.");
@@ -260,8 +289,12 @@ int main(int argc, char **argv) {
       return 0;
     }
 #ifdef _WIN32
-    const bool installedSettings = settingsUrl && configPath.empty() &&
-                                   !QFileInfo::exists("runtime.json");
+    const bool installedSettings = settingsUrl && configPath.empty();
+    if (serviceNameSpecified) {
+      if (installedSettings && serviceName != QCWS_WINDOWS_SERVICE_NAME)
+        throw qws::Error("invalid_argument", "Provide --ConfigPath for a different Windows service.");
+      windowsServiceName = QString::fromStdString(serviceName).toStdWString();
+    }
     qws::configureWindowsCredentialPolicy(serviceMode || serviceNameSpecified || !transaction.isEmpty() ||
                                               installedSettings,
                                           QString::fromStdWString(windowsServiceName).toStdString());
@@ -284,24 +317,21 @@ int main(int argc, char **argv) {
         qws::initializeWindowsTransaction(QString::fromStdString(configPath), transaction);
       else
 #endif
-        qws::initializeConfiguration(configPath);
+        qws::initializeConfiguration(configPath, selectAvailablePorts, stateDirectory);
       std::cout << "Configuration initialized. Existing files were preserved.\n";
       return 0;
     }
     if (settingsUrl) {
-      if (configPath.empty() && QFileInfo::exists("runtime.json"))
-        configPath = "runtime.json";
       qws::Config config;
 #ifdef _WIN32
       if (installedSettings) {
-        const auto sharedData = qEnvironmentVariable("ProgramData");
-        if (sharedData.isEmpty())
-          throw qws::Error("invalid_configuration", "Cannot locate the installed administration credential.");
-        config = {qws::Json::object(), QDir(sharedData).filePath("QCopilots-WebSearch").toStdString()};
+        const auto directory = installedDataDirectory();
+        const auto port = qws::readWindowsInstalledAdminPort(QDir(directory).filePath("state"));
+        config = {qws::Json{{"admin", {{"port", port}}}}, directory.toStdString()};
       } else
 #else
       if (configPath.empty())
-        configPath = "/etc/qcopilots-websearch/runtime.json";
+        configPath = "/etc/qcopilots-websearch-" QCWS_VERSION "/runtime.json";
 #endif
       {
         config = qws::Config::load(configPath);

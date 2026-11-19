@@ -70,7 +70,13 @@ bool trusted(PSID sid) {
   return IsWellKnownSid(sid, WinLocalSystemSid) || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) ||
          (!installed && EqualSid(sid, const_cast<char *>(userSid().constData())));
 }
-enum class FilePolicy { Private, Admin, ServiceState };
+enum class FilePolicy { Private, Admin, ServiceState, AdminEndpoint };
+bool serviceWritable(FilePolicy policy) {
+  return policy == FilePolicy::ServiceState || policy == FilePolicy::AdminEndpoint;
+}
+bool interactiveReadable(FilePolicy policy) {
+  return policy == FilePolicy::Admin || policy == FilePolicy::AdminEndpoint;
+}
 void validate(HANDLE file, bool directory = false, bool receipt = false, FilePolicy policy = FilePolicy::Private) {
   FILE_ATTRIBUTE_TAG_INFO attributes{};
   DWORD flags = 0;
@@ -88,9 +94,9 @@ void validate(HANDLE file, bool directory = false, bool receipt = false, FilePol
       GetSecurityInfo(file, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner,
                       nullptr, &dacl, nullptr, &raw);
   Local descriptor(raw);
-  if (status != ERROR_SUCCESS || !descriptor || !owner || !IsValidSid(owner) || (!trusted(owner) && !(policy == FilePolicy::ServiceState && !serviceSid.isEmpty() &&
-                                             EqualSid(owner, serviceSid.data()))) || !dacl ||
-      !IsValidAcl(dacl))
+  if (status != ERROR_SUCCESS || !descriptor || !owner || !IsValidSid(owner) || !dacl || !IsValidAcl(dacl))
+    fail();
+  if (!trusted(owner) && !(serviceWritable(policy) && !serviceSid.isEmpty() && EqualSid(owner, serviceSid.data())))
     fail();
   GENERIC_MAPPING mapping{FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS};
   for (DWORD i = 0; i < dacl->AceCount; ++i) {
@@ -119,9 +125,9 @@ void validate(HANDLE file, bool directory = false, bool receipt = false, FilePol
     MapGenericMask(&mask, &mapping);
     ACCESS_MASK permitted = trusted(sid) ? FILE_ALL_ACCESS : 0;
     if (!receipt && !serviceSid.isEmpty() && EqualSid(sid, serviceSid.data()))
-      permitted |= policy == FilePolicy::ServiceState ? FILE_ALL_ACCESS :
+      permitted |= serviceWritable(policy) ? FILE_ALL_ACCESS :
                    FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
-    if (policy == FilePolicy::Admin && IsWellKnownSid(sid, WinInteractiveSid))
+    if (interactiveReadable(policy) && IsWellKnownSid(sid, WinInteractiveSid))
       permitted |= FILE_GENERIC_READ;
     if (mask & ~permitted)
       fail();
@@ -170,9 +176,9 @@ Json create(const QString &path, const QByteArray &bytes, bool receipt,
   if (!installed)
     sddl += L"(A;;FA;;;" + sidText(userSid()) + L")";
   if (!receipt && !serviceSid.isEmpty())
-    sddl += (policy == FilePolicy::ServiceState ? L"(A;;FA;;;" : L"(A;;FRFX;;;") +
+    sddl += (serviceWritable(policy) ? L"(A;;FA;;;" : L"(A;;FRFX;;;") +
             sidText(serviceSid) + L")";
-  if (installed && policy == FilePolicy::Admin)
+  if (installed && interactiveReadable(policy))
     sddl += L"(A;;FR;;;IU)";
   PSECURITY_DESCRIPTOR raw = nullptr;
   if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &raw, nullptr))
@@ -281,6 +287,8 @@ void checkConfiguration(const QString &path) {
   validate(file.value);
   (void)read(file.value, 1024 * 1024);
   const auto c = Config::load(path.toStdString());
+  if (!c.value.contains("project_version"))
+    throw Error("invalid_configuration", "An installed Windows service requires a versioned runtime configuration.");
   (void)c.clients();
   checkSettings(c);
 }
@@ -394,6 +402,38 @@ QByteArray readWindowsServicePrivateFile(const QString &path) {
 void writeWindowsServicePrivateFile(const QString &path, const QByteArray &contents) {
   writeProtectedFile(path, contents, FilePolicy::ServiceState, true);
 }
+int readWindowsInstalledAdminPort(const QString &stateDirectory) {
+  if (!installed)
+    fail();
+  const auto manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+  if (!manager)
+    fail();
+  const auto name = QString::fromStdString(serviceName).toStdWString();
+  const auto service = OpenServiceW(manager, name.c_str(), SERVICE_QUERY_STATUS);
+  CloseServiceHandle(manager);
+  SERVICE_STATUS status{};
+  if (!service)
+    throw Error("service_unavailable", "The installed Windows service is not running.", 503);
+  const bool running = QueryServiceStatus(service, &status) && status.dwCurrentState == SERVICE_RUNNING;
+  CloseServiceHandle(service);
+  if (!running)
+    throw Error("service_unavailable", "The installed Windows service is not running.", 503);
+
+  const auto path = QDir(stateDirectory).filePath("admin-port");
+  bool valid = false;
+  const auto port = readProtectedFile(path, FilePolicy::AdminEndpoint, 8).trimmed().toInt(&valid);
+  if (!valid || port < 0 || port > 65535)
+    throw Error("invalid_configuration", "The installed administration endpoint is invalid.");
+  if (port == 0)
+    throw Error("service_unavailable", "The installed administration endpoint is disabled.", 503);
+  return port;
+}
+void publishWindowsInstalledAdminPort(const QString &stateDirectory, int port) {
+  if (!installed || port < 0 || port > 65535)
+    fail();
+  const auto path = QDir(stateDirectory).filePath("admin-port");
+  writeProtectedFile(path, QByteArray::number(port) + '\n', FilePolicy::AdminEndpoint, true);
+}
 void initializeWindowsTransaction(const QString &path, const QString &transaction) {
   const auto receipt = receiptPath(path, transaction);
   auto parents = pinParents(path);
@@ -439,6 +479,7 @@ void initializeWindowsTransaction(const QString &path, const QString &transactio
   auto value = defaultConfiguration();
   value["cache"]["directory"] = "state";
   value["clients"] = Json::array({Json{{"id", "local"}, {"token_file", "client.token"}}});
+  assignAvailableListenerPorts(value, path);
   add(path, "configuration", QByteArray::fromStdString(value.dump(2) + '\n'));
   checkConfiguration(path);
 }

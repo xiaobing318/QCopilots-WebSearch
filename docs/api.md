@@ -256,8 +256,10 @@ session confirmation.
 ## Administration
 
 The admin UI is available on the configured admin origin at `/settings/`.
-The default origin is `http://127.0.0.1:8091`. An admin token is independent of
-client Bearer credentials on the business listener.
+The default origin is `http://127.0.0.1:8091`. An installed version may use a
+different port recorded in its deployment configuration. Use `--SettingsUrl`
+from that version's executable to obtain a login link. An admin token is
+independent of client Bearer credentials on the business listener.
 
 | Method and path under `/admin/api/v1` | Authentication and behavior |
 | --- | --- |

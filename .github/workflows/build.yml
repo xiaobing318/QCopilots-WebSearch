@@ -8,7 +8,7 @@ on:
         type: boolean
         default: false
       deep:
-        description: Run installer upgrade and Caddy acceptance
+        description: Run side-by-side package and Caddy acceptance
         type: boolean
         default: false
 
@@ -61,14 +61,11 @@ jobs:
         include:
           - os: windows-2025
             platform: windows-x64
-            executable: bin/qcopilots-websearch.exe
           - os: ubuntu-26.04
             platform: ubuntu-x64
-            executable: opt/qcopilots-websearch/bin/qcopilots-websearch
     env:
       QCWS_PROFILE: ci-${{ matrix.platform }}
       QCWS_WEB_DIST_DIR: ${{ github.workspace }}/build/ci-web-dist
-      QCWS_EXECUTABLE: install/ci-${{ matrix.platform }}/${{ matrix.executable }}
       QCWS_ACCEPTANCE_DIR: ${{ github.workspace }}/build/ci-acceptance
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -118,6 +115,19 @@ jobs:
               "--Profile", os.environ["QCWS_PROFILE"],
               "--Stages", "bootstrap,doctor,configure,build,test,install,publish",
           ], check=True)
+      - name: Locate the staged service executable
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+
+          install = Path("install", os.environ["QCWS_PROFILE"])
+          pattern = "bin/qcopilots-websearch.exe" if os.name == "nt" else "opt/qcopilots-websearch-*/bin/qcopilots-websearch"
+          matches = [path.resolve() for path in install.glob(pattern) if path.is_file()]
+          if len(matches) != 1:
+              raise RuntimeError(f"Expected one staged service executable under {install}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(f"QCWS_EXECUTABLE={matches[0]}\n")
       - name: Check the installed service with the MCP SDK
         shell: python
         run: |
@@ -130,7 +140,7 @@ jobs:
               sys.executable, "scripts/test_mcp_sdk.py",
               "--Executable", os.environ["QCWS_EXECUTABLE"], "--Output", str(output / "mcp-sdk.json"),
           ], check=True)
-      - name: Build the test-only upgrade baseline
+      - name: Build a second release for side-by-side acceptance
         if: inputs.release || inputs.deep
         shell: python
         run: |

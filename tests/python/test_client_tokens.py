@@ -314,6 +314,56 @@ def verify_concurrent_enrollment(fixture):
     require(fixture.command("--CheckConfig").returncode == 0, "Concurrent enrollment left an invalid runtime")
 
 
+def verify_release_config(executable, folder):
+    def command(path, *options, user_input=""):
+        return subprocess.run([executable, "--ConfigPath", str(path), *options], input=user_input,
+                              capture_output=True, text=True, encoding="utf-8", timeout=8)
+
+    seed = folder / "portable" / "runtime.json"
+    version_result = command(seed, "--Version")
+    match = re.match(r"^QCopilots-WebSearch ([0-9]+\.[0-9]+\.[0-9]+),", version_result.stdout)
+    require(version_result.returncode == 0 and match, "Native release version is unavailable")
+    version = match[1]
+    require(command(seed, "--InitializeConfig").returncode == 0, "Portable config initialization failed")
+    value = json.loads(seed.read_text(encoding="utf-8"))
+    require(value["project_version"] == version and value["schema_version"] == 1,
+            "Initialized config should carry the native release and the independent schema version")
+
+    peer_version = "999.999.999" if version != "999.999.999" else "1.2.3"
+    peer = folder / f"qcopilots-websearch-{peer_version}" / "runtime.json"
+    peer.parent.mkdir()
+    peer.write_text(json.dumps(value | {"project_version": peer_version}), encoding="utf-8")
+    peer_bytes = peer.read_bytes()
+    result = command(peer, "--CheckConfig")
+    require(result.returncode != 0 and "different project release" in result.stderr,
+            "An executable accepted another release's config")
+    result = command(peer, "--GenerateToken", user_input="yes\n")
+    require(result.returncode != 0 and not result.stdout and peer.read_bytes() == peer_bytes,
+            "The token command changed another release's config")
+
+    managed = folder / f"qcopilots-websearch-{version}" / "runtime.json"
+    state = folder / "separate-state"
+    options = ("--InitializeConfig", "--SelectAvailablePorts", "--StateDirectory", str(state))
+    require(command(managed, *options).returncode == 0, "Managed config initialization failed")
+    actual = json.loads(managed.read_text(encoding="utf-8"))
+    listeners = {actual[role]["port"] for role in ("business", "control", "admin")}
+    known = {value["business"]["port"], value["control"]["port"], 8091}
+    require(len(listeners) == 3 and not (known & listeners), "An idle release's ports were reused")
+    require(Path(actual["cache"]["directory"]) == state / "cache" and
+            Path(actual["settings"]["directory"]) == state, "Managed state directory is wrong")
+    managed_bytes = managed.read_bytes()
+    require(command(managed, *options).returncode == 0 and managed.read_bytes() == managed_bytes,
+            "Initializing the same release reset its configuration")
+    require(command(managed, "--CheckConfig").returncode == 0, "Managed configuration is invalid")
+
+    del actual["project_version"]
+    managed.write_text(json.dumps(actual), encoding="utf-8")
+    require(command(managed, "--CheckConfig").returncode != 0, "Managed config requires a release stamp")
+    del value["project_version"]
+    seed.write_text(json.dumps(value), encoding="utf-8")
+    require(command(seed, "--CheckConfig").returncode == 0, "An explicit legacy portable config stopped working")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--Executable", required=True)
@@ -324,6 +374,8 @@ def main():
         fixture = Fixture(executable, Path(folder))
         verify_rotation(fixture)
         verify_concurrent_enrollment(fixture)
+    with tempfile.TemporaryDirectory(prefix="qcws release configuration ") as folder:
+        verify_release_config(executable, Path(folder))
 
 
 if __name__ == "__main__":

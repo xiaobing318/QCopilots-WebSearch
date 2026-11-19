@@ -77,55 +77,63 @@ diagnosis, create a fresh private directory and update its configuration path.
 Run `--CheckConfig`, restart and verify health. Do not automatically overwrite a
 corrupt or locked cache. Repair filesystem permissions or disk capacity first.
 
-## Upgrades
+## Install, switch and remove versions
 
-Runtime configuration uses `schema_version: 1` and rejects unknown fields.
-`--CheckConfig` names the first field that does not match the schema. Back up
-configuration before upgrading and check version compatibility before restoring
-an older package. An older executable that lacks `token_sha256` support
-requires a compatible backup of the runtime configuration. There is no
-automatic configuration downgrade.
+Runtime configuration uses `schema_version: 1` for its JSON format.
+The `project_version` field records the exact release that generated the
+configuration, such as `"0.2.0"`. A build rejects a stamped configuration
+from a different release. Run `--CheckConfig` with the executable for the
+version you want to check. Explicit `--ConfigPath` continues to accept legacy
+files without `project_version`.
 
-Releases after 0.1.4 use a new cached payload layout. Entries written by 0.1.4
-or earlier are no longer read and age out through normal eviction. Page IDs issued
-before the upgrade return `page_unavailable`, and clients open the URL again.
+MSI and DEB put each installed version in its own service, program directory,
+configuration directory and state directory. Every new version gets fresh
+credentials, provider settings and cache. The existing service keeps running
+while the new one is installed. The new service records its own loopback ports.
+
+To switch clients, install the complete target package. Verify the version,
+service identity, authentication, health, and one search and page read. Update
+the client endpoint and token together. Page IDs belong to the service and
+client that created them. Open the URL again on the new version. To switch back,
+restore the clients' earlier endpoints and credentials while that service
+is still available. [Version-specific paths and ports](deployment.md#installed-versions-and-ports)
 
 Windows uses system Schannel. Ubuntu uses the distribution's OpenSSL shared
 libraries. Apply OS security updates and restart the service. Maintain the
 appropriate CA stores and supply complete certificate chains to endpoints.
 
-Upgrades retain existing SearXNG deployments. When the user settings file is
-absent, the old provider configuration supplies the initial settings. New
-installations use `auto`. Browser settings and key changes take effect on
-save. External edits are checked every two seconds. If a file is invalid, the
-admin status reports `settings_error` while the last valid snapshot stays active.
+New installations use the automatic search source. Select any private SearXNG
+endpoint or configure a provider key using that version's Settings page.
+Browser settings and key changes take effect on save. External edits are
+checked every two seconds. If a file is invalid, the admin status reports
+`settings_error` while the last valid snapshot stays active.
 
-Back up private state before upgrading. Apply the complete validated package,
-then check version, service identity, authentication, health and one search/read
-workflow. DEB upgrades retain dpkg-managed configuration and generated credentials.
-Windows MSI uses a stable upgrade identity and transactional initialization. Its
-rollback receipt records file identity and content hash, allowing rollback to
-remove only unmodified files created by that installation. A conflicting receipt
-or modified file is preserved for administrator inspection.
+Back up private state before changing or removing a deployment. Use matching
+configuration and executable versions when restoring. Windows MSI initializes
+each version in its own installer transaction. The rollback receipt records file
+identities and content hashes. Rollback only removes unmodified files created
+by that transaction. A conflicting receipt or modified file is preserved for
+administrator inspection.
 
 Windows commit cleanup failure leaves a private `.qcws-install-*.json` receipt.
 Do not blindly delete its referenced files. Inspect the installer log and recorded
 transaction first. Normal successful installation leaves no such receipt.
 
-Debian package operations are not an automatic transactional snapshot. If a
-maintainer script fails, dpkg can report `half-configured`. Correct the cause and
-configure the package again, or reinstall the exact known-good baseline package
-with `--allow-downgrades`. Validate configuration compatibility before downgrading.
+If a DEB maintainer script fails, dpkg can report `half-configured`. Correct the
+cause and configure that package again. A separately installed earlier version
+remains available during recovery.
 
 The Windows test-only `QCWS_TEST_FAILPOINT` MSI property deliberately fails
 after initialization or after service start. It is inert by default and requires
 an administrator explicitly passing the test value. Never set it in deployment
 automation. It permits rollback tests using exactly the candidate MSI bytes.
 
-Removing a DEB retains its conffile and generated state. Purging removes the
-dpkg conffile but deliberately retains generated tokens, data and the service
-account. This prevents accidental data loss and UID reuse. Remove those retained
-objects only through an explicit administrative reset after backups.
+Select the exact version to remove. On Windows, uninstall the corresponding MSI
+entry in Installed apps. On Ubuntu, use the package name including its version,
+for example `sudo apt remove qcopilots-websearch-0.2.0`. Both uninstall paths
+retain that version's runtime configuration, credentials and state. A DEB purge removes that
+version's runtime JSON and retains its tokens, state and service account. Remove
+retained files only when intentionally resetting that version after backups.
 
 `docker compose down` keeps persistent certificates and data. Do not use `down -v`
 as a routine upgrade or uninstall step. Keep Caddy certificate storage and the

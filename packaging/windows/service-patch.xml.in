@@ -2,7 +2,7 @@
 <CPackWiXPatch>
   <CPackWiXFragment Id="CM_CP_bin.qcopilots_websearch.exe">
     <ServiceInstall Id="QcwsServiceInstall" Name="@QCWS_SERVICE_NAME@"
-      DisplayName="@CPACK_PACKAGE_NAME@" Description="Web search and page reading for MCP clients"
+      DisplayName="@QCWS_DATA_DIRECTORY@" Description="Web search and page reading for MCP clients"
       Type="ownProcess" Start="auto" ErrorControl="normal" Vital="yes"
       Account="NT SERVICE\@QCWS_SERVICE_NAME@"
       Arguments="--WindowsService --ServiceName @QCWS_SERVICE_NAME@ --ConfigPath &quot;[QcwsDataRoot]service.json&quot;" />

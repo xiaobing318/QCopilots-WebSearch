@@ -13,6 +13,8 @@ QByteArray readWindowsAdminCredential(const QString &path);
 void writeWindowsAdminCredential(const QString &path, const QByteArray &contents);
 QByteArray readWindowsServicePrivateFile(const QString &path);
 void writeWindowsServicePrivateFile(const QString &path, const QByteArray &contents);
+int readWindowsInstalledAdminPort(const QString &stateDirectory);
+void publishWindowsInstalledAdminPort(const QString &stateDirectory, int port);
 void initializeWindowsTransaction(const QString &path, const QString &transaction);
 void finishWindowsInitialization(const QString &path, const QString &transaction, bool rollback);
 } // namespace qws

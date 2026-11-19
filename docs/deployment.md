@@ -5,26 +5,46 @@ business operations by default. This is a capacity setting, not a promise of
 five simultaneous upstream successes. Public engines can return partial results,
 CAPTCHAs or throttling. The service never bypasses those restrictions.
 
+## Installed versions and ports
+
+MSI and DEB packages install each project version as a separate service. A new
+version starts with fresh deployment configuration, client and admin credentials,
+settings, provider keys and cache. Reinstalling an existing version reuses that
+version's data. Installing a different version leaves earlier services running
+with their existing configuration.
+
+The installer tries the default business, control and admin loopback ports
+(8088, 8089 and 8091). It skips ports in use or already recorded by another
+installed version, including when that version is stopped.
+It records the chosen ports in the version's runtime configuration. Use its
+`business.port` for REST and MCP, `control.port` for health and metrics, and
+`admin.port` for Settings. Use that same version's tokens when connecting.
+Restarts reuse the recorded ports.
+
 ## Ubuntu host
 
-Install the release DEB using apt. The package creates the unprivileged
-`qcopilots-websearch` account, separate random client and admin credentials, and a systemd unit.
+Install the release DEB using apt. Set `version` to the version in the package
+filename. Each package creates a version-specific unprivileged service account
+and systemd unit.
 
 ```bash
-sudo apt install ./qcopilots-websearch_<version>_amd64.deb
-sudo systemctl status qcopilots-websearch
+version=0.2.0
+package=qcopilots-websearch-$version
+sudo apt install "./${package}_${version}_amd64.deb"
+sudo systemctl status "$package.service"
 ```
 
-The deployment configuration is `/etc/qcopilots-websearch/runtime.json`.
-The service owns `client.token` and `admin.token` with mode 0600. It stores
-user settings and provider keys under `/var/lib/qcopilots-websearch`.
-The administrator can edit the deployment configuration, and the service can
-read it.
+The deployment file is `/etc/qcopilots-websearch-<version>/runtime.json`. The
+administrator can edit it, and the corresponding service account can read it.
+That account owns the adjacent `client.token` and `admin.token` with mode 0600.
+Settings, provider keys and cache live under
+`/var/lib/qcopilots-websearch-<version>`.
 
-Create a one-time management link with
+Run the executable for the selected version to create its one-time management
+link.
 
 ```bash
-sudo /opt/qcopilots-websearch/bin/qcopilots-websearch --ConfigPath /etc/qcopilots-websearch/runtime.json --SettingsUrl
+sudo "/opt/$package/bin/qcopilots-websearch" --SettingsUrl
 ```
 
 Open the link in a browser on the service host. For a remote browser, use an
@@ -37,6 +57,10 @@ Copy `deploy/team` to an administrator-managed deployment directory. Copy
 cryptographically random `SEARXNG_SECRET`. The native `--GenerateToken` command
 can generate it. Store the value directly in the private environment file without
 printing it in shell or CI logs. Use mode 0600 for that file.
+
+In the copied `Caddyfile`, set the reverse proxy upstream to
+`127.0.0.1:<business.port>` from the runtime configuration of the version to
+publish.
 
 ```bash
 docker compose --env-file .env config --quiet
@@ -57,17 +81,20 @@ the exact local authority needed by local clients. Origins have no trailing slas
 
 Add a unique client identity and token file for each integration or team user.
 Keep the native backend credential separate from a QGIS local MCP credential.
-Restart after validating configuration:
+Validate the selected version's configuration as its service account, then
+restart that version.
 
 ```bash
-sudo -u qcopilots-websearch /opt/qcopilots-websearch/bin/qcopilots-websearch --ConfigPath /etc/qcopilots-websearch/runtime.json --CheckConfig
-sudo systemctl restart qcopilots-websearch
+account=$(systemctl show --property=User --value "$package.service")
+sudo -u "$account" "/opt/$package/bin/qcopilots-websearch" --ConfigPath "/etc/$package/runtime.json" --CheckConfig
+sudo systemctl restart "$package.service"
 ```
 
 Caddy preserves client Authorization, Host and Origin. It does not substitute a
 shared gateway token. Do not add `flush_interval -1`, because it changes upstream
 cancellation behavior after client disconnect. The native service rejects unknown
-Origins and hosts. Keep 8088, 8089, 8090, 8091 and 8888 inaccessible from external hosts.
+Origins and hosts. Keep the native listeners, the Caddy health listener and
+SearXNG inaccessible directly from external hosts.
 
 The SearXNG limiter is disabled in this private backend template. SearXNG is not
 an independently public endpoint. Exposing it requires a separate authentication,
@@ -76,28 +103,35 @@ in `compose.yml`. Upgrade them deliberately and repeat acceptance.
 
 ## Windows
 
-The MSI installs the `QCopilotsWebSearch` machine service under the virtual
-account `NT SERVICE\QCopilotsWebSearch`. Program files and Qt libraries go under
-Program Files. Deployment configuration and credentials live in
-`%ProgramData%\QCopilots-WebSearch`. The service loads `service.json` from that
-directory. User settings and provider keys live in its `state` subdirectory.
-Windows uses Schannel.
+The MSI installs the `QCopilotsWebSearch-<version>` machine service under the
+virtual account `NT SERVICE\QCopilotsWebSearch-<version>`. Its default program
+directory is `%ProgramFiles%\QCopilots-WebSearch-<version>`. If you customize
+the program directory, use a separate path for each version.
+
+The service loads `%ProgramData%\QCopilots-WebSearch-<version>\service.json`.
+Client and admin tokens live beside that file. The `state` subdirectory
+contains that version's settings, provider keys and cache. Windows uses
+Schannel.
 
 Local interactive users can read `admin.token` to open the settings page and
 manage search settings. Runtime configuration, the client token and provider
-secret files retain their own ACLs. From the installed `bin` directory, run
-`qcopilots-websearch.exe --SettingsUrl` to create a one-time link for the
-default MSI installation.
+secret files retain their own ACLs. Run `qcopilots-websearch.exe --SettingsUrl`
+from the installed `bin` directory of the desired version to create a one-time
+link for its running service.
 
 The MSI needs elevation. Read the Apache and separate Microsoft runtime terms
-shown by the installer. The package is unsigned unless stated in its release notes. Uninstall removes program files and the service while retaining
-generated configuration and data. Do not delete retained data unless intentionally
-resetting the deployment.
+shown by the installer. The package is unsigned unless stated in its release
+notes. Use the version shown in Installed apps to select an MSI to uninstall.
+Uninstall removes that version's program files and service and retains its
+configuration and data.
 
 Extract the portable ZIP to a writable directory, including one with spaces or
-Unicode, and use `bin/qcopilots-websearch.exe` to initialize and run the service.
-Issue a link with `--ConfigPath FILE --SettingsUrl`. The ZIP runs as a foreground
-process. New configurations use the automatic source, so a SearXNG instance is optional.
+Unicode. Use a separate configuration directory for each portable instance.
+Pass `--ConfigPath FILE` when initializing, starting or requesting a Settings
+link. Add `--SelectAvailablePorts` to `--InitializeConfig` to reserve free
+loopback ports when creating the configuration. The ZIP runs as a foreground
+process. New configurations use the automatic source, so a SearXNG instance is
+optional.
 
 ## Manage client tokens
 
@@ -126,12 +160,17 @@ the token. The standalone `--GenerateToken` command prints a token without
 changing any configuration.
 
 For the DEB installation, generate a credential as an administrator, check the
-configuration as the service account, then restart.
+configuration as that version's service account, then restart.
 
 ```bash
-sudo /opt/qcopilots-websearch/bin/qcopilots-websearch --ConfigPath /etc/qcopilots-websearch/runtime.json --GenerateToken --ClientId team-alice
-sudo -u qcopilots-websearch /opt/qcopilots-websearch/bin/qcopilots-websearch --ConfigPath /etc/qcopilots-websearch/runtime.json --CheckConfig
-sudo systemctl restart qcopilots-websearch
+version=0.2.0
+package=qcopilots-websearch-$version
+executable="/opt/$package/bin/qcopilots-websearch"
+config_path="/etc/$package/runtime.json"
+account=$(systemctl show --property=User --value "$package.service")
+sudo "$executable" --ConfigPath "$config_path" --GenerateToken --ClientId team-alice
+sudo -u "$account" "$executable" --ConfigPath "$config_path" --CheckConfig
+sudo systemctl restart "$package.service"
 ```
 
 For the MSI installation, run these commands from the installed `bin` directory
@@ -139,15 +178,17 @@ in an elevated PowerShell session. For a portable installation, use its runtime
 configuration path and omit `--ServiceName`.
 
 ```powershell
-$configPath = Join-Path $env:ProgramData 'QCopilots-WebSearch\service.json'
-.\qcopilots-websearch.exe --ConfigPath $configPath --ServiceName QCopilotsWebSearch --GenerateToken --ClientId team-alice
-.\qcopilots-websearch.exe --ConfigPath $configPath --ServiceName QCopilotsWebSearch --CheckConfig
-Restart-Service -Name QCopilotsWebSearch
+$version = '0.2.0'
+$serviceName = "QCopilotsWebSearch-$version"
+$configPath = Join-Path $env:ProgramData "QCopilots-WebSearch-$version\service.json"
+.\qcopilots-websearch.exe --ConfigPath $configPath --ServiceName $serviceName --GenerateToken --ClientId team-alice
+.\qcopilots-websearch.exe --ConfigPath $configPath --ServiceName $serviceName --CheckConfig
+Restart-Service -Name $serviceName
 ```
 
 ## Connect remote clients
 
-Use the existing HTTPS endpoint for the business listener. Include its exact
+Use the HTTPS endpoint for the selected version's business listener. Include its exact
 authority in `business.allowed_hosts` and the exact browser page origin in
 `business.origins` when connecting directly from a browser. The endpoint
 forwards the client's Bearer credential to QCopilots-WebSearch.

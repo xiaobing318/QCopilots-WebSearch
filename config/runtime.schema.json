@@ -6,6 +6,11 @@
       "description": "Configuration format. Accepts 1 only. Other versions fail startup rather than being silently migrated.",
       "const": 1
     },
+    "project_version": {
+      "type": "string",
+      "description": "Project release that owns this configuration. Generated configurations match the version of the creating executable.",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
     "business": {
       "type": "object",
       "properties": {

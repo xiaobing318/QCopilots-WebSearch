@@ -1,5 +1,6 @@
 #pragma once
 #include <QByteArray>
+#include <QString>
 #include <map>
 #include <qws/common.hpp>
 #include <vector>
@@ -12,7 +13,9 @@ const Json &readSchema(const std::string &name);
 const Json &toolCatalog();
 Json defaultConfiguration();
 Json defaultSettings();
-void initializeConfiguration(const std::string &path);
+void assignAvailableListenerPorts(Json &configuration, const QString &configPath);
+void initializeConfiguration(const std::string &path, bool selectAvailablePorts = false,
+                             const QString &stateDirectory = {});
 void setClientToken(const std::string &path, const std::string &id, const QByteArray &token);
 // Throws invalid_argument naming the first failing JSON pointer and reason.
 void validateSchema(const Json &schema, const Json &value);

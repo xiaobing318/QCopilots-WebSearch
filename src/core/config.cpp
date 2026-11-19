@@ -2,10 +2,12 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHostAddress>
 #include <QLockFile>
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QTcpServer>
 #include <QUrl>
 #include <algorithm>
 #include <memory>
@@ -112,10 +114,30 @@ void validateCredential(const QByteArray &token, bool required, const char *erro
       throw Error(errorCode, "Credentials must contain visible ASCII only.");
 }
 
+const QRegularExpression &packageDirectoryPattern() {
+  static const QRegularExpression pattern(
+      "\\Aqcopilots-websearch(?:-poc)?-([0-9]+\\.[0-9]+\\.[0-9]+)\\z",
+      QRegularExpression::CaseInsensitiveOption);
+  return pattern;
+}
+
+QString packageDirectoryRelease(const QString &path) {
+  const QFileInfo info(path);
+  if (info.fileName() != "runtime.json" && info.fileName() != "service.json")
+    return {};
+  return packageDirectoryPattern().match(info.absoluteDir().dirName()).captured(1);
+}
+
 Config validatedConfiguration(Json value, const QString &path) {
   Config c{std::move(value), QFileInfo(path).absolutePath().toStdString()};
   if (const auto problem = violation(readSchema("runtime"), c.value))
     throw Error("invalid_configuration", "Runtime configuration does not match its schema " + *problem + ".");
+  const auto deployment = packageDirectoryRelease(path);
+  if ((!deployment.isEmpty() && (deployment != QLatin1String(QCWS_VERSION) ||
+                                !c.value.contains("project_version"))) ||
+      (c.value.contains("project_version") && c.value["project_version"] != QCWS_VERSION))
+    throw Error("invalid_configuration", "Runtime configuration belongs to a different project release. "
+                                         "This executable expects " QCWS_VERSION ".");
   if (const auto p = c.value.find("provider"); p != c.value.end()) {
     const auto &provider = *p;
     const QUrl url(QString::fromStdString(provider["url"].get<std::string>()), QUrl::StrictMode);
@@ -128,6 +150,44 @@ Config validatedConfiguration(Json value, const QString &path) {
       c.value["business"]["port"] == c.value["control"]["port"])
     throw Error("invalid_configuration", "Business and control listeners need distinct ports.");
   return c;
+}
+
+std::set<int> installedListenerPorts(const QString &configPath) {
+  auto root = QFileInfo(configPath).absoluteDir();
+  if (packageDirectoryRelease(configPath).isEmpty() || !root.cdUp())
+    return {};
+
+  std::set<int> ports;
+  const auto fileName = QFileInfo(configPath).fileName();
+  for (const auto &directory : root.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks)) {
+    if (directory.isJunction() ||
+        (!packageDirectoryPattern().match(directory.fileName()).hasMatch() &&
+         directory.fileName().compare("qcopilots-websearch", Qt::CaseInsensitive) != 0))
+      continue;
+    const QFileInfo peer(QDir(directory.absoluteFilePath()).filePath(fileName));
+    if (!peer.isFile() || peer.isSymLink())
+      continue;
+    try {
+      const auto value = readJson(peer.absoluteFilePath());
+      for (const auto *name : {"business", "control", "admin"}) {
+        const auto listener = value.find(name);
+        const bool isAdmin = std::string_view(name) == "admin";
+        if (listener == value.end() || !listener->is_object()) {
+          if (isAdmin)
+            ports.insert(AdminConfig{}.port);
+          continue;
+        }
+        const auto port = listener->find("port");
+        if (port != listener->end() && port->is_number_integer() && *port >= 1 && *port <= 65535)
+          ports.insert(port->get<int>());
+        else if (isAdmin)
+          ports.insert(AdminConfig{}.port);
+      }
+    } catch (const Error &) {
+      // A live peer is also protected by the socket bind, even if its file is unreadable.
+    }
+  }
+  return ports;
 }
 
 #ifndef _WIN32
@@ -178,12 +238,45 @@ const Json &toolCatalog() {
   return catalog;
 }
 Json defaultConfiguration() {
-  return readJson(resource("runtime.json"));
+  auto configuration = readJson(resource("runtime.json"));
+  configuration["project_version"] = QCWS_VERSION;
+  return configuration;
 }
 Json defaultSettings() {
   return readJson(resource("settings.json"));
 }
-void initializeConfiguration(const std::string &destination) {
+void assignAvailableListenerPorts(Json &configuration, const QString &configPath) {
+  // Keep all three sockets bound until selection finishes so fallback ports are distinct.
+  const auto installed = installedListenerPorts(configPath);
+  QTcpServer business, control, admin;
+  const auto reserve = [&](QTcpServer &listener, int defaultPort) {
+    if (!installed.contains(defaultPort) &&
+        listener.listen(QHostAddress::LocalHost, static_cast<quint16>(defaultPort)))
+      return listener.serverPort();
+    for (int attempt = 0; attempt < 64 && listener.listen(QHostAddress::LocalHost, 0); ++attempt) {
+      if (!installed.contains(listener.serverPort()))
+        return listener.serverPort();
+      listener.close();
+    }
+    throw Error("invalid_configuration", "Cannot reserve a loopback port for the new configuration.");
+  };
+  const auto setListener = [&](const char *name, QTcpServer &listener) {
+    auto &options = configuration[name];
+    const auto port = reserve(listener, options["port"].get<int>());
+    options["port"] = port;
+    options["allowed_hosts"] = Json::array({"127.0.0.1:" + std::to_string(port)});
+  };
+  setListener("business", business);
+  setListener("control", control);
+  configuration["admin"]["port"] = reserve(admin, AdminConfig{}.port);
+}
+
+void initializeConfiguration(const std::string &destination, bool selectAvailablePorts,
+                             const QString &stateDirectory) {
+  const QFileInfo info(QString::fromStdString(destination));
+  const auto deployment = packageDirectoryRelease(info.absoluteFilePath());
+  if (!deployment.isEmpty() && deployment != QLatin1String(QCWS_VERSION))
+    throw Error("invalid_configuration", "Cannot initialize a directory for another project release.");
 #ifndef _WIN32
   // New directories and QSaveFile temporaries start owner-only, so another
   // local user cannot open the credential before its permissions narrow.
@@ -194,7 +287,6 @@ void initializeConfiguration(const std::string &destination) {
     }
   } ownerOnly;
 #endif
-  const QFileInfo info(QString::fromStdString(destination));
   if (!QDir().mkpath(info.absolutePath()))
     throw Error("invalid_configuration", "Cannot create configuration directory.");
   const auto writeAdmin = [&] {
@@ -221,6 +313,12 @@ void initializeConfiguration(const std::string &destination) {
   writeAdmin();
   auto value = defaultConfiguration();
   value["cache"]["directory"] = "state";
+  if (!stateDirectory.isEmpty()) {
+    value["settings"]["directory"] = stateDirectory.toStdString();
+    value["cache"]["directory"] = QDir(stateDirectory).filePath("cache").toStdString();
+  }
+  if (selectAvailablePorts)
+    assignAvailableListenerPorts(value, info.absoluteFilePath());
   value["clients"] = Json::array({Json{{"id", "local"}, {"token_file", "client.token"}}});
   const auto secretPath = info.absoluteDir().filePath("client.token");
   if (!QFileInfo::exists(secretPath)) {

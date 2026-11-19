@@ -6,9 +6,9 @@ A dedicated Qt thread owns each SQLite connection. Search cache keys and coalesc
 
 ## Settings and sources
 
-Deployment settings in `runtime.json` take effect on restart. The settings store publishes immutable settings and credential snapshots. The admin API writes a validated update atomically and detects mismatched revisions. Each in-flight operation keeps its starting snapshot. The daemon polls for filesystem changes every two seconds and retains its last valid snapshot when an edit fails validation. A separate protected file holds provider keys.
+Deployment settings take effect on restart. An MSI or DEB service loads the runtime configuration from its project version's directory. The `project_version` field ties the runtime file to the executable's release. User settings, provider keys, credentials and cache belong to that deployment. The settings store publishes immutable settings and credential snapshots. The admin API writes a validated update atomically and detects mismatched revisions. Each in-flight operation keeps its starting snapshot. The daemon polls for filesystem changes every two seconds and retains its last valid snapshot when an edit fails validation. A separate protected file holds provider keys.
 
-The settings listener defaults to loopback port 8091. Qt resources serve the web app from the service binary. A separate admin credential signs in directly or issues a one-time browser login link. Sessions are held in memory. Host and Origin allowlists, session cookies and CSRF headers govern edits. See [admin API](api.md#administration).
+The settings listener defaults to loopback port 8091. Package initialization records a free port if the default is occupied. Qt resources serve the web app from the service binary. A separate admin credential signs in directly or issues a one-time browser login link. Sessions are held in memory. Host and Origin allowlists, session cookies and CSRF headers govern edits. See [admin API](api.md#administration).
 
 The service checks search and open switches before tool execution. The QGIS adapter applies the separate confirmation preference using its shared host bridge. One authorization covers a QGIS session. Direct MCP and REST clients handle confirmation independently. Status reads local and last-known information without querying a provider.
 

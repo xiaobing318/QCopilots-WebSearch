@@ -10,9 +10,11 @@ QCopilots-WebSearch 是一个使用 C++20 和 Qt 6.12 的独立服务，提供�
 
 | 平台 | 安装包 | 设置命令 |
 | --- | --- | --- |
-| Windows 11 | MSI，注册系统服务 | 在安装目录的 `bin` 下运行 `qcopilots-websearch.exe --SettingsUrl` |
+| Windows 11 | MSI，为安装版本注册系统服务 | 在该版本安装目录的 `bin` 下运行 `qcopilots-websearch.exe --SettingsUrl` |
 | Windows 11 | ZIP，解压后在私有可写目录初始化 | 运行 `bin/qcopilots-websearch.exe --ConfigPath <文件> --SettingsUrl` |
-| Ubuntu 26.04 | DEB，运行 `sudo apt install ./qcopilots-websearch_<version>_amd64.deb` | 运行 `sudo /opt/qcopilots-websearch/bin/qcopilots-websearch --ConfigPath /etc/qcopilots-websearch/runtime.json --SettingsUrl` |
+| Ubuntu 26.04 | DEB，用 apt 安装 `qcopilots-websearch-<版本>_<版本>_amd64.deb` | 运行 `sudo /opt/qcopilots-websearch-<版本>/bin/qcopilots-websearch --SettingsUrl` |
+
+不同版本的 MSI 或 DEB 可在同一台机器上同时运行。首次安装时，每个版本都会创建独立的配置、客户端令牌、管理令牌、设置和缓存，并选用可用的回环端口。连接时使用对应版本记录的端口和凭据。
 
 使用 ZIP 时，先初始化配置并启动服务。
 
@@ -21,9 +23,9 @@ qcopilots-websearch --InitializeConfig --ConfigPath 私有目录/service.json
 qcopilots-websearch --ConfigPath 私有目录/service.json
 ```
 
-设置命令打印一次性链接，请在两分钟内打开。添加 `--Open` 可直接启动浏览器。也可以打开[设置页](http://127.0.0.1:8091/settings/)，输入独立的管理令牌 `admin.token`。初始化生成随机客户端令牌和管理令牌，并保留已有配置。
+设置命令打印一次性链接，请在两分钟内打开。添加 `--Open` 可直接启动浏览器。也可以访问该实例管理端口上的 `/settings/`，输入对应的 `admin.token`。
 
-业务监听默认为 `127.0.0.1:8088`。REST 使用 `/v1` 路由，MCP HTTP 使用 `/mcp`，两者均使用客户端 Bearer 令牌。健康和指标监听为 `127.0.0.1:8089`。进程型 MCP 客户端通过 `--Stdio --ConfigPath FILE` 接入。[部署和 QGIS 接入说明](docs/deployment.md)
+业务监听提供 REST 的 `/v1` 路由和 MCP HTTP 的 `/mcp`，两者均使用客户端 Bearer 令牌。健康和指标使用独立的控制监听。进程型 MCP 客户端通过 `--Stdio --ConfigPath FILE` 接入。[部署和 QGIS 接入说明](docs/deployment.md)
 
 远程 MCP 客户端通过 HTTPS 连接 `https://<公网域名>/mcp`，并填写 Bearer 令牌。使用 `--ConfigPath FILE --GenerateToken` 或 `--ConfigPath FILE --SetToken` 配置令牌。[令牌管理](docs/deployment.md#manage-client-tokens) · [远程客户端配置](docs/deployment.md#connect-remote-clients)
 

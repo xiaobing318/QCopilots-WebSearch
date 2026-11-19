@@ -61,4 +61,4 @@ python scripts/test_mcp_sdk.py --Executable <installed-binary> --Output <report.
 
 Add `--LiveProvider auto` to exercise actual public search sources. Keep those results separate from the deterministic suite.
 
-CI tests the Windows ZIP and Ubuntu DEB against their installed executables. Release and manual CI additionally run the MSI and DEB installer lifecycle checks and Caddy acceptance. Use an elevated disposable Windows environment for `scripts/AcceptWindowsMsi.ps1`. The older installer in these tests is a fixture built from the same source at version 0.0.1.
+CI tests the Windows ZIP and Ubuntu DEB against their installed executables. Release and manual CI also test MSI and DEB co-installation, per-version configuration and credentials, and removal of one version while the other remains available. This uses a second package built from the same source at version 0.0.1. Use an elevated disposable Windows environment for `scripts/AcceptWindowsMsi.ps1`. These runs also verify the Caddy deployment.

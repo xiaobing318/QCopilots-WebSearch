@@ -1,5 +1,5 @@
 [Unit]
-Description=QCopilots WebSearch
+Description=QCopilots WebSearch @PROJECT_VERSION@
 Wants=network-online.target
 After=network-online.target
 StartLimitIntervalSec=60
@@ -7,11 +7,11 @@ StartLimitBurst=5
 
 [Service]
 Type=exec
-User=qcopilots-websearch
-Group=qcopilots-websearch
-WorkingDirectory=/var/lib/qcopilots-websearch
-ExecStartPre=/opt/qcopilots-websearch/bin/qcopilots-websearch --ConfigPath /etc/qcopilots-websearch/runtime.json --CheckConfig
-ExecStart=/opt/qcopilots-websearch/bin/qcopilots-websearch --ConfigPath /etc/qcopilots-websearch/runtime.json
+User=@QCWS_DEB_ACCOUNT@
+Group=@QCWS_DEB_ACCOUNT@
+WorkingDirectory=/var/lib/@QCWS_DEB_BASENAME@
+ExecStartPre=/opt/@QCWS_DEB_BASENAME@/bin/qcopilots-websearch --ConfigPath /etc/@QCWS_DEB_BASENAME@/runtime.json --CheckConfig
+ExecStart=/opt/@QCWS_DEB_BASENAME@/bin/qcopilots-websearch --ConfigPath /etc/@QCWS_DEB_BASENAME@/runtime.json
 Restart=on-failure
 RestartSec=2s
 TimeoutStartSec=30s
@@ -19,7 +19,7 @@ TimeoutStopSec=10s
 KillSignal=SIGTERM
 KillMode=control-group
 UMask=0077
-StateDirectory=qcopilots-websearch
+StateDirectory=@QCWS_DEB_BASENAME@
 StateDirectoryMode=0700
 ProtectSystem=strict
 ProtectHome=true

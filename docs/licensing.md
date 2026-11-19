@@ -20,13 +20,14 @@ Users may rebuild Qt and replace its shared libraries and corresponding plugins.
 Reverse engineering for debugging modifications to LGPL components is permitted.
 Keep the replacement ABI, architecture, compiler ABI and build configuration
 compatible. On Windows, stop the service and replace Qt files under `bin` and
-`plugins`. On Ubuntu, stop the systemd unit and replace the private Qt files under
-`/opt/qcopilots-websearch/lib` and `plugins`. Keep a backup and run `--Version`,
+`plugins`. On Ubuntu, stop the selected version's systemd unit and replace the
+private Qt files under `/opt/qcopilots-websearch-<version>/lib` and `plugins`.
+Keep a backup and run `--Version`,
 `--CheckConfig`, the deterministic tests and a service restart afterward.
 
 An administrator needs write access to installed files. Portable ZIP extraction
-supports replacement without an administrator. Package upgrades can restore the
-distributed library versions, so preserve your modified builds separately.
+supports replacement without an administrator. Reinstalling a package can restore
+its distributed library versions, so preserve your modified builds separately.
 
 Sources and notices are downloadable with the same release as the binaries.
 See [Qt's distribution guidance](https://www.qt.io/development/open-source-lgpl-obligations)

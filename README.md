@@ -10,9 +10,14 @@ Search works without an API key through DuckDuckGo HTML, DuckDuckGo Lite and Bin
 
 | Platform | Package | Settings command |
 | --- | --- | --- |
-| Windows 11 | MSI. Registers the machine service | Run `qcopilots-websearch.exe --SettingsUrl` from the installed `bin` directory |
+| Windows 11 | MSI. Registers a service for the installed version | Run `qcopilots-websearch.exe --SettingsUrl` from that version's installed `bin` directory |
 | Windows 11 | ZIP. Extract and initialize in a private writable directory | Run `bin/qcopilots-websearch.exe --ConfigPath <file> --SettingsUrl` |
-| Ubuntu 26.04 | DEB. Install with `sudo apt install ./qcopilots-websearch_<version>_amd64.deb` | Run `sudo /opt/qcopilots-websearch/bin/qcopilots-websearch --ConfigPath /etc/qcopilots-websearch/runtime.json --SettingsUrl` |
+| Ubuntu 26.04 | DEB. Install `qcopilots-websearch-<version>_<version>_amd64.deb` with apt | Run `sudo /opt/qcopilots-websearch-<version>/bin/qcopilots-websearch --SettingsUrl` |
+
+Different MSI or DEB versions can run on the same host. Each version starts with
+its own configuration, random client and admin tokens, settings and cache. The
+installer selects free loopback ports on first install. Use the ports and
+credentials recorded for the version you want to access.
 
 For a portable installation, initialize the configuration and start the service first.
 
@@ -21,9 +26,9 @@ qcopilots-websearch --InitializeConfig --ConfigPath /private/path/service.json
 qcopilots-websearch --ConfigPath /private/path/service.json
 ```
 
-The Settings command prints a one-time link. Open it within two minutes, or append `--Open` to launch the browser. You can also open [Settings](http://127.0.0.1:8091/settings/) and sign in with the separate `admin.token`. Initialization generates random client and admin tokens and preserves existing configuration.
+The Settings command prints a one-time link. Open it within two minutes, or append `--Open` to launch the browser. You can also open `/settings/` on the instance's admin listener and sign in with its `admin.token`.
 
-The business listener defaults to `127.0.0.1:8088`. Use its `/v1` REST routes or `/mcp` with a client Bearer token. Health and metrics use `127.0.0.1:8089`. Process-based MCP clients can use `--Stdio --ConfigPath FILE`. [Deployment and QGIS setup](docs/deployment.md)
+Use the business listener's `/v1` REST routes or `/mcp` with a client Bearer token. Health and metrics use the control listener. Process-based MCP clients can use `--Stdio --ConfigPath FILE`. [Deployment and QGIS setup](docs/deployment.md)
 
 Remote MCP clients connect over HTTPS at `https://<public-host>/mcp` with a Bearer token. Configure the token with `--ConfigPath FILE --GenerateToken` or `--ConfigPath FILE --SetToken`. [Client token management](docs/deployment.md#manage-client-tokens) · [Remote client configuration](docs/deployment.md#connect-remote-clients)
 

@@ -8,7 +8,7 @@ GitHub Actions builds Windows x64 ZIP and MSI packages on Windows Server 2025 an
 - Reusable `build.yml` builds the TypeScript frontend once with the Node version from `.nvmrc`. The cached native jobs use the same `web-dist` and the checked-in ci build profiles.
 - Each native job configures, builds, tests, installs and packages the service. SDK and ZIP or DEB smoke checks run against installed artifacts. A failed native job uploads its CTest results and diagnostics when available.
 - Main branch pushes and manual runs add ASan, UBSan, clang-tidy and bounded fuzzing on Ubuntu 26.04.
-- Manual and release runs add installer lifecycle and Caddy checks. The installer upgrade baseline is built from the same source at version 0.0.1 to test the package lifecycle.
+- Manual and release runs add installer lifecycle and Caddy checks. A second package built from the same source at version 0.0.1 exercises co-installation with separate configuration, credentials and listener ports.
 
 A feature branch can run the normal workflow without a release tag. CI and the local `publish` pipeline stage produce artifacts only. MSI testing requires a disposable elevated Windows runner.
 
@@ -21,7 +21,8 @@ The release job uses the tested ZIP, MSI and DEB artifacts. It adds the matching
 Verify downloaded files against `SHA256SUMS`. GitHub CLI can verify a distribution package's provenance.
 
 ```bash
-gh attestation verify ./qcopilots-websearch_<version>_amd64.deb --repo xiaobing318/QCopilots-WebSearch
+version=0.2.0
+gh attestation verify "./qcopilots-websearch-${version}_${version}_amd64.deb" --repo xiaobing318/QCopilots-WebSearch
 ```
 
 See [license notices and Qt replacement instructions](licensing.md).

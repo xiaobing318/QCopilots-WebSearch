@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.28)
 set(QCWS_VERSION "0.2.0" CACHE STRING "Three-part release or isolated installer-test version")
+if(NOT QCWS_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+  message(FATAL_ERROR "QCWS_VERSION must contain three numeric components")
+endif()
 project(QCopilotsWebSearch VERSION ${QCWS_VERSION} LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

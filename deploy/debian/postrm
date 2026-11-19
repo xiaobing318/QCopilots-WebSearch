@@ -1,9 +1,19 @@
 #!/bin/sh
 set -eu
-unit=qcopilots-websearch.service
+unit=@QCWS_DEB_BASENAME@.service
 if [ "${1:-}" = purge ]; then
-    if command -v deb-systemd-helper >/dev/null 2>&1; then
-        deb-systemd-helper purge "$unit" >/dev/null || true
+    if [ -z "${DPKG_ROOT:-}" ]; then
+        config_dir=/etc/@QCWS_DEB_BASENAME@
+        if [ -L "$config_dir" ]; then
+            echo 'QCopilots-WebSearch: Cannot purge a symbolic-link configuration directory.' >&2
+            exit 1
+        fi
+        if [ -d "$config_dir" ]; then
+            rm -f -- "$config_dir/runtime.json"
+        fi
+        if command -v deb-systemd-helper >/dev/null 2>&1; then
+            deb-systemd-helper purge "$unit" >/dev/null || true
+        fi
     fi
 fi
 case "${1:-}" in
@@ -13,6 +23,6 @@ case "${1:-}" in
         fi
         ;;
 esac
-# dpkg removes its conffile on purge. Generated tokens, data and the service
-# account remain, preventing accidental data loss and later UID reuse.
+# Generated tokens, data and the service account remain, preventing loss
+# of retained data and later UID reuse.
 exit 0

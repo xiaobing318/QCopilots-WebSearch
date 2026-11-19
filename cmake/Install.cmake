@@ -1,7 +1,11 @@
 # Every destination is relative to the staging root. Installing on a developer
 # machine must not write to its /etc or register a system service.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  set(_app_root "opt/qcopilots-websearch")
+  set(QCWS_DEB_BASENAME "qcopilots-websearch-${PROJECT_VERSION}")
+  string(SHA256 _account_version_hash "${PROJECT_VERSION}")
+  string(SUBSTRING "${_account_version_hash}" 0 24 _account_version_hash)
+  set(QCWS_DEB_ACCOUNT "qcws-${_account_version_hash}")
+  set(_app_root "opt/${QCWS_DEB_BASENAME}")
   set(_app_bin "${_app_root}/bin")
   set(_app_share "${_app_root}/share/qcopilots-websearch")
   set_target_properties(qcopilots-websearch PROPERTIES
@@ -20,14 +24,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   file(WRITE "${PROJECT_BINARY_DIR}/debian/qt.conf"
     "[Paths]\nPrefix=..\nLibraries=lib\nPlugins=plugins\nBinaries=bin\nLibraryExecutables=libexec\n")
   install(FILES "${PROJECT_BINARY_DIR}/debian/qt.conf" DESTINATION "${_app_bin}")
-  file(READ "${PROJECT_SOURCE_DIR}/config/runtime.json" _runtime)
-  string(JSON _runtime SET "${_runtime}" clients "[{\"id\":\"local\",\"token_file\":\"client.token\"}]")
-  string(JSON _runtime SET "${_runtime}" cache directory "\"/var/lib/qcopilots-websearch/cache\"")
-  string(JSON _runtime SET "${_runtime}" settings "{\"directory\":\"/var/lib/qcopilots-websearch\"}")
-  file(WRITE "${PROJECT_BINARY_DIR}/debian/runtime.json" "${_runtime}\n")
-  install(FILES "${PROJECT_BINARY_DIR}/debian/runtime.json" DESTINATION "etc/qcopilots-websearch"
-    PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ)
-  install(FILES deploy/systemd/qcopilots-websearch.service DESTINATION "usr/lib/systemd/system")
+  configure_file(deploy/systemd/qcopilots-websearch.service
+    "${PROJECT_BINARY_DIR}/debian/${QCWS_DEB_BASENAME}.service" @ONLY NEWLINE_STYLE UNIX)
+  install(FILES "${PROJECT_BINARY_DIR}/debian/${QCWS_DEB_BASENAME}.service"
+    DESTINATION "usr/lib/systemd/system")
 else()
   set(_app_share "share/qcopilots-websearch")
   install(TARGETS qcopilots-websearch RUNTIME DESTINATION bin)
@@ -37,7 +37,12 @@ else()
   install(SCRIPT "${_deploy_script}")
 endif()
 install(DIRECTORY contracts/ DESTINATION "${_app_share}/contracts")
-install(FILES config/runtime.json config/runtime.schema.json config/settings.json
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/config/runtime.json")
+file(READ "${PROJECT_SOURCE_DIR}/config/runtime.json" _runtime)
+string(JSON _runtime SET "${_runtime}" project_version "\"${PROJECT_VERSION}\"")
+file(MAKE_DIRECTORY "${PROJECT_BINARY_DIR}/package-config")
+file(WRITE "${PROJECT_BINARY_DIR}/package-config/runtime.json" "${_runtime}\n")
+install(FILES "${PROJECT_BINARY_DIR}/package-config/runtime.json" config/runtime.schema.json config/settings.json
   config/settings.schema.json config/secrets.schema.json DESTINATION "${_app_share}/config")
 install(FILES LICENSE README.md README.zh-CN.md DESTINATION "${_app_share}")
 install(DIRECTORY docs/ DESTINATION "${_app_share}/docs" FILES_MATCHING PATTERN "*.md")
