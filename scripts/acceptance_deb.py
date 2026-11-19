@@ -462,7 +462,18 @@ def main():
         report["checks"]["ubuntu26.deb." + name] = {"status": "passed", "exitCode": 0, **details}
 
     failure = None
+    opt_fd = None
+    original_opt_mode = None
     try:
+        # The disposable hosted image opens /opt to tooling installations. The
+        # package itself requires protected ancestry, which this fixture preserves.
+        opt_fd = os.open("/opt", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        opt_info = os.fstat(opt_fd)
+        require(opt_info.st_uid == 0, "Disposable /opt must be root-owned")
+        if stat.S_IMODE(opt_info.st_mode) & 0o022:
+            original_opt_mode = stat.S_IMODE(opt_info.st_mode)
+            os.fchmod(opt_fd, original_opt_mode & ~0o022)
+            LOG.append(f"Protected disposable /opt (original mode {original_opt_mode:o})")
         for baseline in baselines:
             baseline.install()
             health(baseline)
@@ -501,6 +512,17 @@ def main():
             except Exception as error:
                 cleanup_errors.append(str(error))
                 failure = failure or error
+        if opt_fd is not None:
+            try:
+                if original_opt_mode is not None:
+                    os.fchmod(opt_fd, original_opt_mode)
+                    require(stat.S_IMODE(os.fstat(opt_fd).st_mode) == original_opt_mode, "Could not restore /opt mode")
+                    LOG.append(f"Restored disposable /opt mode {original_opt_mode:o}")
+            except Exception as error:
+                cleanup_errors.append(str(error))
+                failure = failure or error
+            finally:
+                os.close(opt_fd)
         if cleanup_errors:
             report["status"], report["cleanupError"] = "failed", "\n".join(cleanup_errors)
         output.parent.mkdir(parents=True, exist_ok=True)

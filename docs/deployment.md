@@ -27,7 +27,8 @@ Restarts reuse the recorded ports.
 
 Install the release DEB using apt. Set `version` to the version in the package
 filename. Each package creates a version-specific unprivileged service account
-and systemd unit.
+and systemd unit. The DEB requires a root-owned `/opt` with write access limited
+to its owner.
 
 ```bash
 version=0.2.1

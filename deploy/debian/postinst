@@ -21,10 +21,10 @@ program=$program_dir/qcopilots-websearch
 fail() { echo "QCopilots-WebSearch: $1" >&2; exit 1; }
 check_root_directory() {
     directory=$1
-    [ ! -L "$directory" ] && [ -d "$directory" ] || fail "An installation directory is not a real directory."
-    [ "$(stat -c %u -- "$directory")" -eq 0 ] || fail "An installation directory is not root-owned."
+    [ ! -L "$directory" ] && [ -d "$directory" ] || fail "Installation path $directory is not a real directory."
+    [ "$(stat -c %u -- "$directory")" -eq 0 ] || fail "Installation directory $directory is not root-owned."
     mode=$(stat -c %a -- "$directory")
-    [ "$((0$mode & 0022))" -eq 0 ] || fail "An installation directory allows non-owner writes."
+    [ "$((0$mode & 0022))" -eq 0 ] || fail "Installation directory $directory allows non-owner writes (mode $mode)."
 }
 for directory in /opt "$install_dir" "$program_dir"; do
     check_root_directory "$directory"
