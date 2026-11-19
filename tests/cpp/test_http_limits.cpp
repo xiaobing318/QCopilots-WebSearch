@@ -195,7 +195,8 @@ void tests(const char *templatePath) {
   require(response && response->status == 200, "complete body must clear input deadline");
   require(Clock::now() - started >= std::chrono::milliseconds(2300), "slow handler executed");
   std::vector<std::unique_ptr<QTcpSocket>> pending;
-  for (int i = 0; i < 25; ++i) {
+  // Exceed the nine workers without overflowing the 16-slot queue before they dequeue.
+  for (int i = 0; i < 12; ++i) {
     auto sock = connection(server.businessPort());
     write(*sock, headers("POST", "/v1/search", "Content-Length: 1048576\r\n") + "{");
     pending.push_back(std::move(sock));
