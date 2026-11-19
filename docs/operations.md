@@ -1,164 +1,73 @@
-# Operations and recovery
+<a name="operations-and-recovery"></a>
 
-Use independent credentials per caller. A page snapshot belongs to its client
-identity. Rotate a token with the CLI or by updating an existing private file
-or environment source, then restart. Keep the identity to retain its cache
-access. Keep token files out of source control and diagnostics.
-[Client token management](deployment.md#manage-client-tokens)
+# 运维与恢复
 
-## Capacity and monitoring
+为每个调用方分配独立的凭据。网页快照归创建它的客户端身份所有。可以通过命令行轮换令牌，也可以更新已有的私有令牌文件或环境变量，然后重启服务。保留客户端身份即可继续访问已有缓存。令牌文件应排除在版本控制和诊断资料之外。[管理客户端令牌](deployment.md#manage-client-tokens)
 
-Business, control and settings listeners are separate. The default capacity is five
-operations. After parsing and authentication, work that exceeds business
-operation capacity returns `busy`/429. Control health uses a separate worker
-pool. Request input has a two-second absolute read deadline, including chunk
-framing and trailers. Sending small amounts of data continuously does not extend
-that deadline. Application operations use their own deadlines. Increase capacity
-only after measuring memory, latency and upstream limits at the new setting.
+<a name="capacity-and-monitoring"></a>
 
-The authenticated control listener provides `/health/live`, `/health/ready` and
-Prometheus text `/metrics`. Current gauges include `qcws_active_calls` and
-`qcws_active_upstream`. Status also reports waiting coalesced searches and the
-last observed dependency state. That state is `degraded` when some engines
-failed or an error followed partial results, and `unavailable` only when an
-error left no results. Client cancellation does not change it. These endpoints
-do not perform a public search.
-Readiness of this process is not proof that Google, Bing or another upstream is
-currently reachable.
+## 容量与监控
 
-Normal logs exclude tokens, raw queries and page bodies. Operators should also
-avoid enabling access logs that capture credentials or request bodies at their
-reverse proxy. Monitor latency, 429s, provider failures and package/service restart
-events using bounded retention. Container log rotation is configured in Compose.
+业务、控制和设置使用独立的监听器。默认最多同时处理五项业务操作。请求经过解析和身份验证后，超出业务容量的操作返回 `busy`，HTTP 状态码为 429。控制监听器的健康检查使用独立的工作线程池。读取请求的总时限为两秒，涵盖分块传输的帧结构和尾部字段。持续发送少量数据也无法延长该时限。应用操作使用各自的截止时间。调高容量前，应在目标并发量下测量内存用量、延迟和上游限制。
 
-## Manage search sources
+控制监听器在验证身份后提供 `/health/live`、`/health/ready` 和 Prometheus 文本格式的 `/metrics`。当前指标包括 `qcws_active_calls` 和 `qcws_active_upstream`。状态信息还会报告等待中的合并搜索和最近观测到的上游状态。部分引擎失败，或返回部分结果后发生错误时，状态为 `degraded`。发生错误且没有结果时，状态才会变为 `unavailable`。这些端点只读取本地信息。进程就绪只反映服务自身的运行状态，Google、Bing 等上游的连通性需另行确认。
 
-Open the bilingual settings page using `--SettingsUrl`. A management link expires
-after 120 seconds and can be used once. Clients should use distinct business
-tokens. MSI allows local interactive users to read the separate `admin.token`.
-On Ubuntu the admin token is service-owned with mode 0600. Keep management links,
-tokens and provider secrets out of logs.
+常规日志不包含令牌、原始查询和网页正文。反向代理的访问日志同样应排除凭据和请求正文。监控延迟、429 响应、搜索后端故障及软件包或服务的重启事件，并为日志设置保留期限。Compose 配置中已设置容器日志轮换。
 
-Auto uses public DuckDuckGo and Bing pages and can report `provider_unavailable`
-or `rate_limited` when they are unreachable or throttling. Use the provider test
-in Settings to diagnose a failure. For managed search, select your SearXNG
-endpoint or configure a Brave, Tavily, Exa, Perplexity or DeepSeek key.
+<a name="manage-search-sources"></a>
 
-## Cache and backups
+## 管理搜索后端
 
-New configurations default to a thirty-minute TTL for search and page snapshots. Partial search
-results are kept for at most 30 seconds, and partial results without hits are
-not cached. The default cache budget is 256 MiB and 10,000 entries. SQLite is
-owned by a dedicated thread and the cache directory is locked against a second
-process. Corrupt, inaccessible or unsupported cache state fails explicitly rather
-than silently discarding data. The one exception is a search-cache write, whose
-failure only leaves that result uncached.
+使用 `--SettingsUrl` 打开双语设置页面。管理链接只能使用一次，120 秒后过期。客户端应分别使用独立的业务令牌。通过 MSI 安装时，本机交互式用户可以读取独立的 `admin.token`。在 Ubuntu 上，管理令牌文件归服务账户所有，权限为 0600。管理链接、令牌和搜索后端密钥应排除在日志之外。
 
-Use healthy local storage for the cache. Shutdown timing cannot cover an
-indefinitely stalled operating-system filesystem. Forced termination can leave
-temporary state behind. Remove such state only after confirming its owning
-process has exited and the directory belongs to that instance.
+自动模式使用公开的 DuckDuckGo 和 Bing 搜索页面。当页面不可达或触发限流时，可能返回 `provider_unavailable` 或 `rate_limited`。可使用设置页面中的后端测试功能排查故障。若要使用自行管理的搜索服务，可指定 SearXNG 端点，或配置 Brave、Tavily、Exa、Perplexity 或 DeepSeek 的密钥。
 
-Cache hits record their latest access order in bounded memory. The next content
-write applies those updates in its existing SQLite transaction before choosing
-an eviction victim. Normal shutdown checkpoints the remaining access metadata.
-A crash or failed shutdown checkpoint can lose recent access order, but does not
-change committed page content or expiry times. Reads do not issue a synchronous
-disk commit for each hit.
+<a name="cache-and-backups"></a>
 
-Stop the service before taking a filesystem backup of configuration, credentials
-and cache. Protect backups with the same access controls as the originals.
-Do not copy a live SQLite file while ignoring its journal. Cache data can be
-recreated, but losing it invalidates page IDs. Keep configuration and credentials
-when replacing cache state.
+## 缓存与备份
 
-For a cache failure, stop the service, preserve the failing directory for
-diagnosis, create a fresh private directory and update its configuration path.
-Run `--CheckConfig`, restart and verify health. Do not automatically overwrite a
-corrupt or locked cache. Repair filesystem permissions or disk capacity first.
+新配置中，搜索结果和网页快照的默认缓存有效期均为 30 分钟。部分搜索结果最多保存 30 秒。没有命中项的部分结果不进入缓存。缓存默认上限为 256 MiB 和 10,000 条记录。SQLite 由专用线程管理，缓存目录会加锁以防其他进程同时使用。缓存损坏、无法访问或格式不受支持时，服务会明确报错并保留数据。搜索结果的缓存写入失败时，只会跳过该结果的缓存。
 
-## Install, switch and remove versions
+应将缓存放在可靠的本地存储上。操作系统的文件系统若无限期挂起，服务也无法保证按时退出。强制终止可能留下临时数据。清理前，请确认所属进程已退出，且该目录确实归该实例使用。
 
-Runtime configuration uses `schema_version: 1` for its JSON format.
-The `project_version` field records the exact release that generated the
-configuration, such as `"0.2.1"`. A build rejects a stamped configuration from
-a different release. Run `--CheckConfig` with the executable for the version
-you want to check. It reads that executable's adjacent `data/runtime.json`
-by default. Run this check as administrator for MSI and with `sudo` for DEB.
-Explicit `--ConfigPath` continues to accept legacy files without `project_version`.
+缓存命中时，服务会在容量受限的内存中记录最新访问顺序。下一次写入内容时，服务会先在已有的 SQLite 事务中应用这些更新，再选出要淘汰的条目。正常退出时会将剩余的访问记录写入磁盘。崩溃或退出时写入失败可能丢失近期访问顺序，已提交的网页内容和过期时间仍然有效。每次读取缓存无需同步提交磁盘写入。
 
-MSI and DEB register a separate service and program directory for each version.
-Each service loads `bin/data/runtime.json` from its own installation root.
-Every new version gets fresh credentials, provider settings, cache and
-loopback ports. The existing service keeps running while the new one is
-installed.
+在文件系统层面备份配置、凭据和缓存之前，请先停止服务。备份应采用与原始数据相同的访问控制。切勿在 SQLite 文件仍在使用时只复制数据库文件而遗漏其日志。缓存数据可以重建，重建后原有网页 ID 会失效。更换缓存时应保留配置和凭据。
 
-To switch clients, install the complete target package. Verify the version,
-service identity, authentication, health, and one search and page read. Update
-the client endpoint and token together. Page IDs belong to the service and
-client that created them. Open the URL again on the new version. To switch back,
-restore the clients' earlier endpoints and credentials while that service
-is still available. [Version-specific paths and ports](deployment.md#installed-versions-and-ports)
+如果缓存出现故障，先停止服务，保留故障目录供诊断，再新建一个私有目录并更新配置路径。运行 `--CheckConfig`，重启服务并检查健康状态。缓存损坏或被锁定时，应先修复文件系统权限或磁盘容量问题，避免自动覆盖现有缓存。
 
-Windows uses system Schannel. Ubuntu uses the distribution's OpenSSL shared
-libraries. Apply OS security updates and restart the service. Maintain the
-appropriate CA stores and supply complete certificate chains to endpoints.
+<a name="install-switch-and-remove-versions"></a>
 
-New installations use the automatic search source. Select any private SearXNG
-endpoint or configure a provider key using that version's Settings page.
-Browser settings and key changes take effect on save. External edits are
-checked every two seconds. If a file is invalid, the admin status reports
-`settings_error` while the last valid snapshot stays active.
+## 安装、切换和卸载版本
 
-Back up private state before changing or removing a deployment. Use matching
-configuration and executable versions when restoring. Windows MSI initializes
-each version in its own installer transaction. The rollback receipt records file
-identities and content hashes. Rollback only removes unmodified files created
-by that transaction. A conflicting receipt or modified file is preserved for
-administrator inspection.
+运行时配置使用 `schema_version: 1` 标识 JSON 格式。`project_version` 记录生成配置的确切发布版本，例如 `"0.2.1"`。可执行文件会拒绝加载标记为其他发布版本的配置。请用待检查版本的可执行文件运行 `--CheckConfig`。该命令默认读取可执行文件旁的 `data/runtime.json`。MSI 安装下请以管理员身份运行，DEB 安装下请使用 `sudo`。显式传入 `--ConfigPath` 仍可读取没有 `project_version` 的旧配置。
 
-Windows commit cleanup failure leaves a private `.qcws-install-*.json` receipt.
-Do not blindly delete its referenced files. Inspect the installer log and recorded
-transaction first. Normal successful installation leaves no such receipt.
+MSI 和 DEB 为每个版本注册独立的服务并使用单独的程序目录。各服务从自己的安装根目录加载 `bin/data/runtime.json`。每个新版本都拥有新的凭据、后端设置、缓存和回环端口。安装新版本期间，现有服务会继续运行。
 
-If a DEB maintainer script fails, dpkg can report `half-configured`. Correct the
-cause and configure that package again. A separately installed earlier version
-remains available during recovery.
+切换客户端前，请安装完整的目标软件包。确认版本、服务身份、身份验证和健康状态，并执行一次搜索和网页读取。同步更新客户端的端点和令牌。网页 ID 仅供创建它的服务和客户端使用。切换后请在新版本中重新打开原 URL。若要切回，趁旧服务仍可用时为客户端恢复原端点和凭据。[各版本的安装路径与端口](deployment.md#installed-versions-and-ports)
 
-The Windows test-only `QCWS_TEST_FAILPOINT` MSI property deliberately fails
-after initialization or after service start. It is inert by default and requires
-an administrator explicitly passing the test value. Never set it in deployment
-automation. It permits rollback tests using exactly the candidate MSI bytes.
+Windows 使用系统的 Schannel。Ubuntu 使用发行版提供的 OpenSSL 共享库。安装操作系统安全更新后，请重启服务。维护适用的 CA 信任库，并在端点配置完整的证书链。
 
-Select the exact version to remove. On Windows, uninstall the corresponding MSI
-entry in Installed apps. On Ubuntu, use the package name including its version,
-for example `sudo apt remove qcopilots-websearch-0.2.1`. Both uninstall paths
-retain that version's `bin/data` directory. A DEB purge removes the version's
-`bin/data/runtime.json` and retains its tokens, state and service account.
-Remove retained files only when intentionally resetting that version after
-backups.
+新安装默认使用自动搜索后端。可在对应版本的设置页面中选择私有 SearXNG 端点，或配置搜索后端密钥。在浏览器中保存的设置和密钥会立即生效。服务每两秒检查一次从外部修改的文件。文件无效时，管理状态会报告 `settings_error`，服务继续使用上一次有效的配置快照。
 
-`docker compose down` keeps persistent certificates and data. Do not use `down -v`
-as a routine upgrade or uninstall step. Keep Caddy certificate storage and the
-SearXNG secret stable across restarts.
+更改或移除部署前，请备份私有数据。恢复时应使用匹配的配置和可执行文件版本。Windows MSI 通过各版本独立的安装事务完成初始化。回滚记录保存文件标识和内容哈希。回滚只移除该事务创建且未被修改的文件。发现冲突的回滚记录或已修改的文件时会予以保留，供管理员检查。
 
-## Limits of public retrieval
+Windows 的安装提交清理失败时，会留下私有的 `.qcws-install-*.json` 回滚记录。删除其中引用的文件前，应先检查安装日志及记录的事务。安装正常完成后不会留下该文件。
 
-Public requests allow HTTP(S) only, validate actual connection addresses and
-redirect destinations, refuse HTTPS downgrade and block non-public addresses.
-They do not inherit a system proxy. The administrator's fixed SearXNG endpoint
-has a separate policy so a private backend can be used safely.
+如果 DEB 的维护脚本执行失败，dpkg 可能将软件包标记为 `half-configured`。排除故障后，请重新配置该软件包。单独安装的旧版本在恢复期间仍可使用。
 
-A host whose resolver answers with non-public addresses cannot read any page.
-`web_open` then returns `destination_blocked` with "URL host resolves only to
-non-public addresses." for every URL. A common cause is a TUN-mode proxy in
-fake-IP mode, which answers DNS with addresses from `198.18.0.0/15`. Run the
-service on a host with ordinary DNS, or exclude its process or its DNS queries
-from fake-IP mapping. The service never treats these ranges as public.
+Windows MSI 的 `QCWS_TEST_FAILPOINT` 属性专供测试使用，可以让安装在初始化后或服务启动后主动失败。该属性默认不生效，只有管理员明确传入测试值才会触发。它可使用原样的候选 MSI 文件验证回滚，应始终排除在部署自动化之外。
 
-Compressed transfer and decoded body each have a five-MiB bound. HTML parsing has
-additional bounded input, node, depth, text and link budgets. The parser stops as
-soon as a budget is exhausted, so hostile markup cannot multiply nodes in memory.
-Parser truncation is reported and the readable part is still returned. Exceeding
-transfer limits is an error. Extraction does not execute
-JavaScript, and web text remains untrusted content for downstream agents.
+卸载前，请确认要移除的确切版本。在 Windows 的「已安装的应用」中卸载对应的 MSI 条目。在 Ubuntu 上，请使用包含版本的包名，例如 `sudo apt remove qcopilots-websearch-0.2.1`。这两种卸载方式都会保留该版本的 `bin/data` 目录。对 DEB 执行 purge 会移除该版本的 `bin/data/runtime.json`，其令牌、状态数据和服务账户会保留。仅在有意重置该版本时，才应在备份完成后删除保留的文件。
+
+`docker compose down` 会保留持久化证书和数据。日常升级和卸载应避免使用 `down -v`。重启时应保留 Caddy 的证书存储和 SearXNG 密钥。
+
+<a name="limits-of-public-retrieval"></a>
+
+## 公网检索的限制
+
+公网请求仅支持 HTTP(S)。服务会核验实际连接的地址和每次重定向的目标，拒绝从 HTTPS 降级到 HTTP，并阻止访问非公网地址。公网请求不沿用系统代理。管理员固定配置的 SearXNG 端点适用单独的网络策略，可以使用私有后端。
+
+如果主机的 DNS 解析器对所有网页都返回非公网地址，则无法读取任何网页。此时对任意 URL 调用 `web_open` 都会返回 `destination_blocked`，并提示 `URL host resolves only to non-public addresses.`。常见原因是 TUN 模式的代理使用了 fake-IP 模式，DNS 返回的地址位于 `198.18.0.0/15`。请在使用普通 DNS 的主机上运行服务，或将服务进程或其 DNS 查询排除在 fake-IP 映射之外。服务始终将这类地址段视为非公网地址。
+
+压缩传输数据和解压后的正文大小分别限制为 5 MiB。HTML 解析还对输入大小、节点数、嵌套深度、文本量及链接数设有限额。达到任一限额时，解析就会停止，以免恶意标记在内存中创建大量节点。响应会说明解析已截断，并返回已读取的部分。超出传输限额则会报错。提取内容时不会执行 JavaScript，下游智能体仍应将网页文本视为不可信内容。

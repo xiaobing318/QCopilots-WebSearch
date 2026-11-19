@@ -1,14 +1,20 @@
-# Build and package
+<a name="build-and-package"></a>
 
-The service supports Windows 11 and Ubuntu 26.04 on amd64. Automated Windows builds run on Windows Server 2025. A local Windows 11 run checks the portable ZIP.
+# 构建与打包
 
-## Prerequisites
+服务支持 amd64 架构的 Windows 11 和 Ubuntu 26.04。Windows 自动构建在 Windows Server 2025 上运行，便携 ZIP 在本地 Windows 11 上验证。
 
-- Windows needs Visual Studio 2022 or 2026 with Desktop development with C++, a Windows SDK, CMake 3.30 or newer, Ninja, Git and Python 3.12 or newer. The pipeline discovers the x64 tools and can use CMake and Ninja from Visual Studio. TLS uses Schannel.
-- Ubuntu needs Python 3.12 or newer with venv and pip before running the Bash entry point. Bootstrap installs GCC, CMake, Ninja, Git, distribution OpenSSL development files and other native requirements with apt. System package installation requires root or noninteractive sudo.
-- Bootstrap prepares Qt 6.12.0, Node 24.22.3 and isolated Python tooling. Node is a build-time dependency of the embedded settings UI. The native installed service includes the UI and uses shared Qt libraries.
+<a name="prerequisites"></a>
 
-## Build and configure
+## 前置条件
+
+- Windows 需要 Visual Studio 2022 或 2026，并安装「使用 C++ 的桌面开发」工作负载和 Windows SDK。同时需要 CMake 3.30 或更高版本、Ninja、Git 和 Python 3.12 或更高版本。构建流程会自动查找 x64 工具，也可使用 Visual Studio 自带的 CMake 和 Ninja。Windows 上的 TLS 由 Schannel 提供。
+- Ubuntu 在运行 Bash 构建脚本前需要 Python 3.12 或更高版本，并提供 venv 和 pip。`bootstrap` 阶段通过 apt 安装 GCC、CMake、Ninja、Git、发行版提供的 OpenSSL 开发文件及其他原生依赖。安装系统软件包需要以 root 身份执行，或使用非交互式 sudo。
+- `bootstrap` 阶段会准备 Qt 6.12.0、Node 24.22.3 和隔离的 Python 工具环境。Node 用于构建内置设置界面。安装后的原生服务已经内置该界面，并使用 Qt 共享库。
+
+<a name="build-and-configure"></a>
+
+## 构建与配置
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/BuildPipeline.ps1 --ConfigPath config/BuildPipeline.json --Profile windows-x64 --Stages bootstrap,doctor,configure,build,test,install,publish
@@ -18,30 +24,34 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/BuildPipeline.ps
 bash scripts/BuildPipeline.sh --ConfigPath config/BuildPipeline.json --Profile ubuntu-x64 --Stages bootstrap,doctor,configure,build,test,install,publish
 ```
 
-Both wrappers call the same Python implementation. The requested stages run in order. `--CheckOnly` reports prerequisites without installing and `--DryRun` prints the proposed commands.
+两个入口脚本调用同一套 Python 实现，并依次执行指定阶段。`--CheckOnly` 只检查并报告前置条件，`--DryRun` 只打印将要执行的命令。
 
-Use a private copy of the configuration ending in `.local.json` to change local build, install, cache or tool paths. Relative paths resolve from the repository and environment variables in profile values are expanded. The default Windows Qt root is `C:/Softwares/Qt`. Select only ZIP by setting a Windows profile's `packageGenerators` to `["ZIP"]`.
+若需修改本地的构建、安装、缓存或工具路径，请复制配置文件，并将副本命名为以 `.local.json` 结尾的文件。相对路径以仓库根目录为基准，配置方案中的环境变量会展开。Windows 上的默认 Qt 根目录为 `C:/Softwares/Qt`。如果只需要 ZIP，将 Windows 配置方案的 `packageGenerators` 设为 `["ZIP"]`。
 
-The configure step uses CMake Presets `windows-x64`, `ubuntu-x64` and `ubuntu-x64-quality`. Native CI profiles set `QCWS_BUILD_WEB=OFF` and point `QCWS_WEB_DIST_DIR` to the prebuilt bundle from the web job. Local configuration builds the frontend by default.
+配置阶段使用 CMake 预设 `windows-x64`、`ubuntu-x64` 和 `ubuntu-x64-quality`。原生构建的 CI 配置设置 `QCWS_BUILD_WEB=OFF`，并通过 `QCWS_WEB_DIST_DIR` 使用前端作业预先生成的产物。本地默认会构建前端。
 
-Tool and source downloads are verified against committed hashes. Set `proxy` in a private profile to control downloads. An empty value selects direct access. The profile proxy also applies to apt, pip and npm. Runtime outbound requests independently use direct connections. Use `offline: true` with preinstalled system tools and verified caches. Building the frontend offline requires an npm cache populated with the locked packages, or a prebuilt bundle.
+下载的工具和源码会与仓库中提交的哈希值核对。在本地配置方案中设置 `proxy` 可为下载指定代理，留空时直连。此代理也用于 apt、pip 和 npm。服务运行时的出站请求独立使用直连。离线构建时请设置 `offline: true`，并提前安装系统工具、准备已校验的缓存。离线构建前端还需要已包含锁定版本依赖的 npm 缓存，或可直接使用的预构建产物。
 
-## Windows MSI tooling
+<a name="windows-msi-tooling"></a>
 
-With a .NET 10 SDK available, install official WiX 7.0.1 and its matching UI extension.
+## Windows MSI 打包工具
+
+准备好 .NET 10 SDK 后，安装官方 WiX 7.0.1 和同版本的 UI 扩展。
 
 ```text
 dotnet tool install --tool-path <tool-directory> wix --version 7.0.1
 wix extension add -g WixToolset.UI.wixext/7.0.1 -acceptEula wix7
 ```
 
-Add the tool directory to PATH or set `tools.wix` in the private profile. CPack uses its WiX .NET driver with `CPACK_WIX_VERSION=4`. See [licensing](licensing.md) for the WiX terms.
+将工具目录加入 PATH，或在本地配置方案中设置 `tools.wix`。CPack 通过 `CPACK_WIX_VERSION=4` 使用 WiX .NET 驱动。WiX 条款见[许可证与可替换库](licensing.md)。
 
-The `publish` stage produces local packages in the profile's `buildDir/packages/<timestamp>`. MSI installation needs elevation to register the machine service. The [GitHub release workflow](release.md) publishes packages after building and testing a version tag.
+`publish` 阶段将软件包输出到所选配置方案的 `buildDir/packages/<timestamp>`。安装 MSI 需要提升权限才能注册系统服务。推送版本标签后，GitHub 会构建和测试该版本，通过后再发布软件包。详见 [GitHub 发布流程](release.md)。
 
-## Test
+<a name="test"></a>
 
-CTest uses local deterministic fixtures for TLS, HTTP, settings, search providers and MCP. To check the frontend separately, use the Node pin in `.nvmrc`.
+## 测试
+
+CTest 使用本地可复现的测试数据和环境，覆盖 TLS、HTTP、设置、搜索后端和 MCP。单独检查前端时，请使用 `.nvmrc` 锁定的 Node 版本。
 
 ```bash
 cd web
@@ -53,12 +63,12 @@ npm run test:ci
 npm run build
 ```
 
-For installed binaries, install `tests/requirements.lock` in an isolated Python environment with `pip --require-hashes`, then run the SDK check.
+验证已安装的可执行文件时，先在隔离的 Python 环境中使用 `pip --require-hashes` 安装 `tests/requirements.lock` 锁定的依赖，再运行 SDK 检查。
 
 ```text
 python scripts/test_mcp_sdk.py --Executable <installed-binary> --Output <report.json>
 ```
 
-Add `--LiveProvider auto` to exercise actual public search sources. Keep those results separate from the deterministic suite.
+添加 `--LiveProvider auto` 可访问真实的公共搜索源。此项检查的结果应独立于本地可复现测试结果记录。
 
-CI tests the Windows ZIP and Ubuntu DEB against their installed executables. Release and manual CI use two baselines to test MSI and DEB co-installation, per-version configuration and credentials, and removal of one version while the others remain available. Version 0.0.1 uses the current package layout. Version 0.2.0 is built from the revision that stored data in system directories. Use an elevated disposable Windows environment for `scripts/AcceptWindowsMsi.ps1`. These runs also verify the Caddy deployment.
+CI 使用 Windows ZIP 解压后的可执行文件和 Ubuntu DEB 安装后的可执行文件进行测试。发布和手动触发的 CI 使用两个基线版本，验证 MSI 和 DEB 的多版本并装、各版本独立的配置和凭据，以及卸载一个版本后其他版本仍可用。0.0.1 使用当前的软件包目录布局。0.2.0 从曾将数据放在系统目录的提交构建。请在可丢弃的 Windows 环境中以管理员身份运行 `scripts/AcceptWindowsMsi.ps1`。这些作业也会验证 Caddy 部署。

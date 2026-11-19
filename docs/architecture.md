@@ -1,23 +1,29 @@
-# Runtime architecture
+<a name="runtime-architecture"></a>
 
-REST, MCP HTTP and stdio share the service and versioned tool contracts. Business, control and admin HTTP listeners each have a bounded worker pool. The business gate is shared by REST and MCP HTTP. A stdio process has its own service instance, random identity and private temporary cache. Closing stdin cancels that instance's work and removes its temporary state. Protocol output goes to stdout and logs go to stderr.
+# 运行时架构
 
-A dedicated Qt thread owns each SQLite connection. Search cache keys and coalesced work include the client identity, effective source configuration and cache layout version. Page keys include the client identity and stay valid when the source changes. Identical requests can join a search while at least half of a fresh search deadline remains. Waiters have independent deadlines, and the upstream stops when the last waiter leaves or the shared deadline expires. The upstream ends up to a second before its waiters so earlier SearXNG results can still be returned as `partial`. The service delivers the result before an asynchronous search-cache write.
+REST、MCP HTTP 和 stdio 共用服务实现以及带版本号的工具契约。业务、控制和管理 HTTP 监听器各自使用容量受限的工作线程池。REST 和 MCP HTTP 共享业务并发额度。每个 stdio 进程有独立的服务实例、随机身份和私有临时缓存。关闭 stdin 时，该实例会取消正在执行的任务并清理临时数据。协议输出写入 stdout，日志写入 stderr。
 
-## Settings and sources
+各 SQLite 连接均由专用 Qt 线程管理。搜索缓存键和搜索任务的合并条件包含客户端身份、实际生效的后端配置和缓存结构版本。网页缓存键包含客户端身份，切换后端后仍然有效。正在进行的搜索如果还有至少一半的完整搜索时限，相同请求即可合并到这次搜索中。等待者各自使用独立的截止时间。最后一个等待者离开或共享截止时间到期时，上游请求即停止。上游请求比等待者最多提前一秒结束，以便把已经取得的 SearXNG 结果作为 `partial` 返回。服务先返回结果，再异步写入搜索缓存。
 
-Deployment settings take effect on restart. An MSI or DEB service loads `data/runtime.json` beside its executable. A portable process uses the same default or an explicit configuration path. The `project_version` field ties the runtime file to the executable's release. User settings, provider keys, credentials and cache belong to that deployment. The settings store publishes immutable settings and credential snapshots. The admin API writes a validated update atomically and detects mismatched revisions. Each in-flight operation keeps its starting snapshot. The daemon polls for filesystem changes every two seconds and retains its last valid snapshot when an edit fails validation. A separate protected file holds provider keys.
+<a name="settings-and-sources"></a>
 
-The settings listener defaults to loopback port 8091. Package initialization records a free port if the default is occupied. Qt resources serve the web app from the service binary. A separate admin credential signs in directly or issues a one-time browser login link. Sessions are held in memory. Host and Origin allowlists, session cookies and CSRF headers govern edits. See [admin API](api.md#administration).
+## 设置与搜索后端
 
-The service checks search and open switches before tool execution. The QGIS adapter applies the separate confirmation preference using its shared host bridge. One authorization covers a QGIS session. Direct MCP and REST clients handle confirmation independently. Status reads local and last-known information without querying a provider.
+部署配置在重启后生效。MSI 或 DEB 安装的服务会加载可执行文件旁的 `data/runtime.json`。便携版可使用同样的默认路径，也可以显式指定配置文件路径。`project_version` 将运行时配置文件与可执行文件的发布版本绑定。用户设置、后端密钥、凭据和缓存都归其所在的部署管理。设置存储会发布不可变的设置和凭据快照。管理 API 通过原子操作写入已验证的更新，并检查修订版本是否匹配。每项执行中的操作都会继续使用操作开始时的快照。守护进程每两秒检查文件系统变更。修改未通过验证时会保留上一次有效的快照。搜索后端密钥保存在独立的受保护文件中。
 
-The provider registry selects DuckDuckGo HTML, DuckDuckGo Lite and Bing fallback in `auto`, or a configured SearXNG, Brave, Tavily, Exa, Perplexity or DeepSeek provider. Search results pass through shared filtering, deduplication and normalization. Auto applies bounded pacing and cooldown. Provider settings and credentials are independent of a client's business token.
+设置监听器默认使用回环端口 8091。若端口已被占用，软件包初始化时会记录一个可用端口。网页应用由服务程序内嵌的 Qt 资源提供。独立的管理凭据可用于直接登录，也可用于签发浏览器的一次性登录链接。会话保存在内存中。设置写入受 Host 和 Origin 白名单、会话 Cookie 和 CSRF 请求头约束。参见[管理 API](api.md#administration)。
 
-## Outbound HTTP and TLS
+执行工具前，服务会检查搜索和打开网页的开关。QGIS 适配器通过共享的应用程序桥接处理独立的确认设置。一次授权在整个 QGIS 会话期间有效。直接接入的 MCP 和 REST 客户端自行处理确认。状态查询只读取本地信息和上次观测到的状态，因此无需调用搜索后端。
 
-libcurl uses c-ares to resolve addresses. Public sources and webpage requests check the actual connection address and every redirect. A fixed administrator-configured SearXNG endpoint uses the private backend policy. Runtime traffic ignores system and environment proxies. Build download proxies apply to build tooling.
+后端注册表在 `auto` 模式下选择 DuckDuckGo HTML、DuckDuckGo Lite 和 Bing 备用来源，也可以选择已配置的 SearXNG、Brave、Tavily、Exa、Perplexity 或 DeepSeek 后端。所有搜索结果都经过共用的筛选、去重和标准化流程。自动模式会限制请求频率，并在触发限制后暂停一段时间。搜索后端的设置和凭据独立于客户端的业务令牌。
 
-TLS validates hostnames and certificate chains with Schannel on Windows and distribution OpenSSL on Ubuntu. Schannel uses the Windows trust store by default. A private backend may configure its own CA file. The Windows TLS fixture observed AIA retrieval for missing intermediates. Deploy endpoints with complete certificate chains. Administrators can review the Windows `MaxAIAUrlRetrievalCountPerChain` setting when controlling AIA retrieval. Both platforms' fixtures enforce no online CRL or OCSP requests, and Ubuntu checks that there is no AIA retrieval.
+<a name="outbound-http-and-tls"></a>
 
-A hash-checked cpp-httplib patch keeps a two-second request-input deadline active through headers, body, chunk framing and trailers. Application work has its own deadlines. Shutdown interrupts accepted sockets, including sockets queued for workers.
+## 出站 HTTP 与 TLS
+
+libcurl 使用 c-ares 解析地址。访问公开的搜索源和网页时，服务会检查实际连接的地址和每次重定向的目标。由管理员固定配置的 SearXNG 端点适用私有后端策略。运行时流量不沿用系统或环境变量中的代理配置。构建下载使用的代理只对构建工具生效。
+
+TLS 在 Windows 上使用 Schannel，在 Ubuntu 上使用发行版提供的 OpenSSL，以验证主机名和证书链。Schannel 默认使用 Windows 信任库。私有后端可以配置自己的 CA 文件。Windows 上的 TLS 测试观察到，当缺少中间证书时，系统会通过 AIA 获取中间证书。部署端点时应提供完整的证书链。管理员可通过 Windows 的 `MaxAIAUrlRetrievalCountPerChain` 设置管理 AIA 获取行为。两个平台的测试都验证了不会向网络发起 CRL 或 OCSP 查询。Ubuntu 测试还验证了不会发起 AIA 获取请求。
+
+经哈希校验的 cpp-httplib 补丁为请求读取设定两秒的总时限，涵盖请求头、正文、分块传输的帧结构和尾部字段。应用操作另有各自的截止时间。关闭服务时会中断所有已接受的连接，包括仍在等待工作线程的连接。
