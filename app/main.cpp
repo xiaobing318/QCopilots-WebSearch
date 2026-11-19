@@ -305,6 +305,11 @@ int main(int argc, char **argv) {
     if (implicitConfiguration)
       configPath = adjacentConfiguration().toStdString();
     const QFileInfo runtime(QString::fromStdString(configPath));
+    if (implicitConfiguration) {
+      const QFileInfo directory(runtime.absolutePath());
+      if (directory.isSymLink() || directory.isJunction() || runtime.isSymLink())
+        throw qws::Error("invalid_configuration", "Use --ConfigPath to select a linked configuration path.");
+    }
 #ifdef _WIN32
     const auto registered = implicitConfiguration
                                 ? qws::windowsServiceConfigPath(QLatin1String(QCWS_WINDOWS_SERVICE_NAME),
@@ -394,13 +399,8 @@ int main(int argc, char **argv) {
       throw qws::Error("invalid_argument", "Windows service mode is only available on Windows.");
 #endif
     }
-    if (portableStartup) {
-      const QFileInfo directory(runtime.absolutePath());
-      if (directory.isSymLink() || directory.isJunction() || runtime.isSymLink())
-        throw qws::Error("invalid_configuration", "The portable configuration must be next to the executable.");
-      if (!runtime.exists())
-        qws::initializeConfiguration(configPath, true);
-    }
+    if (portableStartup && !runtime.exists())
+      qws::initializeConfiguration(configPath, true);
     static_assert(std::atomic_bool::is_always_lock_free);
     std::signal(SIGINT, signalStop);
     std::signal(SIGTERM, signalStop);
