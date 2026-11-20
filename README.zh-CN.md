@@ -30,7 +30,7 @@ QCopilots-WebSearch 是一个使用 C++20 和 Qt 6.12 的独立服务，提供�
 
 远程 MCP 客户端通过 HTTPS 连接 `https://<公网域名>/mcp`，并填写 Bearer 令牌。使用 `--ConfigPath FILE --GenerateToken` 或 `--ConfigPath FILE --SetToken` 配置令牌。[令牌管理](docs/deployment.md#manage-client-tokens) · [远程客户端配置](docs/deployment.md#connect-remote-clients)
 
-在 Windows 上通过 Cloudflare Tunnel 发布时，0.2.2 支持从连接器到业务监听器的 HTTPS 连接。QGIS Web Search 适配器填写公网 HTTPS 源地址，插件会自动追加 REST 路径。[Windows HTTPS 源站部署](docs/deployment.md#windows-cloudflare-tunnel)
+Cloudflare Tunnel 和 WebSearch 运行在同一台 Windows 主机时，将隧道指向本机业务地址，通常为 `http://127.0.0.1:8088`。QGIS 填写公网 HTTPS 源地址，插件会自动追加 REST 路径。[Windows 隧道快速设置](docs/deployment.md#windows-cloudflare-tunnel)
 
 ## MCP 工具
 

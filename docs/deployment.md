@@ -80,9 +80,29 @@ msiexec.exe /i "C:\Downloads\QCopilots-WebSearch-0.2.2-win64.msi" INSTALL_ROOT="
 
 <a name="windows-cloudflare-tunnel"></a>
 
-### 通过 Cloudflare Tunnel 发布 Windows HTTPS 源站
+### 在 Windows 上通过 Cloudflare Tunnel 发布服务
 
-0.2.2 可直接在回环业务端口提供 HTTPS。以下示例假设 `cloudflared` 和 WebSearch 位于同一台 Windows 主机，公网主机名为 `search.example.org`，固定源站为 `https://127.0.0.1:8088`。请替换公网主机名。如果源站运行 0.2.1，业务监听器仅支持 HTTP，需升级到支持 TLS 的版本或在其前面部署 HTTPS 反向代理。
+#### 同机 HTTP 回源快速设置
+
+当 `cloudflared` 和 WebSearch 在同一台 Windows 主机上运行时，连接器可通过回环 HTTP 访问 WebSearch，无需配置源站证书。QGIS 和其他远程客户端通过 HTTPS 访问公网域名。以下以便携 ZIP 和 `search.example.org` 为例，请替换成自己的公网域名。
+
+1. 在解压目录运行 `.\bin\qcopilots-websearch.exe` 完成首次启动。按 Ctrl+C 停止程序后，打开 `bin\data\runtime.json`，确认 `business.host` 为 `127.0.0.1` 并记下 `business.port`。下面假定端口是 8088。如果配置中是其他端口，后续步骤使用实际值。
+2. 在 `business.allowed_hosts` 中保留现有的回环地址（如 `127.0.0.1:8088`），追加 `search.example.org` 和 `search.example.org:443`。默认 HTTP 配置没有 `business.tls` 字段。从此前的 HTTPS 配置切换时，移除这一字段。保存文件，运行 `.\bin\qcopilots-websearch.exe --CheckConfig`，检查通过后再无参数启动程序。
+3. 在 Cloudflare 的 **Networking → Tunnels → 目标隧道 → Routes** 编辑或添加 **Published application**。主机名填公网域名，Path 留空。在 **Service** 中选择 **HTTP**，**URL** 填 `127.0.0.1:8088`。若页面只有 **Service URL** 一栏，填写 `http://127.0.0.1:8088`。只发布业务端口，控制和管理端口供本机使用。[Cloudflare 路由设置](https://developers.cloudflare.com/tunnel/get-started/#publish-an-application)
+4. 保持服务运行，在解压目录另开 PowerShell 进行公网验证。下列第一条命令应显示 `401`，最后一条应显示 `contract_version` 为 `1`、`service` 为 `ready`。示例使用首次启动生成的业务令牌。如果已轮换令牌，请从当前业务令牌文件读取。
+
+```powershell
+curl.exe -sS -o NUL -w "%{http_code}\n" https://search.example.org/v1/status
+$token = (Get-Content -Raw .\bin\data\client.token).Trim()
+Invoke-RestMethod -Uri 'https://search.example.org/v1/status' -Headers @{ Authorization = "Bearer $token" } |
+  Select-Object contract_version,service
+```
+
+在解压目录运行 `.\bin\qcopilots-websearch.exe --SettingsUrl --Open` 即可打开本机设置页。
+
+#### 可选的 HTTPS 回源
+
+从 0.2.2 起，可按下列步骤在同一回环业务端口启用 HTTPS。示例使用 `https://127.0.0.1:8088`，公网域名仍为 `search.example.org`。
 
 1. 以目标版本初始化配置。在新解压目录运行 `.\bin\qcopilots-websearch.exe --InitializeConfig --ConfigPath .\bin\data\runtime.json`。确认 8088 可由此实例独占，已有实例保留自己的版本目录和数据。
 2. 准备用于 TLS 服务端身份验证的 PEM 证书链和配套的无口令 PEM 私钥。证书须包含 IP 类型的 SAN `127.0.0.1`。证书链将叶证书放在首位，随后附上中间证书。用 Windows ACL 将私钥读取权限限于运行 WebSearch 的账号和管理人员。为 `cloudflared` 服务账号提供私有根 CA **公钥证书**的可读路径。
@@ -124,7 +144,7 @@ Invoke-RestMethod -Uri 'https://search.example.org/v1/status' -Headers @{ Author
 
 公网出现 502 时，先在报错副本上运行源站检查，核对监听端口、HTTP 或 HTTPS、证书有效期、SAN 和 CA 文件访问权限。401 表示需要核对该实例的业务令牌，403 时检查实际的 Host 和浏览器 Origin。仅访问公网根路径无法验收业务接口。设置页面使用独立的管理监听器。在源站另开终端运行 `.\bin\qcopilots-websearch.exe --SettingsUrl --Open` 可直接打开设置页。单独使用 `--SettingsUrl` 会打印链接，将输出粘贴到浏览器地址栏，两分钟内可登录一次。
 
-#### 为测试源站签发证书
+##### 为测试源站签发证书
 
 已有受信任证书的部署可直接使用已有证书链。若需为测试源站建立私有 CA，在一台管理机上选择专用的空目录，先通过 ACL 限制访问，再用 OpenSSL 3 执行以下 PowerShell 命令。前两条命令会分别生成签发用私钥和源站私钥。每台源站独立生成密钥及请求，可由同一 CA 签发。
 
@@ -222,7 +242,7 @@ Restart-Service -Name $serviceName
 
 | 适配器设置 | 对应的服务端配置 |
 | --- | --- |
-| `backend_url` | 公网后端使用不带路径的 HTTPS 源地址，并在服务端允许对应的 Host。QGIS 验证公网证书链，连接器用源站 CA 验证本机证书。明文 HTTP 仅接受与服务实际监听地址相符的回环 IP，例如 `http://127.0.0.1:<business.port>`。 |
+| `backend_url` | 公网后端使用不带路径的 HTTPS 源地址，并在服务端允许对应的 Host。QGIS 验证公网证书链。启用 HTTPS 回源时，连接器还会验证本机源站证书。明文 HTTP 仅接受与服务实际监听地址相符的回环 IP，例如 `http://127.0.0.1:<business.port>`。 |
 | `timeout_seconds` | 取 `limits.search_timeout_seconds` 和 `limits.open_timeout_seconds` 中的较大值，再增加约五秒。客户端默认值为 25 秒，两项服务端的默认超时分别为 15 和 20 秒。客户端超时过短会在服务仍处理请求时返回 `timeout`，重试会重新发起页面读取。 |
 | `max_concurrency` | 不超过 `limits.max_concurrent`，该服务端并发上限由所有客户端共用。 |
 | `max_response_bytes` | 至少 262144。工具载荷上限为 240 KiB，默认的 1 MiB 可容纳外围响应结构。 |

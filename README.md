@@ -34,7 +34,7 @@ Use the business listener's `/v1` REST routes or `/mcp` with a client Bearer tok
 
 Remote MCP clients connect over HTTPS at `https://<public-host>/mcp` with a Bearer token. Configure the token with `--ConfigPath FILE --GenerateToken` or `--ConfigPath FILE --SetToken`. [Client token management](docs/deployment.md#manage-client-tokens) · [Remote client configuration](docs/deployment.md#connect-remote-clients)
 
-For a Windows Cloudflare Tunnel, version 0.2.2 supports HTTPS from the connector to the business listener. The QGIS Web Search adapter takes the public HTTPS origin and appends its REST paths. [Windows HTTPS origin setup](docs/deployment.md#windows-cloudflare-tunnel)
+When Cloudflare Tunnel and WebSearch run on the same Windows host, point the tunnel to the local business listener, typically `http://127.0.0.1:8088`. QGIS uses the public HTTPS origin and appends its REST paths. [Windows Tunnel quick setup](docs/deployment.md#windows-cloudflare-tunnel)
 
 ## MCP tools
 
