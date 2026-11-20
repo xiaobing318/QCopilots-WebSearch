@@ -193,7 +193,8 @@ struct AdminServer::Impl {
 
   static Json clientBody(const Request &req, bool withId, bool withToken) {
     auto body = parseBody(req);
-    if (body.size() != size_t(1 + int(withId) + int(withToken)) ||
+    const auto expectedFields = size_t{1} + static_cast<size_t>(withId) + static_cast<size_t>(withToken);
+    if (body.size() != expectedFields ||
         !body.contains("revision") || !body["revision"].is_string() ||
         body["revision"].get_ref<const std::string &>().size() != 64 ||
         (withId && (!body.contains("id") || !body["id"].is_string())) ||
