@@ -6,7 +6,12 @@ endif()
 add_test(NAME core COMMAND qcws_tests)
 # The disk-backed cache pressure suite performs durable commits. Allow slower
 # hosted disks without changing the per-operation deadlines asserted in tests.
-set_tests_properties(core PROPERTIES TIMEOUT 180)
+if(WIN32)
+  # Hosted Windows runs can take about 150 seconds for the full core suite.
+  set_tests_properties(core PROPERTIES TIMEOUT 300)
+else()
+  set_tests_properties(core PROPERTIES TIMEOUT 180)
+endif()
 add_executable(qcws_http_tests cpp/test_http_limits.cpp)
 target_link_libraries(qcws_http_tests PRIVATE qcws_core httplib::httplib)
 add_test(NAME http-limits COMMAND qcws_http_tests "${PROJECT_SOURCE_DIR}/config/runtime.json")
