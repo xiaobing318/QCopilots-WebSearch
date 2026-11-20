@@ -26,9 +26,15 @@
         "port": {
           "type": "integer",
           "description": "TCP port. Accepts 1–65535 in deployed configurations. Use a free port distinct from the other listener.",
-          "default": 8088,
+          "default": 3181,
           "minimum": 1,
           "maximum": 65535
+        },
+        "public_url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Optional public HTTPS MCP endpoint ending exactly in /mcp, without credentials, query or fragment. Management display metadata only. Does not change listener bindings, allowed Hosts or Origins. Restart to apply."
         },
         "tls": {
           "type": "object",
@@ -101,7 +107,7 @@
         "port": {
           "type": "integer",
           "description": "TCP port. Accepts 1–65535 in deployed configurations. Use a free port distinct from the other listener.",
-          "default": 8088,
+          "default": 3182,
           "minimum": 1,
           "maximum": 65535
         },
@@ -143,7 +149,7 @@
     },
     "clients": {
       "type": "array",
-      "description": "Client credentials. Accepts 1–100 client objects. Each unique ID and secret define a separate cache identity.",
+      "description": "Initial client credentials. Accepts 0 to 100 clients. A state client registry takes precedence once created.",
       "items": {
         "type": "object",
         "properties": {
@@ -168,6 +174,11 @@
             "type": "string",
             "description": "Lowercase SHA-256 digest of a client credential. Created by the token configuration commands and read at startup.",
             "pattern": "^[a-f0-9]{64}$"
+          },
+          "generation": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{32}$",
+            "description": "Internal identity generation. Preserve on credential rotation, generate on creation."
           }
         },
         "required": [
@@ -192,7 +203,7 @@
           }
         ]
       },
-      "minItems": 1,
+      "minItems": 0,
       "maxItems": 100
     },
     "provider": {
@@ -348,8 +359,8 @@
         },
         "port": {
           "type": "integer",
-          "description": "TCP port. Accepts 1–65535 in deployed configurations. Use a free port distinct from the other listener.",
-          "default": 8091,
+          "description": "Administration TCP port. New configurations explicitly select 3183. Legacy configurations omitting this property retain port 8091. Accepts 1–65535, distinct from the other listeners.",
+          "default": 3183,
           "minimum": 1,
           "maximum": 65535
         },

@@ -8,6 +8,61 @@ import xml.etree.ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts'))
 import quality
+import release_gate
+
+
+class ReleaseGateTests(unittest.TestCase):
+    commit = 'a' * 40
+
+    def verify(self, runs, *, ancestor=True):
+        responses = iter([
+            {'commit': {'sha': 'b' * 40}},
+            {'merge_base_commit': {'sha': self.commit if ancestor else 'c' * 40}},
+            {'workflow_runs': runs},
+        ])
+        paths = []
+
+        def get_json(path):
+            paths.append(path)
+            return next(responses)
+
+        result = release_gate.verify('example/project', self.commit, get_json)
+        self.assertIn('head_sha=' + self.commit, paths[-1])
+        return result
+
+    def run_record(self, **changes):
+        return {'id': 10, 'head_sha': self.commit, 'head_branch': 'main', 'event': 'push',
+                'path': '.github/workflows/ci.yml', 'status': 'completed', 'conclusion': 'success',
+                **changes}
+
+    def test_success_requires_main_ancestry_and_matching_ci(self):
+        self.assertEqual(self.verify([self.run_record()]), 10)
+        with self.assertRaisesRegex(RuntimeError, 'belong to main'):
+            self.verify([self.run_record()], ancestor=False)
+
+    def test_no_run_or_another_context_cannot_authorize_release(self):
+        for changes in ({'head_sha': 'd' * 40}, {'head_branch': 'feature/example'},
+                        {'event': 'pull_request'}, {'event': 'workflow_dispatch'},
+                        {'path': '.github/workflows/release.yml'}):
+            with self.subTest(changes=changes), self.assertRaisesRegex(RuntimeError, 'No main push CI'):
+                self.verify([self.run_record(**changes)])
+        with self.assertRaisesRegex(RuntimeError, 'No main push CI'):
+            self.verify([])
+
+    def test_incomplete_or_failed_latest_run_blocks_old_success(self):
+        for changes in ({'status': 'in_progress', 'conclusion': None},
+                        {'conclusion': 'failure'}, {'conclusion': 'cancelled'},
+                        {'conclusion': 'skipped'}):
+            with self.subTest(changes=changes), self.assertRaisesRegex(RuntimeError, 'must succeed first'):
+                self.verify([self.run_record(), self.run_record(id=11, **changes)])
+
+    def test_new_success_can_replace_failed_attempt(self):
+        self.assertEqual(self.verify([self.run_record(conclusion='failure'), self.run_record(id=11)]), 11)
+
+    def test_invalid_context_is_rejected_without_request(self):
+        for repository, commit in [('bad/repo/path', self.commit), ('example/project', '../main')]:
+            with self.subTest(repository=repository, commit=commit), self.assertRaises(RuntimeError):
+                release_gate.verify(repository, commit, lambda _: self.fail('Unexpected request'))
 
 
 class QualityExecutionTests(unittest.TestCase):

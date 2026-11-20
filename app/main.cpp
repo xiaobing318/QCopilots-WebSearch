@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <iostream>
 #include <qws/admin.hpp>
+#include <qws/client_registry.hpp>
 #include <qws/server.hpp>
 #include <qws/windows.hpp>
 #ifdef _WIN32
@@ -128,7 +129,7 @@ void configureClientToken(const std::string &clientId, bool generate) {
     std::cerr << "Enter client token: " << std::flush;
     token = readInputLine(8192, true);
   }
-  std::cerr << "Write the client credential to runtime configuration? [y/N] " << std::flush;
+  std::cerr << "Write the client credential to the client registry? [y/N] " << std::flush;
   const auto reply = readInputLine(32, generate).trimmed().toLower();
   if (reply != "y" && reply != "yes") {
     std::cerr << "Credential was not saved.\n";
@@ -153,12 +154,45 @@ void waitForStop(qws::Service &service) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
 }
+
+std::string listenerUrl(const qws::Json &listener, int port, bool tls = false) {
+  const auto host = listener.at("host").get<std::string>();
+  const auto authority = host.find(':') == std::string::npos ? host : "[" + host + "]";
+  return std::string(tls ? "https://" : "http://") + authority + ":" + std::to_string(port);
+}
+
+void printStartupSummary(const qws::Config &config, const qws::HttpServer &server) {
+  const auto business = listenerUrl(config.value.at("business"), server.businessPort(),
+                                    config.value.at("business").contains("tls"));
+  const auto control = listenerUrl(config.value.at("control"), server.controlPort());
+  const auto admin = qws::adminConfiguration(config, false);
+  const auto runtime = QDir::toNativeSeparators(
+      QFileInfo(QString::fromStdString(configPath)).absoluteFilePath()).toStdString();
+  std::cerr << "QCopilots-WebSearch " << QCWS_VERSION << " ready.\n"
+            << "Business API: " << business << "/v1\n"
+            << "MCP endpoint: " << business << "/mcp\n"
+            << "Control API: " << control << " (health and metrics)\n"
+            << "Runtime configuration: " << runtime << '\n'
+            << "Client registry: " << qws::clientRegistryPath(config) << '\n'
+            << "Cache directory: " << config.path(config.value.at("cache").at("directory")) << '\n';
+  if (admin.enabled) {
+    std::cerr << "Settings page: " << admin.origin << "/settings/\n"
+              << "Login: run this executable with --ConfigPath \""
+              << runtime
+              << "\" --SettingsUrl in another terminal for a one-time login link.\n";
+  } else {
+    std::cerr << "Settings page: disabled.\n";
+  }
+  std::cerr << "Authentication: client Bearer credentials are required.\n"
+            << "Press Ctrl+C to stop.\n" << std::flush;
+}
+
 int serve() {
   auto config = qws::Config::load(configPath);
   qws::Service service(config);
   qws::HttpServer server(service, config);
   server.start();
-  std::cerr << "QCopilots-WebSearch ready.\n";
+  printStartupSummary(config, server);
   waitForStop(service);
   server.stop();
   return 0;
@@ -375,7 +409,7 @@ int main(int argc, char **argv) {
     }
     if (check) {
       auto c = qws::Config::load(configPath);
-      (void)c.clients();
+      (void)qws::ClientRegistry(c);
       qws::checkBusinessTls(c);
       qws::checkSettings(c);
       std::cout << "Configuration valid.\n";
@@ -401,7 +435,7 @@ int main(int argc, char **argv) {
 #endif
     }
     if (portableStartup && !runtime.exists())
-      qws::initializeConfiguration(configPath, true);
+      qws::initializeConfiguration(configPath);
     static_assert(std::atomic_bool::is_always_lock_free);
     std::signal(SIGINT, signalStop);
     std::signal(SIGTERM, signalStop);

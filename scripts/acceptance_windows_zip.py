@@ -23,7 +23,7 @@ from package_inventory import package_files
 from testkit import Fault, MIB, digest, hidden_console, need, request, stop_process
 from process_cleanup import wait_owned
 
-DEFAULT_PORTS = (8088, 8089, 8091)
+DEFAULT_PORTS = (3181, 3182, 3183)
 PROTOCOL = '2025-06-18'
 INITIALIZE = {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {
     'protocolVersion': PROTOCOL, 'capabilities': {},
@@ -91,7 +91,7 @@ def occupy_default_ports():
                 listener.bind(('127.0.0.1', port))
                 listener.listen()
             except OSError as exc:
-                # Existing listeners or OS port reservations also force fallback.
+                # Existing listeners or OS port reservations also block fixed startup.
                 if exc.winerror not in (10013, 10048):
                     raise
         yield
@@ -100,13 +100,17 @@ def occupy_default_ports():
 @contextmanager
 def running_portable(executable, cwd, env, runtime, racers=1):
     processes = []
+    output_files = []
     gate = threading.Barrier(racers, timeout=4)
 
     def launch():
         gate.wait()
+        output = tempfile.TemporaryFile()
+        output_files.append(output)
         proc = subprocess.Popen([executable], cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **hidden_console())
+                                stdout=subprocess.DEVNULL, stderr=output, **hidden_console())
         processes.append(proc)
+        proc.startup_output = output
 
     try:
         with ThreadPoolExecutor(max_workers=racers) as pool:
@@ -122,7 +126,18 @@ def running_portable(executable, cwd, env, runtime, racers=1):
                     config = json.loads(runtime.read_bytes())
                     token = (runtime.parent / 'client.token').read_text('ascii').strip()
                     if request(config['control']['port'], token, timeout=0.5).get('live') is True:
-                        break
+                        running[0].startup_output.seek(0)
+                        summary = running[0].startup_output.read().decode('utf-8')
+                        if 'Press Ctrl+C to stop.' in summary:
+                            need(all(f'127.0.0.1:{config[role]["port"]}' in summary
+                                     for role in ('business', 'control', 'admin')),
+                                 'Startup summary did not show every actual listener')
+                            need(str(runtime) in summary and '--SettingsUrl' in summary and '/mcp' in summary,
+                                 'Startup summary omitted configuration or login guidance')
+                            admin_token = (runtime.parent / 'admin.token').read_text('ascii').strip()
+                            need(token not in summary and admin_token not in summary,
+                                 'Startup summary disclosed a credential')
+                            break
                 except (Fault, OSError, ValueError):
                     pass
             time.sleep(0.05)
@@ -132,6 +147,8 @@ def running_portable(executable, cwd, env, runtime, racers=1):
         need(running[0].poll() is None, 'The portable server exited before shutdown')
     finally:
         stopped = [stop_process(proc) for proc in processes if proc.poll() is None]
+        for output in output_files:
+            output.close()
         need(all(report['passed'] for report in stopped), 'Portable server cleanup failed')
 
 
@@ -197,9 +214,17 @@ def verify_portable(executable, folder, cwd, env):
     need(not data.exists(), 'Standalone generator initialized portable data')
     check_read_only(executable, cwd, env, data)
 
-    with occupy_default_ports(), running_portable(executable, cwd, env, runtime, racers=2) as (config, local):
-        ports = {config[role]['port'] for role in ('business', 'control', 'admin')}
-        need(len(ports) == 3 and not ports.intersection(DEFAULT_PORTS), 'Portable launch did not select free ports')
+    with occupy_default_ports():
+        blocked = cli(executable, cwd, env)
+        need(blocked.returncode != 0 and b'Cannot bind' in blocked.stderr and b' ready.' not in blocked.stderr,
+             'Occupied fixed ports did not fail without a readiness summary')
+        config = json.loads(runtime.read_bytes())
+        need(tuple(config[role]['port'] for role in ('business', 'control', 'admin')) == DEFAULT_PORTS,
+             'First portable startup silently selected alternative ports')
+
+    with running_portable(executable, cwd, env, runtime, racers=2) as (config, local):
+        need(tuple(config[role]['port'] for role in ('business', 'control', 'admin')) == DEFAULT_PORTS,
+             'Portable startup changed the fixed default ports')
         need(all(config[role]['host'] == '127.0.0.1' for role in ('business', 'control')),
              'Portable service is not restricted to loopback')
         need((data / 'state').is_dir() and re.fullmatch(r'[a-f0-9]{64}', local),
@@ -240,8 +265,10 @@ def verify_portable(executable, folder, cwd, env):
         verify_mcp(port, generated)
 
     with running_portable(executable, cwd, env, runtime) as (config, _):
-        entry = next(client for client in config['clients'] if client['id'] == 'acceptance')
-        need(entry == {'id': 'acceptance', 'token_sha256': hashlib.sha256(rotated.encode('ascii')).hexdigest()},
+        registry = data / 'state' / 'client-registry.json'
+        entry = next(client for client in json.loads(registry.read_bytes())['clients'] if client['id'] == 'acceptance')
+        need(entry['token_sha256'] == hashlib.sha256(rotated.encode('ascii')).hexdigest()
+             and rotated.encode('ascii') not in registry.read_bytes(),
              'Portable token update did not store a digest only')
         need(mcp_request(port, generated, INITIALIZE)[0] == 401, 'Old portable token survived restart')
         verify_mcp(port, rotated)
@@ -251,7 +278,8 @@ def verify_portable(executable, folder, cwd, env):
     need(all(digest(path) == value for path, value in token_hashes.items()), 'Portable restart replaced credential files')
     need(not any(program_data.iterdir()) and snapshot(cwd) == decoy_snapshot,
          'Portable startup wrote to ProgramData or used the working directory')
-    return {'first_run_concurrency': True, 'read_only_failure': True, 'explicit_config': True,
+    return {'concurrent_startup': True, 'fixed_default_ports': True, 'occupied_port_failure': True,
+            'startup_summary': True, 'read_only_failure': True, 'explicit_config': True,
             'standalone_generator': True, 'bearer_rotation_restart': True, 'runtime_acl_preserved': True}
 
 

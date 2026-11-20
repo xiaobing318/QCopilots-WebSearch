@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-set(QCWS_VERSION "0.2.2" CACHE STRING "Three-part release or isolated installer-test version")
+set(QCWS_VERSION "0.3.0" CACHE STRING "Three-part release or isolated installer-test version")
 if(NOT QCWS_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
   message(FATAL_ERROR "QCWS_VERSION must contain three numeric components")
 endif()
@@ -23,7 +23,7 @@ if(QCWS_FUZZING AND (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CMAKE_CXX_COM
 endif()
 include(cmake/Dependencies.cmake)
 add_library(qcws_core STATIC src/core/network.cpp src/core/cache.cpp src/core/config.cpp src/core/html.cpp src/core/service.cpp src/server/protocol.cpp src/server/server.cpp src/server/stdio_output.cpp
-  src/core/settings.cpp src/server/admin_api.cpp src/server/admin_sessions.cpp
+  src/core/settings.cpp src/core/client_registry.cpp src/server/admin_api.cpp src/server/admin_sessions.cpp
   src/server/admin_client.cpp src/server/static_assets.cpp
   src/providers/registry.cpp src/providers/searxng.cpp src/providers/auto_provider.cpp
   src/providers/pacing.cpp src/providers/duckduckgo.cpp src/providers/bing.cpp
@@ -33,7 +33,7 @@ add_library(qcws_core STATIC src/core/network.cpp src/core/cache.cpp src/core/co
 include(cmake/WebUi.cmake)
 set(_schemas config/runtime.json config/runtime.schema.json contracts/v1/web_search.schema.json contracts/v1/web_open.schema.json
   contracts/v1/web_find.schema.json contracts/v1/web_search_status.schema.json contracts/v1/tools.json
-  config/settings.json config/settings.schema.json config/secrets.schema.json
+  config/settings.json config/settings.schema.json config/secrets.schema.json config/client-registry.schema.json
   contracts/admin/v1/settings-update.schema.json contracts/admin/v1/settings-view.schema.json)
 foreach(schema IN LISTS _schemas)
   get_filename_component(alias "${schema}" NAME)

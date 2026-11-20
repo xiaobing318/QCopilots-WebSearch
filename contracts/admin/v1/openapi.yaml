@@ -6,7 +6,7 @@
   },
   "servers": [
     {
-      "url": "http://127.0.0.1:8091/admin/api/v1"
+      "url": "http://127.0.0.1:3183/admin/api/v1"
     }
   ],
   "paths": {
@@ -380,7 +380,7 @@
     },
     "/status": {
       "get": {
-        "summary": "Read listeners, cooldown and settings status",
+        "summary": "Read listeners, client MCP endpoint, cooldown and settings status",
         "security": [
           {
             "cookie": []
@@ -388,12 +388,533 @@
         ],
         "responses": {
           "200": {
-            "description": "Read listeners, cooldown and settings status"
+            "description": "Local service status. mcp_url is configured deployment metadata, not a reachability result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "version": {
+                      "type": "string"
+                    },
+                    "listeners": {
+                      "type": "object"
+                    },
+                    "mcp_url": {
+                      "type": "string",
+                      "format": "uri",
+                      "description": "Validated business.public_url when configured. Otherwise the actual local business HTTP(S) URL plus /mcp, with IPv6 brackets and the bound port. Does not change Host or Origin policy."
+                    },
+                    "cooldown": {
+                      "type": "object"
+                    },
+                    "settings_error": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "version",
+                    "listeners",
+                    "mcp_url",
+                    "cooldown",
+                    "settings_error"
+                  ]
+                }
+              }
+            }
           },
           "default": {
             "description": "Request failed"
           }
         }
+      }
+    },
+    "/clients": {
+      "get": {
+        "summary": "Read persisted client identities and pending state",
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Client identities and credential source types, without credentials or digests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientRegistryView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request failed"
+          }
+        }
+      },
+      "post": {
+        "summary": "Add a client authorization code",
+        "description": "Save the registry atomically and apply all its clients before returning. Requires an administrator session and same-origin CSRF protection. Existing-client rotation retains its cache and MCP identity. Deleting and recreating an ID starts a new identity.",
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The exact allowed administration origin."
+          },
+          {
+            "name": "X-QCWS-CSRF",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "revision": {
+                    "type": "string",
+                    "minLength": 64,
+                    "maxLength": 64,
+                    "description": "Opaque revision of the persisted client list."
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+                  },
+                  "token": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 8192,
+                    "not": {
+                      "pattern": "[^!-~]"
+                    },
+                    "writeOnly": true,
+                    "description": "Manual business credential. Any nonempty visible ASCII value is accepted. Whitespace is rejected, not trimmed."
+                  }
+                },
+                "required": [
+                  "revision",
+                  "id",
+                  "token"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Client identities and credential source types, without credentials or digests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientRegistryView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input or duplicate client ID or credential."
+          },
+          "401": {
+            "description": "Administration session is missing or expired."
+          },
+          "403": {
+            "description": "Origin or CSRF token is not allowed."
+          },
+          "409": {
+            "description": "The persisted registry changed. Reload its view and explicitly retry."
+          },
+          "default": {
+            "description": "Request failed without applying a partial registry."
+          }
+        }
+      },
+      "put": {
+        "summary": "Replace an existing client authorization code",
+        "description": "Save the registry atomically and apply all its clients before returning. Requires an administrator session and same-origin CSRF protection. Existing-client rotation retains its cache and MCP identity. Deleting and recreating an ID starts a new identity. Pass the client ID in the JSON body so every valid ID, including . and .., is supported without URL path normalization.",
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The exact allowed administration origin."
+          },
+          {
+            "name": "X-QCWS-CSRF",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "revision": {
+                    "type": "string",
+                    "minLength": 64,
+                    "maxLength": 64,
+                    "description": "Opaque revision of the persisted client list."
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+                  },
+                  "token": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 8192,
+                    "not": {
+                      "pattern": "[^!-~]"
+                    },
+                    "writeOnly": true,
+                    "description": "Manual business credential. Any nonempty visible ASCII value is accepted. Whitespace is rejected, not trimmed."
+                  }
+                },
+                "required": [
+                  "revision",
+                  "id",
+                  "token"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Client identities and credential source types, without credentials or digests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientRegistryView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input or duplicate client ID or credential."
+          },
+          "401": {
+            "description": "Administration session is missing or expired."
+          },
+          "403": {
+            "description": "Origin or CSRF token is not allowed."
+          },
+          "409": {
+            "description": "The persisted registry changed. Reload its view and explicitly retry."
+          },
+          "default": {
+            "description": "Request failed without applying a partial registry."
+          },
+          "404": {
+            "description": "Client ID was not found."
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete a client authorization code",
+        "description": "Save the registry atomically and apply all its clients before returning. Requires an administrator session and same-origin CSRF protection. Existing-client rotation retains its cache and MCP identity. Deleting and recreating an ID starts a new identity. Pass the client ID in the JSON body so every valid ID, including . and .., is supported without URL path normalization.",
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The exact allowed administration origin."
+          },
+          {
+            "name": "X-QCWS-CSRF",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "revision": {
+                    "type": "string",
+                    "minLength": 64,
+                    "maxLength": 64,
+                    "description": "Opaque revision of the persisted client list."
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+                  }
+                },
+                "required": [
+                  "revision",
+                  "id"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Client identities and credential source types, without credentials or digests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientRegistryView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input or duplicate client ID or credential."
+          },
+          "401": {
+            "description": "Administration session is missing or expired."
+          },
+          "403": {
+            "description": "Origin or CSRF token is not allowed."
+          },
+          "409": {
+            "description": "The persisted registry changed. Reload its view and explicitly retry."
+          },
+          "default": {
+            "description": "Request failed without applying a partial registry."
+          },
+          "404": {
+            "description": "Client ID was not found."
+          }
+        }
+      }
+    },
+    "/clients/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+          }
+        }
+      ],
+      "put": {
+        "summary": "Replace an existing client authorization code",
+        "description": "Save the registry atomically and apply all its clients before returning. Requires an administrator session and same-origin CSRF protection. Existing-client rotation retains its cache and MCP identity. Deleting and recreating an ID starts a new identity. Compatibility route. New clients should use the collection route with an ID in the JSON body because browsers normalize dot path segments.",
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The exact allowed administration origin."
+          },
+          {
+            "name": "X-QCWS-CSRF",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "revision": {
+                    "type": "string",
+                    "minLength": 64,
+                    "maxLength": 64,
+                    "description": "Opaque revision of the persisted client list."
+                  },
+                  "token": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 8192,
+                    "not": {
+                      "pattern": "[^!-~]"
+                    },
+                    "writeOnly": true,
+                    "description": "Manual business credential. Any nonempty visible ASCII value is accepted. Whitespace is rejected, not trimmed."
+                  }
+                },
+                "required": [
+                  "revision",
+                  "token"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Client identities and credential source types, without credentials or digests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientRegistryView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input or duplicate client ID or credential."
+          },
+          "401": {
+            "description": "Administration session is missing or expired."
+          },
+          "403": {
+            "description": "Origin or CSRF token is not allowed."
+          },
+          "409": {
+            "description": "The persisted registry changed. Reload its view and explicitly retry."
+          },
+          "default": {
+            "description": "Request failed without applying a partial registry."
+          },
+          "404": {
+            "description": "Client ID was not found."
+          }
+        },
+        "deprecated": true
+      },
+      "delete": {
+        "summary": "Delete a client authorization code",
+        "description": "Save the registry atomically and apply all its clients before returning. Requires an administrator session and same-origin CSRF protection. Existing-client rotation retains its cache and MCP identity. Deleting and recreating an ID starts a new identity. Compatibility route. New clients should use the collection route with an ID in the JSON body because browsers normalize dot path segments.",
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The exact allowed administration origin."
+          },
+          {
+            "name": "X-QCWS-CSRF",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "revision": {
+                    "type": "string",
+                    "minLength": 64,
+                    "maxLength": 64,
+                    "description": "Opaque revision of the persisted client list."
+                  }
+                },
+                "required": [
+                  "revision"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Client identities and credential source types, without credentials or digests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientRegistryView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input or duplicate client ID or credential."
+          },
+          "401": {
+            "description": "Administration session is missing or expired."
+          },
+          "403": {
+            "description": "Origin or CSRF token is not allowed."
+          },
+          "409": {
+            "description": "The persisted registry changed. Reload its view and explicitly retry."
+          },
+          "default": {
+            "description": "Request failed without applying a partial registry."
+          },
+          "404": {
+            "description": "Client ID was not found."
+          }
+        },
+        "deprecated": true
       }
     }
   },
@@ -407,6 +928,55 @@
         "type": "apiKey",
         "in": "cookie",
         "name": "qcws_admin"
+      }
+    },
+    "schemas": {
+      "ClientRegistryView": {
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64,
+            "description": "Opaque revision of the persisted client list."
+          },
+          "clients": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+                },
+                "source": {
+                  "type": "string",
+                  "enum": [
+                    "manual",
+                    "file",
+                    "environment"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "source"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "pending_restart": {
+            "type": "boolean",
+            "description": "Persisted clients differ from the active HTTP identity snapshot. A successful web change applies the complete current list."
+          }
+        },
+        "required": [
+          "revision",
+          "clients",
+          "pending_restart"
+        ],
+        "additionalProperties": false
       }
     }
   }

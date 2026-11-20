@@ -328,16 +328,20 @@ function AccessRules($acl) {
     $dacl.GetBinaryForm($bytes, 0)
     return "$($acl.AreAccessRulesProtected):$([Convert]::ToBase64String($bytes))"
 }
-function Assert-InstalledTokenConfig([hashtable]$metadata, [string]$bearer, [string]$dacl) {
+function Assert-InstalledTokenConfig([hashtable]$metadata, [string]$bearer, [string]$dacl, [string]$runtimeHash) {
     $crypto = [Security.Cryptography.SHA256]::Create()
     try {
         $hash = [BitConverter]::ToString($crypto.ComputeHash([Text.Encoding]::ASCII.GetBytes($bearer))).Replace('-', '').ToLowerInvariant()
     } finally { $crypto.Dispose() }
-    $text = [IO.File]::ReadAllText($metadata.Config)
-    Assert (!$text.Contains($bearer)) 'The installed config contains a plaintext token.'
-    $runtime = $text | ConvertFrom-Json
-    $entry = @($runtime.clients | Where-Object id -eq 'msi-acceptance')
-    Assert ($entry.Count -eq 1 -and @($entry[0].PSObject.Properties.Name).Count -eq 2 -and $entry[0].token_sha256 -ceq $hash) 'The installed client entry does not contain only the expected digest and id.'
+    $registryPath = Join-Path $metadata.DataRoot 'state\client-registry.json'
+    $text = [IO.File]::ReadAllText($registryPath)
+    Assert (!$text.Contains($bearer)) 'The installed client registry contains a plaintext token.'
+    $registry = $text | ConvertFrom-Json
+    $entry = @($registry.clients | Where-Object id -eq 'msi-acceptance')
+    Assert ($registry.schema_version -eq 1 -and $entry.Count -eq 1 -and
+            $entry[0].token_sha256 -ceq $hash -and $entry[0].generation -cmatch '^[a-f0-9]{32}$') 'The installed client registry did not retain the expected digest and identity.'
+    Assert (@(Grant-ToInteractive $registryPath).Count -eq 0) 'INTERACTIVE can access the private client registry.'
+    Assert ((Get-FileHash -LiteralPath $metadata.Config -Algorithm SHA256).Hash -ceq $runtimeHash) 'Client enrollment changed the deployment configuration.'
     $acl = Get-Acl -LiteralPath $metadata.Config
     $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
     Assert ($owner -in @('S-1-5-32-544', 'S-1-5-18')) 'Updating the installed token left an owner untrusted by the MSI installer.'
@@ -429,8 +433,9 @@ function Assert-InstalledTokenRotation([hashtable]$metadata) {
     Write-Host 'Verify installed token generation, rotation and Bearer MCP access'
     $runtime = [IO.File]::ReadAllText($metadata.Config) | ConvertFrom-Json
     $dacl = AccessRules (Get-Acl -LiteralPath $metadata.Config)
+    $runtimeHash = (Get-FileHash -LiteralPath $metadata.Config -Algorithm SHA256).Hash
     $bearer = Invoke-InstalledTokenCli $metadata '--GenerateToken' @('yes')
-    Assert-InstalledTokenConfig $metadata $bearer $dacl
+    Assert-InstalledTokenConfig $metadata $bearer $dacl $runtimeHash
     $http = New-McpClient
     try {
         $uri = "http://127.0.0.1:$($runtime.business.port)/mcp"
@@ -444,7 +449,7 @@ function Assert-InstalledTokenRotation([hashtable]$metadata) {
 
         $replacement = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
         [void](Invoke-InstalledTokenCli $metadata '--SetToken' @($replacement, 'yes'))
-        Assert-InstalledTokenConfig $metadata $replacement $dacl
+        Assert-InstalledTokenConfig $metadata $replacement $dacl $runtimeHash
         Assert ((Send-InstalledMcp $http $uri $replacement $initialize).Status -eq 401) 'The rotated token became active before service restart.'
         Assert-InstalledMcp $http $uri $bearer $initialize
         [void](Stop-OwnedService $metadata)
@@ -453,6 +458,45 @@ function Assert-InstalledTokenRotation([hashtable]$metadata) {
         Assert ((Send-InstalledMcp $http $uri $bearer $initialize).Status -eq 401) 'The original token remained active after service restart.'
         Assert-InstalledMcp $http $uri $replacement $initialize
     } finally { $http.Dispose() }
+}
+function Assert-InstalledClientRegistry([hashtable]$metadata) {
+    Write-Host 'Verify service-account client registry writes and immediate authorization'
+    $runtime = [IO.File]::ReadAllText($metadata.Config) | ConvertFrom-Json
+    $runtimeHash = (Get-FileHash -LiteralPath $metadata.Config -Algorithm SHA256).Hash
+    $servicePid = (Owned-Service $metadata).ProcessId
+    $origin = 'http://127.0.0.1:' + $runtime.admin.port
+    $url = Get-InstalledSettingsLink $metadata $origin
+    $json = @{ ContentType = 'application/json'; TimeoutSec = 4 }
+    $state = Invoke-RestMethod -Uri "$origin/admin/api/v1/session" -Method Post -Headers @{ Origin = $origin } -Body (@{ code = $url.Substring($url.Length - 64) } | ConvertTo-Json -Compress) -SessionVariable session @json
+    $headers = @{ Origin = $origin; 'X-QCWS-CSRF' = $state.csrf }
+    $clientsUri = "$origin/admin/api/v1/clients"
+    $http = New-McpClient
+    try {
+        $view = Invoke-RestMethod -Uri $clientsUri -WebSession $session -TimeoutSec 4
+        Assert (@($view.clients | Where-Object id -eq 'local').Count -eq 1) 'The initial local identity is missing from administration.'
+        $bearer = 'web/' + [guid]::NewGuid().ToString('N').Substring(0, 12)
+        $body = @{ revision = $view.revision; id = 'msi-web-acceptance'; token = $bearer } | ConvertTo-Json -Compress
+        $view = Invoke-RestMethod -Uri $clientsUri -Method Post -Headers $headers -WebSession $session -Body $body @json
+        Assert (!$view.pending_restart -and !($view | ConvertTo-Json -Depth 8).Contains($bearer)) 'Web enrollment was pending or disclosed its credential.'
+        $uri = "http://127.0.0.1:$($runtime.business.port)/mcp"
+        $initialize = New-McpInitialize
+        Assert-InstalledMcp $http $uri $bearer $initialize
+        $replacement = 'web/' + [guid]::NewGuid().ToString('N').Substring(0, 12)
+        $body = @{ revision = $view.revision; token = $replacement } | ConvertTo-Json -Compress
+        $view = Invoke-RestMethod -Uri "$clientsUri/msi-web-acceptance" -Method Put -Headers $headers -WebSession $session -Body $body @json
+        Assert (!$view.pending_restart -and (Send-InstalledMcp $http $uri $bearer $initialize).Status -eq 401) 'Web rotation did not revoke the previous credential immediately.'
+        Assert-InstalledMcp $http $uri $replacement $initialize
+        $body = @{ revision = $view.revision } | ConvertTo-Json -Compress
+        $view = Invoke-RestMethod -Uri "$clientsUri/msi-web-acceptance" -Method Delete -Headers $headers -WebSession $session -Body $body @json
+        Assert (!$view.pending_restart -and (Send-InstalledMcp $http $uri $replacement $initialize).Status -eq 401) 'Web deletion did not revoke its credential immediately.'
+        $registryPath = Join-Path $metadata.DataRoot 'state\client-registry.json'
+        Assert ((Test-Path -LiteralPath $registryPath) -and @(Grant-ToInteractive $registryPath).Count -eq 0) 'The service registry is missing or readable by INTERACTIVE.'
+        Assert ((Owned-Service $metadata).ProcessId -eq $servicePid) 'Web client changes restarted the service.'
+        Assert ((Get-FileHash -LiteralPath $metadata.Config -Algorithm SHA256).Hash -ceq $runtimeHash) 'Web client changes rewrote the deployment configuration.'
+    } finally {
+        $http.Dispose()
+        [void](Invoke-RestMethod -Uri "$origin/admin/api/v1/session" -Method Delete -Headers $headers -WebSession $session -Body '{}' @json)
+    }
 }
 function Snapshot([string[]]$paths) {
     $result = @{}
@@ -571,11 +615,14 @@ try {
     Assert-BaselineUnchanged $baseline $baselinePid $baselineFiles
     Assert-SeparateInstances $baseline $candidate
     Assert-Administration $candidate
+    Assert-InstalledClientRegistry $candidate
     Assert-InstalledTokenRotation $candidate
+    Assert-InstalledClientRegistry $candidate
     Assert-BaselineUnchanged $baseline $baselinePid $baselineFiles
     $candidateFiles = Snapshot @($candidate.Config, $candidate.Token, $candidate.AdminToken,
         (Join-Path $candidate.DataRoot 'state\settings.json'),
-        (Join-Path $candidate.DataRoot 'state\secrets.json'))
+        (Join-Path $candidate.DataRoot 'state\secrets.json'),
+        (Join-Path $candidate.DataRoot 'state\client-registry.json'))
 
     Invoke-Msi $candidate '/x' '05-uninstall-candidate'
     Wait-Absent $candidate

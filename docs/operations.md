@@ -2,7 +2,9 @@
 
 # 运维与恢复
 
-为每个调用方分配独立的凭据。网页快照归创建它的客户端身份所有。可以通过命令行轮换令牌，也可以更新已有的私有令牌文件或环境变量，然后重启服务。保留客户端身份即可继续访问已有缓存。令牌文件应排除在版本控制和诊断资料之外。[管理客户端令牌](deployment.md#manage-client-tokens)
+为每个调用方分配独立的凭据。网页快照归创建它的客户端身份所有。在管理页添加、轮换或删除授权码立即生效。命令行更新以及已有的私有令牌文件或环境变量更新在重启后生效。普通轮换保留缓存身份，删除后重建同名客户端会生成新的身份。授权注册表位于 `settings.directory/client-registry.json`，默认在 `bin/data/state` 下，应与其他私有数据一起备份，并排除在版本控制和诊断资料之外。[管理客户端令牌](deployment.md#manage-client-tokens)
+
+管理页的“访问授权”采用左侧客户端列表和右侧三步流程。填写或生成授权码后，先确认保存生效，再复制连接资料。保存后留在第三步时可以重复复制 Bearer，它只在当前页面内存中保留。完成、切换客户端或标签页、刷新或退出登录后无法从服务端找回原码，需要使用此前自行保存的值或执行替换。QGIS 用户只需在 MCP Servers 页面填写管理员提供的 Bearer。
 
 <a name="capacity-and-monitoring"></a>
 
@@ -20,7 +22,7 @@
 
 使用 `--SettingsUrl` 打开双语设置页面。管理链接只能使用一次，120 秒后过期。客户端应分别使用独立的业务令牌。通过 MSI 安装时，本机交互式用户可以读取独立的 `admin.token`。在 Ubuntu 上，管理令牌文件归服务账户所有，权限为 0600。管理链接、令牌和搜索后端密钥应排除在日志之外。
 
-自动模式使用公开的 DuckDuckGo 和 Bing 搜索页面。当页面不可达或触发限流时，可能返回 `provider_unavailable` 或 `rate_limited`。可使用设置页面中的后端测试功能排查故障。若要使用自行管理的搜索服务，可指定 SearXNG 端点，或配置 Brave、Tavily、Exa、Perplexity 或 DeepSeek 的密钥。
+自动模式使用公开的 DuckDuckGo 和 Bing 搜索页面。当页面不可达或触发限流时，可能返回 `provider_unavailable` 或 `rate_limited`。可在“搜索设置”中配置和测试后端，在“服务状态”中查看版本、监听地址和来源状态。若要使用自行管理的搜索服务，可指定 SearXNG 端点，或配置 Brave、Tavily、Exa、Perplexity 或 DeepSeek 的密钥。
 
 <a name="cache-and-backups"></a>
 
@@ -40,7 +42,7 @@
 
 ## 安装、切换和卸载版本
 
-运行时配置使用 `schema_version: 1` 标识 JSON 格式。`project_version` 记录生成配置的确切发布版本，例如 `"0.2.1"`。可执行文件会拒绝加载标记为其他发布版本的配置。请用待检查版本的可执行文件运行 `--CheckConfig`。该命令默认读取可执行文件旁的 `data/runtime.json`。MSI 安装下请以管理员身份运行，DEB 安装下请使用 `sudo`。显式传入 `--ConfigPath` 仍可读取没有 `project_version` 的旧配置。
+运行时配置使用 `schema_version: 1` 标识 JSON 格式。`project_version` 记录生成配置的确切发布版本，例如 `"0.3.0"`。可执行文件会拒绝加载标记为其他发布版本的配置。请用待检查版本的可执行文件运行 `--CheckConfig`。该命令默认读取可执行文件旁的 `data/runtime.json`。MSI 安装下请以管理员身份运行，DEB 安装下请使用 `sudo`。显式传入 `--ConfigPath` 仍可读取没有 `project_version` 的旧配置。
 
 MSI 和 DEB 为每个版本注册独立的服务并使用单独的程序目录。各服务从自己的安装根目录加载 `bin/data/runtime.json`。每个新版本都拥有新的凭据、后端设置、缓存和回环端口。安装新版本期间，现有服务会继续运行。
 
@@ -58,7 +60,7 @@ Windows 的安装提交清理失败时，会留下私有的 `.qcws-install-*.jso
 
 Windows MSI 的 `QCWS_TEST_FAILPOINT` 属性专供测试使用，可以让安装在初始化后或服务启动后主动失败。该属性默认不生效，只有管理员明确传入测试值才会触发。它可使用原样的候选 MSI 文件验证回滚，应始终排除在部署自动化之外。
 
-卸载前，请确认要移除的确切版本。在 Windows 的「已安装的应用」中卸载对应的 MSI 条目。在 Ubuntu 上，请使用包含版本的包名，例如 `sudo apt remove qcopilots-websearch-0.2.1`。这两种卸载方式都会保留该版本的 `bin/data` 目录。对 DEB 执行 purge 会移除该版本的 `bin/data/runtime.json`，其令牌、状态数据和服务账户会保留。仅在有意重置该版本时，才应在备份完成后删除保留的文件。
+卸载前，请确认要移除的确切版本。在 Windows 的「已安装的应用」中卸载对应的 MSI 条目。在 Ubuntu 上，请使用包含版本的包名，例如 `sudo apt remove qcopilots-websearch-0.3.0`。这两种卸载方式都会保留该版本的 `bin/data` 目录。对 DEB 执行 purge 会移除该版本的 `bin/data/runtime.json`，其令牌、状态数据和服务账户会保留。仅在有意重置该版本时，才应在备份完成后删除保留的文件。
 
 `docker compose down` 会保留持久化证书和数据。日常升级和卸载应避免使用 `down -v`。重启时应保留 Caddy 的证书存储和 SearXNG 密钥。
 

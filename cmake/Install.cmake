@@ -43,7 +43,7 @@ string(JSON _runtime SET "${_runtime}" project_version "\"${PROJECT_VERSION}\"")
 file(MAKE_DIRECTORY "${PROJECT_BINARY_DIR}/package-config")
 file(WRITE "${PROJECT_BINARY_DIR}/package-config/runtime.json" "${_runtime}\n")
 install(FILES "${PROJECT_BINARY_DIR}/package-config/runtime.json" config/runtime.schema.json config/settings.json
-  config/settings.schema.json config/secrets.schema.json DESTINATION "${_app_share}/config")
+  config/settings.schema.json config/secrets.schema.json config/client-registry.schema.json DESTINATION "${_app_share}/config")
 install(FILES LICENSE README.md README.zh-CN.md DESTINATION "${_app_share}")
 install(DIRECTORY docs/ DESTINATION "${_app_share}/docs" FILES_MATCHING PATTERN "*.md")
 include("${PROJECT_SOURCE_DIR}/cmake/Licenses.cmake")

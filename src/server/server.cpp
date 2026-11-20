@@ -1,4 +1,5 @@
 #include "stdio_output.hpp"
+#include "listener_options.hpp"
 #include <QFile>
 #include <QFileInfo>
 #include <QStringList>
@@ -7,6 +8,7 @@
 #include <iostream>
 #include <qws/server.hpp>
 #include <qws/admin.hpp>
+#include <qws/client_registry.hpp>
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
@@ -181,15 +183,15 @@ struct HttpServer::Impl {
   Service &service;
   Config config;
   Protocol protocol;
+  ClientRegistry clients;
   AdminServer admin;
-  std::vector<ClientIdentity> clients;
   std::unique_ptr<httplib::Server> business;
   httplib::Server control;
   std::thread businessThread, controlThread;
   int bp = 0, cp = 0;
   bool started = false;
   Impl(Service &s, Config c)
-      : service(s), config(std::move(c)), protocol(s), admin(s, config), clients(config.clients()),
+      : service(s), config(std::move(c)), protocol(s), clients(config), admin(s, config, clients),
         business(businessListener(config)) {
     setup(*business, config.value["business"], false);
     setup(control, config.value["control"], true);
@@ -197,9 +199,16 @@ struct HttpServer::Impl {
   std::string authorize(const httplib::Request &request) const {
     if (request.get_header_value_count("Authorization") != 1)
       throw Error("unauthorized", "Exactly one bearer credential is required.", 401);
-    return authenticate(clients, request.get_header_value("Authorization"));
+    return clients.authorize(request.get_header_value("Authorization"));
+  }
+  static const std::string &principal(const httplib::Response &response) {
+    const auto *value = response.user_data.get<std::string>("qcws.principal");
+    if (!value)
+      throw Error("unauthorized", "A bearer credential is required.", 401);
+    return *value;
   }
   void setup(httplib::Server &server, Json listener, bool controls) {
+    server.set_socket_options(listenerSocketOptions);
     const auto threads = controls ? 4 : config.value["limits"]["max_concurrent"].get<int>() + 4;
     server.new_task_queue = [threads] { return new httplib::ThreadPool(threads, threads, 16); };
     server.set_read_timeout(2)
@@ -242,7 +251,7 @@ struct HttpServer::Impl {
               res.set_header("Access-Control-Max-Age", "600");
               return httplib::Server::HandlerResponse::Handled;
             }
-            (void)authorize(req);
+            res.user_data.set("qcws.principal", authorize(req));
             return httplib::Server::HandlerResponse::Unhandled;
           } catch (const Error &e) {
             sendError(res, e);
@@ -286,7 +295,7 @@ struct HttpServer::Impl {
           auto token = std::make_shared<CancelToken>();
           token->deadline = Clock::now() + std::chrono::seconds(60);
           DisconnectMonitor monitor(req, token);
-          sendJson(res, service.call(std::string("web_") + name, parse(req.body), authorize(req), token));
+          sendJson(res, service.call(std::string("web_") + name, parse(req.body), principal(res), token));
         } catch (const Error &e) {
           sendError(res, e);
         }
@@ -298,7 +307,7 @@ struct HttpServer::Impl {
     server.Delete("/mcp", [this](const auto &req, auto &res) {
       if (!protocolHeaders(req, res))
         return;
-      const auto reply = protocol.deleteSession(authorize(req), req.get_header_value("Mcp-Session-Id"));
+      const auto reply = protocol.deleteSession(principal(res), req.get_header_value("Mcp-Session-Id"));
       res.status = reply.httpStatus;
     });
     server.Post("/mcp", [this](const auto &req, auto &res) {
@@ -327,7 +336,7 @@ struct HttpServer::Impl {
       token->deadline = Clock::now() + std::chrono::seconds(60);
       DisconnectMonitor monitor(req, token);
       const auto reply =
-          protocol.handle(authorize(req), req.get_header_value("Mcp-Session-Id"), message, token);
+          protocol.handle(principal(res), req.get_header_value("Mcp-Session-Id"), message, token);
       if (!reply.sessionId.empty())
         res.set_header("Mcp-Session-Id", reply.sessionId);
       if (reply.message)
@@ -369,7 +378,7 @@ struct HttpServer::Impl {
     business->wait_until_ready();
     control.wait_until_ready();
     try {
-      admin.start();
+      admin.start(bp);
     } catch (...) {
       stop();
       throw;

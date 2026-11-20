@@ -13,6 +13,7 @@ export function App({ loginCode = null }: { loginCode?: string | null }) {
   const [language, setLanguage] = useState(getLanguage);
   const [state, setState] = useState<State>({ mode: "loading" });
   const [pending, setPending] = useState(false);
+  const [mutationPending, setMutationPending] = useState(false);
   const [error, setError] = useState<string>();
   const t = localized(language);
 
@@ -68,7 +69,7 @@ export function App({ loginCode = null }: { loginCode?: string | null }) {
   }, []);
 
   async function signOut() {
-    if (state.mode !== "settings") return;
+    if (state.mode !== "settings" || pending || mutationPending) return;
     setPending(true);
     setError(undefined);
     try {
@@ -90,10 +91,11 @@ export function App({ loginCode = null }: { loginCode?: string | null }) {
           <div className="brand">
             <img src={import.meta.env.BASE_URL + "assets/icon.svg"} alt="" />
             <span>{t("brand")}</span>
+            <span className="brand-context">{t("localManagement")}</span>
           </div>
           <div className="header-actions">
             <label className="language-field">
-              <span>{t("language")}</span>
+              <span className="sr-only">{t("language")}</span>
               <select
                 value={language}
                 onChange={(event) =>
@@ -112,7 +114,7 @@ export function App({ loginCode = null }: { loginCode?: string | null }) {
               <button
                 type="button"
                 className="button secondary"
-                disabled={pending}
+                disabled={pending || mutationPending}
                 onClick={() => void signOut()}
               >
                 {t("signOut")}
@@ -146,6 +148,8 @@ export function App({ loginCode = null }: { loginCode?: string | null }) {
               csrf={state.session.csrf}
               t={t}
               onExpired={sessionExpired}
+              onBusyChange={setMutationPending}
+              disabled={pending}
             />
           </>
         )}

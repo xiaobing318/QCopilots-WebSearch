@@ -1,17 +1,22 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
-import { readLoginCode, type SettingsView } from "../admin";
+import {
+  readLoginCode,
+  type ClientRegistryView,
+  type SettingsView,
+} from "../admin";
 import { App } from "../App";
 import fixture from "./settings.fixture.json";
 
 const csrf = "session-csrf";
 const defaultStatus = {
   version: "0.2.0",
+  mcp_url: "https://web-search.vastarmorai.com/mcp",
   listeners: {
-    business: { host: "127.0.0.1", port: 8088 },
-    control: { host: "127.0.0.1", port: 8089 },
-    admin: { host: "127.0.0.1", port: 8091 },
+    business: { host: "127.0.0.1", port: 3181 },
+    control: { host: "127.0.0.1", port: 3182 },
+    admin: { host: "127.0.0.1", port: 3183 },
   },
   cooldown: { duckduckgo: { retry_after_seconds: 60 } },
   settings_error: null,
@@ -24,9 +29,20 @@ function json(value: unknown, status = 200) {
   });
 }
 
-function mockService({ signedIn = true } = {}) {
+function mockService({
+  signedIn = true,
+  pendingClientSave,
+}: {
+  signedIn?: boolean;
+  pendingClientSave?: Promise<Response>;
+} = {}) {
   let authenticated = signedIn;
   let current = structuredClone(fixture) as SettingsView;
+  let clients: ClientRegistryView = {
+    revision: "clients-v1",
+    clients: [{ id: "local", source: "file" }],
+    pending_restart: false,
+  };
   const fetcher = vi.fn((path: string, options: RequestInit) => {
     const key = options.method + " " + path;
     switch (key) {
@@ -43,6 +59,22 @@ function mockService({ signedIn = true } = {}) {
         return json({ ok: true });
       case "GET /admin/api/v1/settings":
         return json(current);
+      case "GET /admin/api/v1/clients":
+        return json(clients);
+      case "PUT /admin/api/v1/clients": {
+        const { id } = JSON.parse(String(options.body));
+        if (!clients.clients.some((client) => client.id === id))
+          return json({ error: { code: "not_found" } }, 404);
+        if (pendingClientSave) return pendingClientSave;
+        clients = {
+          ...clients,
+          revision: "clients-v2",
+          clients: clients.clients.map((client) =>
+            client.id === id ? { id, source: "manual" } : client,
+          ),
+        };
+        return json(clients);
+      }
       case "PUT /admin/api/v1/settings": {
         const { patch } = JSON.parse(String(options.body));
         current = {
@@ -93,7 +125,7 @@ it("clears and exchanges the one-time login code", async () => {
   expect(window.location.hash).toBe("");
   render(<App loginCode={loginCode} />);
   expect(
-    await screen.findByRole("heading", { name: "Web Search Settings" }),
+    await screen.findByRole("heading", { name: "Access authorization" }),
   ).toBeVisible();
   expect(fetcher).toHaveBeenCalledWith(
     "/admin/api/v1/session",
@@ -118,7 +150,7 @@ it("accepts an administrator token and sends CSRF when signing out", async () =>
   );
   await user.click(screen.getByRole("button", { name: "Sign in" }));
   expect(
-    await screen.findByRole("heading", { name: "Web Search Settings" }),
+    await screen.findByRole("heading", { name: "Access authorization" }),
   ).toBeVisible();
   expect(document.body).not.toHaveTextContent("sensitive-admin-token");
   await user.click(screen.getByRole("button", { name: "Sign out" }));
@@ -138,6 +170,7 @@ it("includes the current revision and only the modified preference in a write", 
   const user = userEvent.setup();
   const fetcher = mockService();
   render(<App />);
+  await user.click(await screen.findByRole("tab", { name: "Search settings" }));
   const tool = await screen.findByRole("switch", { name: "Open web pages" });
   expect(tool).toBeChecked();
   await user.click(tool);
@@ -150,16 +183,9 @@ it("includes the current revision and only the modified preference in a write", 
       body: '{"revision":"1234567890abcdef","patch":{"tools":{"open":{"enabled":false}}}}',
     }),
   );
-  await user.click(
-    screen.getByRole("switch", { name: "Search without asking" }),
-  );
-  expect(fetcher).toHaveBeenCalledWith(
-    "/admin/api/v1/settings",
-    expect.objectContaining({
-      method: "PUT",
-      body: '{"revision":"fedcba0987654321","patch":{"search_without_asking":true}}',
-    }),
-  );
+  expect(
+    screen.queryByRole("switch", { name: "Search without asking" }),
+  ).toBeNull();
 });
 
 it.each([
@@ -172,6 +198,9 @@ it.each([
     const user = userEvent.setup();
     const fetcher = mockService();
     render(<App />);
+    await user.click(
+      await screen.findByRole("tab", { name: "Search settings" }),
+    );
     const source = await screen.findByRole("combobox", { name: "Provider" });
     await user.selectOptions(source, label);
     const key = await screen.findByLabelText("Provider key");
@@ -206,7 +235,9 @@ it("persists the selected language and displays provider status and safe samples
   const user = userEvent.setup();
   mockService();
   render(<App />);
+  await user.click(await screen.findByRole("tab", { name: "Service status" }));
   expect(await screen.findByText("DuckDuckGo · 60 s remaining")).toBeVisible();
+  await user.click(screen.getByRole("tab", { name: "Search settings" }));
   await user.click(screen.getByRole("button", { name: "Test provider" }));
   expect(
     await screen.findByText("Bing returned 2 results in 15 ms."),
@@ -223,7 +254,7 @@ it("persists the selected language and displays provider status and safe samples
   expect(document.documentElement.lang).toBe("zh-CN");
   expect(localStorage.getItem("qcws.language")).toBe("zh-CN");
   expect(
-    screen.queryByRole("heading", { name: "Web Search Settings" }),
+    screen.queryByRole("heading", { name: "Access authorization" }),
   ).toBeNull();
 });
 
@@ -231,6 +262,7 @@ it("supports changing sources and saving a SearXNG endpoint", async () => {
   const user = userEvent.setup();
   const fetcher = mockService();
   render(<App />);
+  await user.click(await screen.findByRole("tab", { name: "Search settings" }));
   const provider = await screen.findByRole("combobox", { name: "Provider" });
   await user.selectOptions(provider, "searxng");
   const endpoint = await screen.findByLabelText("SearXNG endpoint");
@@ -253,4 +285,138 @@ it("supports changing sources and saving a SearXNG endpoint", async () => {
   await waitFor(() =>
     expect(screen.queryByLabelText("Provider key")).toBeNull(),
   );
+});
+
+it("navigates the three tabs with arrow keys, Home and End", async () => {
+  const user = userEvent.setup();
+  mockService();
+  render(<App />);
+  const access = await screen.findByRole("tab", {
+    name: "Access authorization",
+  });
+  const search = screen.getByRole("tab", { name: "Search settings" });
+  const status = screen.getByRole("tab", { name: "Service status" });
+  expect(access).toHaveAttribute("aria-selected", "true");
+  expect(search).toHaveAttribute("tabindex", "-1");
+  access.focus();
+  await user.keyboard("{ArrowRight}");
+  expect(search).toHaveFocus();
+  expect(search).toHaveAttribute("aria-selected", "true");
+  expect(
+    screen.getByRole("tabpanel", { name: "Search settings" }),
+  ).toBeVisible();
+  await user.keyboard("{End}");
+  expect(status).toHaveFocus();
+  expect(status).toHaveAttribute("aria-selected", "true");
+  await user.keyboard("{ArrowRight}");
+  expect(access).toHaveFocus();
+  await user.keyboard("{ArrowLeft}");
+  expect(status).toHaveFocus();
+  await user.keyboard("{Home}");
+  expect(access).toHaveFocus();
+  expect(access).toHaveAttribute("aria-selected", "true");
+});
+
+it("forgets unsaved text when switching tabs and keeps saved codes unavailable after sign-out", async () => {
+  const user = userEvent.setup();
+  const clipboard = vi
+    .spyOn(navigator.clipboard, "writeText")
+    .mockResolvedValue();
+  mockService();
+  render(<App />);
+  await user.click(
+    await screen.findByRole("button", { name: "Replace code for local" }),
+  );
+  await user.click(screen.getByRole("button", { name: "Generate from text" }));
+  await user.type(
+    screen.getByLabelText("Text to generate from"),
+    "temporary-source",
+  );
+  await user.click(screen.getByRole("tab", { name: "Search settings" }));
+  await user.click(screen.getByRole("tab", { name: "Access authorization" }));
+  await user.click(
+    await screen.findByRole("button", { name: "Replace code for local" }),
+  );
+  await user.click(screen.getByRole("button", { name: "Generate from text" }));
+  expect(screen.getByLabelText("Text to generate from")).toHaveValue("");
+  await user.click(screen.getByRole("button", { name: "Enter manually" }));
+  await user.type(
+    screen.getByLabelText("Bearer authorization code"),
+    "saved-only-in-memory",
+  );
+  await user.click(screen.getByRole("button", { name: "Next: review save" }));
+  await user.click(screen.getByRole("button", { name: "Save and activate" }));
+  await user.click(
+    await screen.findByRole("button", { name: "Copy server URL" }),
+  );
+  expect(clipboard).toHaveBeenLastCalledWith(defaultStatus.mcp_url);
+  await user.click(screen.getByRole("button", { name: "Sign out" }));
+  const adminToken = await screen.findByLabelText("Administrator token");
+  expect(screen.queryByDisplayValue("saved-only-in-memory")).toBeNull();
+  await user.type(adminToken, "admin-token");
+  await user.click(screen.getByRole("button", { name: "Sign in" }));
+  await user.click(
+    await screen.findByRole("button", { name: "Replace code for local" }),
+  );
+  expect(screen.getByLabelText("Bearer authorization code")).toHaveValue("");
+  expect(screen.queryByRole("button", { name: "Copy Bearer" })).toBeNull();
+});
+
+it("forgets the saved temporary Bearer when leaving and returning to the authorization tab", async () => {
+  const user = userEvent.setup();
+  mockService();
+  render(<App />);
+  await user.click(
+    await screen.findByRole("button", { name: "Replace code for local" }),
+  );
+  await user.click(screen.getByRole("button", { name: "Enter manually" }));
+  await user.type(
+    screen.getByLabelText("Bearer authorization code"),
+    "tab-sensitive-code",
+  );
+  await user.click(screen.getByRole("button", { name: "Next: review save" }));
+  await user.click(screen.getByRole("button", { name: "Save and activate" }));
+  await screen.findByRole("button", { name: "Copy Bearer" });
+  await user.click(screen.getByRole("tab", { name: "Service status" }));
+  expect(screen.queryByDisplayValue("tab-sensitive-code")).toBeNull();
+  await user.click(screen.getByRole("tab", { name: "Access authorization" }));
+  await screen.findByRole("button", { name: "Replace code for local" });
+  expect(screen.queryByRole("button", { name: "Copy Bearer" })).toBeNull();
+});
+
+it("prevents changing tabs or signing out while an authorization save is pending", async () => {
+  const user = userEvent.setup();
+  let finish!: (response: Response) => void;
+  const pendingClientSave = new Promise<Response>((resolve) => {
+    finish = resolve;
+  });
+  mockService({ pendingClientSave });
+  render(<App />);
+  await user.click(
+    await screen.findByRole("button", { name: "Replace code for local" }),
+  );
+  await user.click(screen.getByRole("button", { name: "Enter manually" }));
+  await user.type(
+    screen.getByLabelText("Bearer authorization code"),
+    "pending-code",
+  );
+  await user.click(screen.getByRole("button", { name: "Next: review save" }));
+  await user.click(screen.getByRole("button", { name: "Save and activate" }));
+  for (const tab of screen.getAllByRole("tab")) expect(tab).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Sign out" })).toBeDisabled();
+  await act(async () => {
+    finish(
+      json({
+        revision: "clients-v2",
+        clients: [{ id: "local", source: "manual" }],
+        pending_restart: false,
+      }),
+    );
+    await pendingClientSave;
+  });
+  expect(
+    await screen.findByRole("button", { name: "Copy Bearer" }),
+  ).toBeEnabled();
+  for (const tab of screen.getAllByRole("tab")) expect(tab).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Sign out" })).toBeEnabled();
 });

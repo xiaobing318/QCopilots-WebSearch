@@ -1,7 +1,9 @@
 #include "admin_sessions.hpp"
 #include "static_assets.hpp"
+#include "listener_options.hpp"
 #include <QString>
 #include <qws/admin.hpp>
+#include <qws/client_registry.hpp>
 #include <thread>
 
 namespace qws {
@@ -56,16 +58,21 @@ Json parseBody(const Request &req) {
 
 struct AdminServer::Impl {
   Service &service;
+  ClientRegistry &clients;
+  Json business;
+  std::string mcpUrl;
   AdminConfig config;
   AdminSessions sessions;
   httplib::Server server;
   std::thread thread;
 
-  Impl(Service &instance, const Config &runtime)
-      : service(instance), config(adminConfiguration(runtime)), sessions(config) {
+  Impl(Service &instance, const Config &runtime, ClientRegistry &registry)
+      : service(instance), clients(registry), business(runtime.value.at("business")),
+        config(adminConfiguration(runtime)), sessions(config) {
     config.token.clear();
     if (!config.enabled)
       return;
+    server.set_socket_options(listenerSocketOptions);
     server.new_task_queue = [] { return new httplib::ThreadPool(4, 4, 16); };
     server.set_read_timeout(2).set_write_timeout(2).set_keep_alive_timeout(1)
         .set_payload_max_length(64 * 1024).set_compress(false);
@@ -147,10 +154,52 @@ struct AdminServer::Impl {
     bind("GET", "/status", [this](const auto &req, auto &res) {
       (void)sessions.require(requestCookie(req));
       const auto error = service.settings().error();
-      sendJson(res, {{"version", QCWS_VERSION}, {"listeners", service.listeningAddresses()},
+      sendJson(res, {{"version", QCWS_VERSION}, {"listeners", service.listeningAddresses()}, {"mcp_url", mcpUrl},
                      {"cooldown", service.providerStatus()},
                      {"settings_error", error.empty() ? Json(nullptr) : Json(error)}});
     });
+    bind("GET", "/clients", [this](const auto &req, auto &res) {
+      (void)sessions.require(requestCookie(req));
+      sendJson(res, clients.view());
+    });
+    bind("POST", "/clients", [this](const auto &req, auto &res) {
+      verifySessionWrite(req);
+      const auto body = clientBody(req, true, true);
+      sendJson(res, clients.create(body.at("id"), QByteArray::fromStdString(body.at("token")), body.at("revision")));
+    });
+    bind("PUT", "/clients", [this](const auto &req, auto &res) {
+      verifySessionWrite(req);
+      const auto body = clientBody(req, true, true);
+      sendJson(res, clients.replace(body.at("id"), QByteArray::fromStdString(body.at("token")),
+                                   body.at("revision")));
+    });
+    bind("DELETE", "/clients", [this](const auto &req, auto &res) {
+      verifySessionWrite(req);
+      const auto body = clientBody(req, true, false);
+      sendJson(res, clients.remove(body.at("id"), body.at("revision")));
+    });
+    bind("PUT", R"(/clients/([A-Za-z0-9_.-]{1,64}))", [this](const auto &req, auto &res) {
+      verifySessionWrite(req);
+      const auto body = clientBody(req, false, true);
+      sendJson(res, clients.replace(req.matches[1].str(), QByteArray::fromStdString(body.at("token")),
+                                   body.at("revision")));
+    });
+    bind("DELETE", R"(/clients/([A-Za-z0-9_.-]{1,64}))", [this](const auto &req, auto &res) {
+      verifySessionWrite(req);
+      const auto body = clientBody(req, false, false);
+      sendJson(res, clients.remove(req.matches[1].str(), body.at("revision")));
+    });
+  }
+
+  static Json clientBody(const Request &req, bool withId, bool withToken) {
+    auto body = parseBody(req);
+    if (body.size() != size_t(1 + int(withId) + int(withToken)) ||
+        !body.contains("revision") || !body["revision"].is_string() ||
+        body["revision"].get_ref<const std::string &>().size() != 64 ||
+        (withId && (!body.contains("id") || !body["id"].is_string())) ||
+        (withToken && (!body.contains("token") || !body["token"].is_string())))
+      throw Error("invalid_argument", "Invalid client change.");
+    return body;
   }
 
   std::string buildCookie(const std::string &value) const {
@@ -194,9 +243,10 @@ struct AdminServer::Impl {
     else
       server.Delete(path, guarded);
   }
-  void start() {
+  void start(int businessPort) {
     if (!config.enabled)
       return;
+    mcpUrl = businessMcpUrl(business, businessPort);
     if (!server.bind_to_port(config.host, config.port))
       throw Error("invalid_configuration", "Cannot bind administration listener.");
     thread = std::thread([this] { server.listen_after_bind(); });
@@ -210,13 +260,13 @@ struct AdminServer::Impl {
   }
 };
 
-AdminServer::AdminServer(Service &service, const Config &runtime)
-    : impl_(std::make_unique<Impl>(service, runtime)) {}
+AdminServer::AdminServer(Service &service, const Config &runtime, ClientRegistry &clients)
+    : impl_(std::make_unique<Impl>(service, runtime, clients)) {}
 AdminServer::~AdminServer() {
   stop();
 }
-void AdminServer::start() {
-  impl_->start();
+void AdminServer::start(int businessPort) {
+  impl_->start(businessPort);
 }
 void AdminServer::stop() {
   impl_->stop();

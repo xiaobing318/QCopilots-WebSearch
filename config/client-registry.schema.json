@@ -1,0 +1,74 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Client registry",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "clients": {
+      "type": "array",
+      "description": "Initial client credentials. Accepts 0 to 100 clients. A state client registry takes precedence once created.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Client identity. Accepts 1–64 letters, digits, dot, underscore or hyphen. Distinct IDs isolate cached pages.",
+            "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+          },
+          "token_env": {
+            "type": "string",
+            "description": "Credential environment variable. Accepts a nonempty variable name. The value is loaded at startup without storing it in JSON.",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "token_file": {
+            "type": "string",
+            "description": "Credential file. Accepts a protected absolute or config-relative path. Read once at startup, so restart applies rotation.",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "token_sha256": {
+            "type": "string",
+            "description": "Lowercase SHA-256 digest of a client credential. Created by the token configuration commands and read at startup.",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "generation": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{32}$",
+            "description": "Internal identity generation. Preserve on credential rotation, generate on creation."
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "required": [
+              "token_env"
+            ]
+          },
+          {
+            "required": [
+              "token_file"
+            ]
+          },
+          {
+            "required": [
+              "token_sha256"
+            ]
+          }
+        ]
+      },
+      "minItems": 0,
+      "maxItems": 100
+    }
+  },
+  "required": [
+    "schema_version",
+    "clients"
+  ],
+  "additionalProperties": false
+}

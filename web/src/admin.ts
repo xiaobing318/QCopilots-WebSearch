@@ -29,6 +29,12 @@ export type SettingsPatch = {
   search?: Partial<SettingsView["search"]>;
 };
 export type Session = { csrf: string };
+export type ClientCredentialSource = "manual" | "file" | "environment";
+export type ClientRegistryView = {
+  revision: string;
+  clients: { id: string; source: ClientCredentialSource }[];
+  pending_restart: boolean;
+};
 export type ProviderResult = {
   ok: boolean;
   source: string;
@@ -40,6 +46,7 @@ export type ProviderResult = {
 export type Listener = "business" | "control" | "admin";
 export type ServiceStatus = {
   version: string;
+  mcp_url?: string;
   listeners: Record<Listener, { host: string; port: number }>;
   cooldown: Partial<
     Record<"duckduckgo" | "bing", { retry_after_seconds: number }>
@@ -121,6 +128,30 @@ export function readLoginCode(): string | null {
 }
 
 export const admin = {
+  clients: (signal?: AbortSignal) =>
+    request<ClientRegistryView>(
+      "/clients",
+      "GET",
+      undefined,
+      undefined,
+      signal,
+    ),
+  addClient: (revision: string, id: string, token: string, csrf: string) =>
+    request<ClientRegistryView>(
+      "/clients",
+      "POST",
+      { revision, id, token },
+      csrf,
+    ),
+  replaceClient: (revision: string, id: string, token: string, csrf: string) =>
+    request<ClientRegistryView>(
+      "/clients",
+      "PUT",
+      { revision, id, token },
+      csrf,
+    ),
+  deleteClient: (revision: string, id: string, csrf: string) =>
+    request<ClientRegistryView>("/clients", "DELETE", { revision, id }, csrf),
   session: (signal?: AbortSignal) =>
     request<Session>("/session", "GET", undefined, undefined, signal),
   signIn: (

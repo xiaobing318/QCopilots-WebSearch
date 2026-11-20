@@ -108,9 +108,9 @@ std::optional<std::string> violation(const Json &schema, const Json &value) {
   return "at " + boundedText(errors.where, 120) + ": " + boundedText(errors.reason, 200);
 }
 
-void validateCredential(const QByteArray &token, bool required, const char *errorCode) {
-  if ((required && token.size() < 32) || token.size() > 8192)
-    throw Error(errorCode, "Client credentials must contain 32 to 8192 visible ASCII characters.");
+void validateCredential(const QByteArray &token, bool required, const char *errorCode, int minimumLength = 32) {
+  if ((required && token.size() < minimumLength) || token.size() > 8192)
+    throw Error(errorCode, "Credentials have an invalid length.");
   for (unsigned char c : token)
     if (c < 0x21 || c > 0x7e)
       throw Error(errorCode, "Credentials must contain visible ASCII only.");
@@ -142,7 +142,8 @@ QString packageDirectoryRelease(const QString &path) {
 }
 
 Config validatedConfiguration(Json value, const QString &path) {
-  Config c{std::move(value), QFileInfo(path).absolutePath().toStdString()};
+  Config c{std::move(value), QFileInfo(path).absolutePath().toStdString(),
+           QFileInfo(path).absoluteFilePath().toStdString()};
   if (const auto problem = violation(readSchema("runtime"), c.value))
     throw Error("invalid_configuration", "Runtime configuration does not match its schema " + *problem + ".");
   const auto deployment = packageDirectoryRelease(path);
@@ -162,6 +163,7 @@ Config validatedConfiguration(Json value, const QString &path) {
   if (c.value["business"]["host"] == c.value["control"]["host"] &&
       c.value["business"]["port"] == c.value["control"]["port"])
     throw Error("invalid_configuration", "Business and control listeners need distinct ports.");
+  (void)businessMcpUrl(c.value.at("business"));
   return c;
 }
 
@@ -231,21 +233,6 @@ std::set<int> installedListenerPorts(const QString &configPath) {
   return ports;
 }
 
-#ifndef _WIN32
-void replaceRuntimeConfiguration(const QString &path, const QByteArray &contents, const struct stat &metadata) {
-  QSaveFile file(path);
-  if (!file.open(QIODevice::WriteOnly))
-    throw Error("invalid_configuration", "Cannot open runtime configuration for atomic update.");
-  const int handle = file.handle();
-  struct stat temporary{};
-  if (handle < 0 || ::fstat(handle, &temporary) != 0 ||
-      ((temporary.st_uid != metadata.st_uid || temporary.st_gid != metadata.st_gid) &&
-       ::fchown(handle, metadata.st_uid, metadata.st_gid) != 0) ||
-      ::fchmod(handle, metadata.st_mode & 0777) != 0 || file.write(contents) != contents.size() ||
-      !file.commit())
-    throw Error("invalid_configuration", "Cannot update runtime configuration with its original permissions.");
-}
-#endif
 } // namespace
 const Json &readSchema(const std::string &name) {
   const auto path = resource(name + ".schema.json");
@@ -309,7 +296,8 @@ void assignAvailableListenerPorts(Json &configuration, const QString &configPath
   };
   setListener("business", business);
   setListener("control", control);
-  configuration["admin"]["port"] = reserve(admin, AdminConfig{}.port);
+  configuration["admin"]["port"] =
+      reserve(admin, configuration.value("admin", Json::object()).value("port", AdminConfig{}.port));
 }
 
 void initializeConfiguration(const std::string &destination, bool selectAvailablePorts,
@@ -403,53 +391,41 @@ Config Config::load(const std::string &path) {
   return validatedConfiguration(readJson(filename), filename);
 }
 
-void setClientToken(const std::string &path, const std::string &id, const QByteArray &token) {
-  static const QRegularExpression clientId("\\A[A-Za-z0-9_.-]{1,64}\\z");
-  if (!clientId.match(QString::fromStdString(id)).hasMatch())
-    throw Error("invalid_argument", "Invalid client ID.");
-  validateCredential(token, true, "invalid_argument");
-  const QFileInfo requested(QString::fromStdString(path));
-  const auto parent = QFileInfo(requested.absolutePath()).canonicalFilePath();
-  if (parent.isEmpty())
-    throw Error("invalid_configuration", "Cannot find runtime configuration directory.");
-  const auto filename = QDir(parent).filePath(requested.fileName());
-  QLockFile lock(filename + ".clients.lock");
-  if (!lock.tryLock(5000))
-    throw Error("invalid_configuration", "Cannot lock runtime configuration for credential update.");
-  const QFileInfo current(filename);
-  if (!current.isFile() || current.isSymLink())
-    throw Error("invalid_configuration", "Runtime configuration must be an existing regular file.");
-#ifndef _WIN32
-  struct stat metadata{};
-  const auto native = QFile::encodeName(filename);
-  if (::lstat(native.constData(), &metadata) != 0 || !S_ISREG(metadata.st_mode) || metadata.st_nlink != 1)
-    throw Error("invalid_configuration", "Runtime configuration must be a regular file without hard links.");
-#endif
-
-  auto value = readJson(filename);
-  const auto clients = value.find("clients");
-  if (clients == value.end() || !clients->is_array())
-    throw Error("invalid_configuration", "Runtime configuration must contain a clients array.");
-  const auto hash = QCryptographicHash::hash(token, QCryptographicHash::Sha256);
-  auto entry = Json{{"id", id}, {"token_sha256", hash.toHex().toStdString()}};
-  const auto found = std::find_if(clients->begin(), clients->end(), [&](const auto &client) {
-    return client.is_object() && client.contains("id") && client["id"] == id;
-  });
-  if (found != clients->end())
-    *found = std::move(entry);
-  else
-    clients->push_back(std::move(entry));
-  const auto candidate = validatedConfiguration(std::move(value), filename);
-  (void)candidate.clients();
-  const auto contents = QByteArray::fromStdString(candidate.value.dump(2) + '\n');
-  if (contents.size() > 1024 * 1024)
-    throw Error("invalid_configuration", "Updated runtime configuration exceeds its size limit.");
-#ifdef _WIN32
-  replaceWindowsRuntimeConfiguration(filename, contents);
-#else
-  replaceRuntimeConfiguration(filename, contents, metadata);
-#endif
+std::string businessMcpUrl(const Json &business, int boundPort) {
+  if (const auto setting = business.find("public_url"); setting != business.end()) {
+    const auto &raw = setting->get_ref<const std::string &>();
+    const QUrl url(QString::fromStdString(raw), QUrl::StrictMode);
+    const auto separator = raw.find("://");
+    const auto path = separator == std::string::npos ? std::string::npos : raw.find('/', separator + 3);
+    const auto host = url.host();
+    QHostAddress address;
+    bool validHost = !host.isEmpty() && !host.contains('%');
+    if (validHost && !address.setAddress(host)) {
+      auto dns = QString::fromLatin1(QUrl::toAce(host));
+      if (dns.endsWith('.'))
+        dns.chop(1);
+      static const QRegularExpression label("\\A[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\z");
+      validHost = !dns.isEmpty() && dns.size() <= 253;
+      for (const auto &part : dns.split('.'))
+        validHost = validHost && label.match(part).hasMatch();
+    }
+    if (!url.isValid() || url.scheme() != "https" || !validHost ||
+        raw.find('@') != std::string::npos ||
+        url.authority(QUrl::FullyEncoded).contains('@') || url.authority(QUrl::FullyEncoded).endsWith(':') ||
+        url.hasQuery() || url.hasFragment() || url.port(443) < 1 || url.port(443) > 65535 ||
+        path == std::string::npos || raw.substr(path) != "/mcp" ||
+        std::any_of(raw.begin(), raw.end(), [](unsigned char ch) { return ch <= 0x20 || ch == 0x7f; }))
+      throw Error("invalid_configuration", "Business public_url must be an HTTPS endpoint ending exactly in /mcp.");
+    return url.toEncoded(QUrl::FullyEncoded).toStdString();
+  }
+  const auto host = business.at("host").get<std::string>();
+  const auto port = boundPort >= 0 ? boundPort : business.at("port").get<int>();
+  if (port < 1 || port > 65535)
+    throw Error("invalid_configuration", "Cannot describe an unbound business endpoint.");
+  return std::string(business.contains("tls") ? "https://" : "http://") +
+         (host.find(':') == std::string::npos ? host : "[" + host + "]") + ":" + std::to_string(port) + "/mcp";
 }
+
 std::string Config::path(const std::string &value) const {
   if (value.empty())
     return {};
@@ -457,7 +433,7 @@ std::string Config::path(const std::string &value) const {
       .absoluteFilePath()
       .toStdString();
 }
-std::string Config::secret(const Json &source, bool required) const {
+std::string Config::secret(const Json &source, bool required, int minimumLength) const {
   QByteArray token;
   const bool configured = source.contains("token_env") || source.contains("token_file");
   if (source.contains("token_env"))
@@ -482,7 +458,7 @@ std::string Config::secret(const Json &source, bool required) const {
   }
   if (configured && token.isEmpty())
     throw Error("invalid_configuration", "Configured credentials must be present.");
-  validateCredential(token, required, "invalid_configuration");
+  validateCredential(token, required, "invalid_configuration", minimumLength);
   return token.toStdString();
 }
 std::vector<ClientIdentity> Config::clients() const {
@@ -493,13 +469,14 @@ std::vector<ClientIdentity> Config::clients() const {
     const auto id = c["id"].get<std::string>();
     const auto hash = c.contains("token_sha256")
                           ? QByteArray::fromHex(QByteArray::fromStdString(c["token_sha256"].get<std::string>()))
-                          : QCryptographicHash::hash(QByteArray::fromStdString(secret(c, true)),
+                          : QCryptographicHash::hash(QByteArray::fromStdString(secret(c, true, 1)),
                                                      QCryptographicHash::Sha256);
     if (hash.size() != 32)
       throw Error("invalid_configuration", "Invalid client credential digest.");
     if (!ids.insert(id).second || !hashes.insert(hash).second)
       throw Error("invalid_configuration", "Client identities and credentials must be unique.");
-    result.push_back({id, hash});
+    const auto generation = c.value("generation", std::string{});
+    result.push_back({id, hash, generation.empty() ? id : id + ":" + generation});
   }
   return result;
 }
@@ -511,6 +488,9 @@ std::string authenticate(const std::vector<ClientIdentity> &clients, const std::
   credential.remove_prefix(7);
   while (!credential.empty() && credential.front() == ' ')
     credential.remove_prefix(1);
+  if (credential.empty() || credential.size() > 8192 ||
+      std::any_of(credential.begin(), credential.end(), [](unsigned char ch) { return ch < 0x21 || ch > 0x7e; }))
+    throw Error("unauthorized", "A valid bearer credential is required.", 401);
   const QByteArrayView bytes(credential.data(), qsizetype(credential.size()));
   const auto supplied = QCryptographicHash::hash(bytes, QCryptographicHash::Sha256);
   std::string identity;
@@ -519,7 +499,7 @@ std::string authenticate(const std::vector<ClientIdentity> &clients, const std::
     for (qsizetype i = 0; i < supplied.size(); ++i)
       diff |= static_cast<unsigned char>(supplied[i] ^ c.tokenHash[i]);
     if (diff == 0)
-      identity = c.id;
+      identity = c.principal.empty() ? c.id : c.principal;
   }
   if (identity.empty())
     throw Error("unauthorized", "A valid bearer credential is required.", 401);

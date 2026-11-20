@@ -139,7 +139,11 @@ class Installation:
         return self.tokens[0].read_text(encoding="ascii").strip()
 
     def snapshots(self):
-        return {path: sha(path) for path in (self.config, *self.tokens)}
+        paths = [self.config, *self.tokens]
+        registry = self.state / "client-registry.json"
+        if registry.is_file():
+            paths.append(registry)
+        return {path: sha(path) for path in paths}
 
     def check_ports(self):
         runtime = self.read_config()
@@ -325,7 +329,7 @@ def verify_mcp(port, token):
 
 def check_token_rotation(installation, passed):
     port = installation.read_config()["business"]["port"]
-    token_files = {path: sha(path) for path in installation.tokens}
+    unchanged_files = installation.snapshots()
     client = "deb-acceptance"
     args = [installation.exe, "--ConfigPath", installation.config, "--ClientId", client]
     # Credential output is captured here and is intentionally excluded from run() diagnostics.
@@ -334,6 +338,7 @@ def check_token_rotation(installation, passed):
     token = generated.stdout.strip()
     require(generated.returncode == 0 and re.fullmatch(r"[a-f0-9]{64}", token) and token not in generated.stderr,
             "Installed CLI did not generate a client credential")
+    check_registry_ownership(installation)
     require(mcp_request(port, token, INITIALIZE)[0] == 401, "Generated token became active without restart")
     run("systemctl", "restart", installation.unit)
     health(installation)
@@ -344,20 +349,134 @@ def check_token_rotation(installation, passed):
                              text=True, encoding="utf-8", env=ENV, timeout=10)
     require(rotated.returncode == 0 and not rotated.stdout and replacement not in rotated.stderr,
             "Installed CLI did not rotate its client credential safely")
+    check_registry_ownership(installation)
     require(mcp_request(port, replacement, INITIALIZE)[0] == 401, "Rotated token became active without restart")
     run("systemctl", "restart", installation.unit)
     health(installation)
     require(mcp_request(port, token, INITIALIZE)[0] == 401, "Previous token still works after rotation")
     verify_mcp(port, replacement)
 
-    expected = {"id": client, "token_sha256": hashlib.sha256(replacement.encode("ascii")).hexdigest()}
-    require([entry for entry in installation.read_config()["clients"] if entry["id"] == client] == [expected],
-            "Runtime did not retain just the rotated client digest")
-    raw = installation.config.read_bytes()
+    registry = installation.state / "client-registry.json"
+    raw = registry.read_bytes()
+    entries = [entry for entry in json.loads(raw)["clients"] if entry["id"] == client]
+    require(len(entries) == 1 and entries[0]["token_sha256"] == hashlib.sha256(replacement.encode("ascii")).hexdigest()
+            and re.fullmatch(r"[a-f0-9]{32}", entries[0].get("generation", "")),
+            "The client registry did not retain the rotated digest and identity")
     require(token.encode("ascii") not in raw and replacement.encode("ascii") not in raw,
-            "Runtime exposed a plaintext client credential")
-    preserved(token_files)
+            "The client registry exposed a plaintext client credential")
+    preserved(unchanged_files)
     passed("client-token-rotation")
+
+
+def check_registry_ownership(installation):
+    registry = installation.state / "client-registry.json"
+    account = pwd.getpwnam(installation.account)
+    info = registry.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600
+            and info.st_uid == account.pw_uid and info.st_gid == account.pw_gid,
+            "The client registry must remain private and owned by the service account")
+
+
+def leave_crashed_cli_lock(installation):
+    """Hold a root CLI transaction on a fixture FIFO, then verify its recoverable lock."""
+    token = installation.tokens[0]
+    backup = token.with_name("client.token.registry-test-backup")
+    lock = installation.state / "client-registry.json.lock"
+    account = pwd.getpwnam(installation.account)
+    require(token.is_file() and not token.is_symlink() and not backup.exists() and not lock.exists(),
+            "The CLI crash fixture requires untouched private installation files")
+    process = None
+    os.replace(token, backup)
+    try:
+        os.mkfifo(token, 0o600)
+        os.chown(token, account.pw_uid, account.pw_gid)
+        # The inherited file credential is resolved inside the locked transaction.
+        # A FIFO with no writer holds that read without a production test hook.
+        process = subprocess.Popen(
+            [str(installation.exe), "--ConfigPath", str(installation.config), "--ClientId", "deb-crash-fixture", "--SetToken"],
+            env=ENV, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        process.stdin.write("crash/" + secrets.token_hex(6) + "\nyes\n")
+        process.stdin.flush()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            require(process.poll() is None, "The CLI crash fixture exited before holding its transaction")
+            if lock.is_file():
+                info = lock.lstat()
+                if info.st_uid == account.pw_uid and info.st_gid == account.pw_gid and stat.S_IMODE(info.st_mode) == 0o600:
+                    break
+            time.sleep(0.02)
+        else:
+            raise RuntimeError("The root CLI lock did not acquire private service-account ownership")
+        process.kill()
+        process.communicate(timeout=5)
+        require(lock.is_file(), "The crash fixture did not retain its transaction lock")
+    finally:
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=5)
+        if token.exists():
+            require(stat.S_ISFIFO(token.lstat().st_mode), "The crash fixture token path changed unexpectedly")
+            token.unlink()
+        os.replace(backup, token)
+
+
+def check_client_registry(installation, passed):
+    """Exercise writes through the actual sandboxed service after root CLI updates."""
+    runtime = installation.read_config()
+    runtime_hash = sha(installation.config)
+    previous_pid = installation.pid()
+    port = runtime["admin"]["port"]
+    origin = f"http://127.0.0.1:{port}"
+    base = "/admin/api/v1"
+
+    def exchange(method, path, body=None, headers=None):
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            connection.request(method, base + path, json.dumps(body) if body is not None else None, headers or {})
+            response = connection.getresponse()
+            data = response.read(MIB + 1)
+            require(len(data) <= MIB, "Installed client administration response exceeded its limit")
+            require(response.status == 200, "Installed client administration rejected the operation")
+            return response.headers, json.loads(data)
+        finally:
+            connection.close()
+
+    login = {"Origin": origin, "Content-Type": "application/json"}
+    headers, session = exchange("POST", "/session",
+                                {"token": installation.tokens[1].read_text(encoding="ascii").strip()}, login)
+    cookie = {"Cookie": headers["Set-Cookie"].split(";", 1)[0]}
+    write = login | cookie | {"X-QCWS-CSRF": session["csrf"]}
+    try:
+        _, view = exchange("GET", "/clients", headers=cookie)
+        require(any(client["id"] == "local" for client in view["clients"]),
+                "The initial local identity is missing from administration")
+        bearer = "web/" + secrets.token_hex(6)
+        _, view = exchange("POST", "/clients", {"revision": view["revision"], "id": "deb-web-acceptance",
+                                                "token": bearer}, write)
+        require(not view["pending_restart"] and bearer not in json.dumps(view),
+                "Web enrollment was pending or disclosed its credential")
+        check_registry_ownership(installation)
+        require(not (installation.state / "client-registry.json.lock").exists(),
+                "The service could not recover a crashed root CLI transaction")
+        business = runtime["business"]["port"]
+        verify_mcp(business, bearer)
+        replacement = "web/" + secrets.token_hex(6)
+        _, view = exchange("PUT", "/clients/deb-web-acceptance",
+                           {"revision": view["revision"], "token": replacement}, write)
+        require(not view["pending_restart"] and mcp_request(business, bearer, INITIALIZE)[0] == 401,
+                "Web rotation did not immediately revoke the previous credential")
+        verify_mcp(business, replacement)
+        _, view = exchange("DELETE", "/clients/deb-web-acceptance", {"revision": view["revision"]}, write)
+        require(not view["pending_restart"] and mcp_request(business, replacement, INITIALIZE)[0] == 401,
+                "Web deletion did not immediately revoke its credential")
+        check_registry_ownership(installation)
+        require(installation.pid() == previous_pid and sha(installation.config) == runtime_hash,
+                "Web client changes restarted the service or rewrote deployment configuration")
+    finally:
+        exchange("DELETE", "/session", {}, write)
+    passed("client-registry-service-writes")
 
 
 def check_isolation(candidate, baselines, passed):
@@ -484,6 +603,8 @@ def main():
         settings = admin_smoke(candidate.exe, candidate.config, ENV, "auto", persist_in=candidate.state)
         passed("admin", provider=settings["provider"])
         check_token_rotation(candidate, passed)
+        leave_crashed_cli_lock(candidate)
+        check_client_registry(candidate, passed)
         if baselines:
             check_isolation(candidate, baselines, passed)
             peers = [(item, item.snapshots(), item.pid()) for item in baselines]

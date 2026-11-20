@@ -213,15 +213,17 @@ Invalid Request 后继续处理请求。如果取消消息刚好在对应请求�
 为此新增的 `settings` 对象包含 `search_enabled`、`open_enabled`、`search_without_asking`、
 `provider`、`provider_ready` 和 `revision`。搜索和网页读取开关同时适用于 REST、MCP HTTP 和 stdio。
 `web_find` 与状态查询始终可用，切换开关后工具列表保持原样。
-QGIS 适配器根据 `search_without_asking` 判断是否在当前会话中请求确认。
+`search_without_asking` 为旧客户端保留。当前 QGIS 插件透明转发 MCP 请求，不读取该字段来增加搜索审批。
 
 <a name="administration"></a>
 
 ## 管理接口
 
-管理界面使用配置的 Origin，路径为 `/settings/`。默认 Origin 为 `http://127.0.0.1:8091`，
+管理界面使用配置的 Origin，路径为 `/settings/`。默认 Origin 为 `http://127.0.0.1:3183`，
 安装版可能使用其部署配置中记录的其他端口。通过该版本的可执行文件运行 `--SettingsUrl`，可获取登录链接。
 管理员令牌和业务监听器使用的客户端 Bearer 凭据彼此独立。
+
+管理页分为“访问授权”“搜索设置”“服务状态”。授权的三步流程依次为填写与生成、保存并生效、复制连接资料。只有第二步提交成功后才进入连接资料复制步骤。该步骤可重复显示和复制本次提交的授权码，原文来自当前页面内存，不由读取接口返回。完成、切换客户端或标签页、刷新或退出登录后清空临时值，之后无法通过管理 API 找回。
 
 | `/admin/api/v1` 下的请求方法与路径 | 鉴权与行为 |
 | --- | --- |
@@ -229,12 +231,23 @@ QGIS 适配器根据 `search_without_asking` 判断是否在当前会话中请�
 | `POST /session` | 发送 `code` 或 `token`，二选一。设置会话 Cookie，并返回 `csrf`。 |
 | `GET /session`、`DELETE /session` | 读取会话的 CSRF 令牌或退出登录。 |
 | `GET /settings`、`PUT /settings` | 读取当前设置，或携带之前读取的修订号提交设置补丁。修订冲突时返回 409。 |
+| `GET /clients` | 返回客户端授权的 `revision`、`clients` 和 `pending_restart`。每个客户端仅包含 `id` 和 `source`。 |
+| `POST /clients` | 发送 `revision`、`id` 和 `token`，添加客户端授权，立即生效。 |
+| `PUT /clients` | 发送 `revision`、`id` 和 `token`，替换已有客户端授权码并保留缓存身份。 |
+| `DELETE /clients` | 发送 `revision` 和 `id`，删除该客户端授权。重新创建同名客户端不会继承旧缓存身份。 |
+| `PUT /clients/{id}`、`DELETE /clients/{id}` | 保留旧客户端兼容接口。ID 来自路径，请求体分别包含 `revision` 和 `token`，或仅包含 `revision`。 |
 | `PUT /providers/{id}/key`、`DELETE /providers/{id}/key` | 保存或删除 `key`。响应通过 `key_set` 表示密钥是否已设置。 |
 | `POST /providers/{id}/test` | 测试所选来源。返回是否成功、实际来源、结果数量、耗时和最多三条示例结果。 |
-| `GET /status` | 返回监听地址、版本、搜索来源冷却状态和设置错误。 |
+| `GET /status` | 返回监听地址、供客户端复制的 `mcp_url`、版本、搜索来源冷却状态和设置错误。 |
 
 管理 API 会校验 Host 和 Origin。登录后的写操作要求提供会话 Cookie、JSON Content-Type 和 `X-QCWS-CSRF`。
 首次登录使用允许的 Origin 和 JSON 请求体，此时尚未签发会话的 CSRF 令牌。
 登录码通过 URL 片段传递，管理界面使用后会清除该片段。
 
+客户端授权的写操作使用与设置相同的会话和 CSRF 校验，返回更新后的授权列表。列表的 `source` 为 `manual`、`file` 或 `environment`，不会返回原始令牌、令牌摘要或私有来源路径。手动授权码是 1 至 8192 个可见 ASCII 字符，客户端 ID 是 1 至 64 个英文字母、数字、点、下划线或连字符。修订不匹配时返回 409，避免覆盖并发修改。`pending_restart` 表示磁盘授权尚未加载，读取最新修订后再通过网页保存，会将该完整授权列表立即应用，包括先前 CLI 写入的变更，并清除此标记。网页成功响应表示持久化和运行时授权均已更新。
+
+新的客户端应使用请求体传递 `id` 的 `/clients` 接口，包括合法 ID `.` 和 `..`。浏览器会归一化 URL 中的点路径段，因此不能通过旧路径接口可靠地管理这两个 ID。
+
 请求与响应的 JSON Schema 及错误码见 [contracts/admin/v1](../contracts/admin/v1)。
+
+`mcp_url` 优先使用部署者在运行配置中明确设置的 `business.public_url`。该字段必须是 HTTPS 地址，路径恰为 `/mcp`，不能包含用户信息、查询或片段。未设置时返回实际业务监听器的 HTTP 或 HTTPS 地址，包括绑定端口和 IPv6 方括号。该值只是连接地址元数据，不会根据 Host 白名单推断公网地址，也不会进行网络探测或改变授权、Host 和 Origin 校验。

@@ -2,19 +2,22 @@
   "schema_version": 1,
   "business": {
     "host": "127.0.0.1",
-    "port": 8088,
+    "port": 3181,
     "allowed_hosts": [
-      "127.0.0.1:8088"
+      "127.0.0.1:3181"
     ],
     "origins": []
   },
   "control": {
     "host": "127.0.0.1",
-    "port": 8089,
+    "port": 3182,
     "allowed_hosts": [
-      "127.0.0.1:8089"
+      "127.0.0.1:3182"
     ],
     "origins": []
+  },
+  "admin": {
+    "port": 3183
   },
   "clients": [
     {

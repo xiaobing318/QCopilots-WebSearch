@@ -1453,6 +1453,19 @@ void mcpContractTests() {
     REQUIRE(authenticate(clients, scheme + secret) == "case");
   for (const auto &bad : {"Bearer" + secret, "Basic " + secret, "Bearer " + secret + "x", std::string("Bearer ")})
     error("unauthorized", [&] { authenticate(clients, bad); });
+  for (const auto &custom : {std::string("a"), std::string("xbyang/qcopilots-websearch"), std::string(8192, 't')}) {
+    const std::vector<ClientIdentity> customClients{
+        {"custom", QCryptographicHash::hash(QByteArray::fromStdString(custom), QCryptographicHash::Sha256)}};
+    REQUIRE(authenticate(customClients, "Bearer " + custom) == "custom");
+    REQUIRE(authenticate(customClients, "BEARER  " + custom) == "custom");
+  }
+  // Even an operator-supplied digest cannot make an invalid raw credential valid.
+  for (const auto &invalid : {std::string(8193, 't'), std::string("x y"), std::string("x\ty"),
+                              std::string("x\0y", 3), std::string("x\x7f")}) {
+    const std::vector<ClientIdentity> invalidClients{
+        {"invalid", QCryptographicHash::hash(QByteArray::fromStdString(invalid), QCryptographicHash::Sha256)}};
+    error("unauthorized", [&] { authenticate(invalidClients, "Bearer " + invalid); });
+  }
 }
 void httpTests() {
   qputenv("QCWS_TEST_CREDENTIAL", QByteArray(64, 'a'));

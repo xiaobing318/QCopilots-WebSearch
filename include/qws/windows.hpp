@@ -14,7 +14,7 @@ void writeWindowsPrivateFile(const QString &path, const QByteArray &contents);
 void replaceWindowsRuntimeConfiguration(const QString &path, const QByteArray &contents);
 QByteArray readWindowsAdminCredential(const QString &path);
 void writeWindowsAdminCredential(const QString &path, const QByteArray &contents);
-QByteArray readWindowsServicePrivateFile(const QString &path);
+QByteArray readWindowsServicePrivateFile(const QString &path, qint64 maximumBytes = 128 * 1024);
 void writeWindowsServicePrivateFile(const QString &path, const QByteArray &contents);
 int readWindowsInstalledAdminPort(const QString &stateDirectory);
 void publishWindowsInstalledAdminPort(const QString &stateDirectory, int port);

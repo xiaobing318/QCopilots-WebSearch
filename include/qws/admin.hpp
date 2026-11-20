@@ -2,11 +2,12 @@
 #include <qws/service.hpp>
 
 namespace qws {
+class ClientRegistry;
 class AdminServer {
 public:
-  AdminServer(Service &, const Config &);
+  AdminServer(Service &, const Config &, ClientRegistry &);
   ~AdminServer();
-  void start();
+  void start(int businessPort);
   void stop();
 
 private:

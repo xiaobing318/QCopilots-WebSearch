@@ -12,6 +12,28 @@ int main(int argc, char **argv) {
     QTemporaryDir temporary;
     require(temporary.isValid(), "Temporary directory required.");
     qws::Config config{qws::defaultConfiguration(), temporary.path().toStdString()};
+    auto endpoint = config.value.at("business");
+    require(qws::businessMcpUrl(endpoint) == "http://127.0.0.1:3181/mcp",
+            "An unconfigured public endpoint must describe the local business listener.");
+    endpoint["host"] = "::1";
+    endpoint["port"] = 0;
+    require(qws::businessMcpUrl(endpoint, 53181) == "http://[::1]:53181/mcp",
+            "MCP metadata must bracket IPv6 and use the actual bound port.");
+    endpoint["tls"] = qws::Json::object();
+    require(qws::businessMcpUrl(endpoint, 53181) == "https://[::1]:53181/mcp",
+            "Local MCP metadata must reflect business TLS.");
+    endpoint["public_url"] = "https://search.example.test:8443/mcp";
+    require(qws::businessMcpUrl(endpoint, 53181) == "https://search.example.test:8443/mcp",
+            "An explicit deployment URL must take precedence over the local listener.");
+    require(qws::adminConfiguration(config, false).port == 3183,
+            "New configurations must explicitly select administration port 3183.");
+    auto legacy = config;
+    legacy.value.erase("admin");
+    require(qws::adminConfiguration(legacy, false).port == 8091,
+            "Legacy configurations without administration options retain port 8091.");
+    legacy.value["admin"] = {{"port", 8123}};
+    require(qws::adminConfiguration(legacy, false).port == 8123,
+            "An existing explicit administration port must be preserved.");
     qws::SettingsStore fresh(config);
     auto initial = fresh.current();
     require(fresh.provider(*initial).id == "auto", "New installs default to auto.");

@@ -4,7 +4,7 @@
 
 QCopilots-WebSearch is an Apache-2.0 C++20 and Qt 6.12 service for web search, page reading and literal text search. It ships a settings page in English and Simplified Chinese and supports Windows 11 and Ubuntu 26.04 on amd64.
 
-Search works without an API key through DuckDuckGo HTML, DuckDuckGo Lite and Bing fallback. In Settings, choose a private SearXNG instance or supply an API key for Brave, Tavily, Exa, Perplexity or DeepSeek. Availability and rate limits depend on the selected source.
+Search works without an API key through DuckDuckGo HTML, DuckDuckGo Lite and Bing fallback. In **Search settings**, choose a private SearXNG instance or supply an API key for Brave, Tavily, Exa, Perplexity or DeepSeek. Availability and rate limits depend on the selected source.
 
 ## Install and open Settings
 
@@ -25,16 +25,22 @@ To start the portable Windows service, run this from the extracted directory.
 .\bin\qcopilots-websearch.exe
 ```
 
-The first launch initializes `bin/data/runtime.json`. Run the Settings command
-from a separate terminal while the portable service runs.
+The first launch initializes `bin/data/runtime.json` and prints the actual
+business, control and Settings addresses, the configuration path and how to
+sign in. New portable instances use fixed ports 3181, 3182 and 3183 respectively
+and fail to start if any is occupied. Existing instances keep their recorded
+ports. Run the Settings command from a separate
+terminal while the portable service runs.
 
 The Settings command prints a one-time link. Open it within two minutes, or append `--Open` to launch the browser. You can also open `/settings/` on the instance's admin listener and sign in with its `admin.token`.
 
 Use the business listener's `/v1` REST routes or `/mcp` with a client Bearer token. Health and metrics use the control listener. Process-based MCP clients can use `--Stdio --ConfigPath FILE`. [Deployment and QGIS setup](docs/deployment.md)
 
-Remote MCP clients connect over HTTPS at `https://<public-host>/mcp` with a Bearer token. Configure the token with `--ConfigPath FILE --GenerateToken` or `--ConfigPath FILE --SetToken`. [Client token management](docs/deployment.md#manage-client-tokens) · [Remote client configuration](docs/deployment.md#connect-remote-clients)
+The management page has **Access authorization**, **Search settings** and **Service status** tabs. In Access authorization, the client list is on the left and the selected client's details are on the right. Add a client or replace its code in three steps: fill in or generate a code, review and choose **Save and activate**, then copy the active Bearer and server URL. Saving takes effect immediately and survives restart. QCopilots uses the Bearer with its existing registered server URL.
 
-When Cloudflare Tunnel and WebSearch run on the same Windows host, point the tunnel to the local business listener, typically `http://127.0.0.1:8088`. QGIS uses the public HTTPS origin and appends its REST paths. [Windows Tunnel quick setup](docs/deployment.md#windows-cloudflare-tunnel)
+You can enter a code containing `/`, generate a random token, or choose **Generate from text**. Text generation produces 64 lowercase hexadecimal characters from SHA-256 of the exact UTF-8 text without trimming spaces or changing case. The source text stays in the page and is cleared after generation. After saving, you can copy the code repeatedly while the connection-details step remains open. The code is held only in page memory and cleared when you finish, switch client or tab, refresh, or sign out. It cannot then be retrieved from the saved client list. [Client token management](docs/deployment.md#manage-client-tokens)
+
+When Cloudflare Tunnel and WebSearch run on the same Windows host, point the tunnel to the local business listener, normally `http://127.0.0.1:3181`. On QCopilots' MCP Servers page, keep the Web Search server's registered URL, enable Authorization and enter the client Bearer token. The plugin relays MCP to `https://web-search.vastarmorai.com/mcp` without a separate backend configuration file or authorization prompt. Other MCP clients connect directly to that public `/mcp` endpoint. [Windows Tunnel quick setup](docs/deployment.md#windows-cloudflare-tunnel) · [QGIS setup](docs/deployment.md#qgis)
 
 ## MCP tools
 
@@ -45,7 +51,7 @@ When Cloudflare Tunnel and WebSearch run on the same Windows host, point the tun
 | `web_find` | Finds literal text in a stored page |
 | `web_search_status` | Reads the current tool settings and last known provider state |
 
-Use Settings to enable search and page opening independently. When “Search without asking” is off, the QGIS adapter asks once per QGIS session before a search or new URL open. Direct REST and MCP clients manage their own confirmation. The [versioned API](docs/api.md) defines cache behavior, provenance and errors.
+Use **Search settings** to enable search and page opening independently. QGIS relays tool calls without adding a search confirmation step. The compatibility setting `search_without_asking` does not change that behavior. **Service status** shows the service version, listening addresses and provider availability. Service health describes process readiness separately from search-provider availability. The [versioned API](docs/api.md) defines cache behavior, provenance and errors.
 
 ## Build and test
 
@@ -59,7 +65,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/BuildPipeline.ps
 bash scripts/BuildPipeline.sh --Profile ubuntu-x64 --Stages bootstrap,doctor,configure,build,test,install
 ```
 
-Use `--ConfigPath` with a private `*.local.json` derived from `config/BuildPipeline.json`. Add `publish` to create local packages. Windows MSI packaging requires WiX 7.0.1 and .NET 10. GitHub Actions builds on Windows Server 2025 and Ubuntu 26.04. A version tag runs release acceptance and publishes the tested packages with checksums, matching Qt source and provenance. [Build instructions](docs/build.md) · [Release workflow](docs/release.md)
+Use `--ConfigPath` with a private `*.local.json` derived from `config/BuildPipeline.json`. Add `publish` to create local packages. Windows MSI packaging requires WiX 7.0.1 and .NET 10. GitHub Actions builds on Windows Server 2025 and Ubuntu 26.04. Test the feature branch's Actions package before merging. A version tag can publish only after the same commit belongs to main and its main push CI succeeds. Release acceptance then publishes tested packages with checksums, matching Qt source and provenance. [Build instructions](docs/build.md) · [Release workflow](docs/release.md)
 
 ## Repository layout
 

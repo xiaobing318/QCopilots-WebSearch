@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { type KeyboardEvent, useEffect, useId, useRef, useState } from "react";
 import {
   admin,
   ApiError,
@@ -12,17 +12,56 @@ import {
 } from "./admin";
 import { errorLabel, providerName, type Text } from "./labels";
 import { ProviderOptions } from "./ProviderOptions";
+import { ClientTokens } from "./ClientTokens";
 
 type Notice = { key: string; variant: "error" | "success" };
-type Props = { csrf: string; t: Text; onExpired: () => void };
+type Props = {
+  csrf: string;
+  t: Text;
+  onExpired: () => void;
+  onBusyChange?: (busy: boolean) => void;
+  disabled?: boolean;
+};
+const tabs = ["authorization", "search", "status"] as const;
+type Tab = (typeof tabs)[number];
 
-export function SettingsPage({ csrf, t, onExpired }: Props) {
+export function SettingsPage({
+  csrf,
+  t,
+  onExpired,
+  onBusyChange,
+  disabled = false,
+}: Props) {
   const [settings, setSettings] = useState<SettingsView>();
   const [status, setStatus] = useState<ServiceStatus>();
   const [statusError, setStatusError] = useState<string>();
   const [notice, setNotice] = useState<Notice>();
   const [busy, setBusy] = useState<"change" | "test" | "status">();
   const [result, setResult] = useState<ProviderResult>();
+  const [activeTab, setActiveTab] = useState<Tab>("authorization");
+  const [clientBusy, setClientBusy] = useState(false);
+  const tabButtons = useRef<(HTMLButtonElement | null)[]>([]);
+  const tabId = useId();
+  const locked = disabled || Boolean(busy) || clientBusy;
+
+  useEffect(() => {
+    onBusyChange?.(Boolean(busy) || clientBusy);
+    return () => onBusyChange?.(false);
+  }, [busy, clientBusy, onBusyChange]);
+
+  function moveTab(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    if (locked) return;
+    let next: number;
+    if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
+    else if (event.key === "ArrowLeft")
+      next = (index + tabs.length - 1) % tabs.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = tabs.length - 1;
+    else return;
+    event.preventDefault();
+    setActiveTab(tabs[next]);
+    tabButtons.current[next]?.focus();
+  }
 
   useEffect(() => {
     const abort = new AbortController();
@@ -55,7 +94,7 @@ export function SettingsPage({ csrf, t, onExpired }: Props) {
     action: NonNullable<typeof busy>,
     task: () => Promise<void>,
   ) {
-    if (busy) return;
+    if (locked) return;
     setNotice(undefined);
     setBusy(action);
     try {
@@ -134,94 +173,137 @@ export function SettingsPage({ csrf, t, onExpired }: Props) {
 
   return (
     <>
-      <div className="intro">
-        <h1>{t("settingsTitle")}</h1>
-        <p>{t("settingsDescription")}</p>
+      <div
+        className="settings-tabs"
+        role="tablist"
+        aria-label={t("settingsNavigation")}
+      >
+        {tabs.map((tab, index) => (
+          <button
+            key={tab}
+            type="button"
+            role="tab"
+            id={tabId + "-tab-" + tab}
+            aria-controls={tabId + "-panel-" + tab}
+            aria-selected={activeTab === tab}
+            tabIndex={activeTab === tab ? 0 : -1}
+            disabled={locked}
+            ref={(button) => {
+              tabButtons.current[index] = button;
+            }}
+            onKeyDown={(event) => moveTab(event, index)}
+            onClick={() => setActiveTab(tab)}
+          >
+            {t("tab." + tab)}
+          </button>
+        ))}
       </div>
-      {notice && (
-        <p
-          className={"message " + notice.variant}
-          role={notice.variant === "error" ? "alert" : "status"}
-        >
-          {t(notice.key)}
-        </p>
-      )}
-      {settings ? (
-        <>
-          <section className="panel" aria-labelledby="network-heading">
-            <div className="panel-heading">
-              <h2 id="network-heading">{t("networkAccess")}</h2>
+      <div
+        role="tabpanel"
+        id={tabId + "-panel-" + activeTab}
+        aria-labelledby={tabId + "-tab-" + activeTab}
+      >
+        <div className="intro">
+          <h1>{t("tab." + activeTab)}</h1>
+          <p>{t("tabDescription." + activeTab)}</p>
+        </div>
+        {notice && activeTab !== "authorization" && (
+          <p
+            className={"message " + notice.variant}
+            role={notice.variant === "error" ? "alert" : "status"}
+          >
+            {t(notice.key)}
+          </p>
+        )}
+        {activeTab === "authorization" && (
+          <ClientTokens
+            csrf={csrf}
+            t={t}
+            onExpired={onExpired}
+            mcpUrl={status?.mcp_url}
+            onBusyChange={setClientBusy}
+            disabled={disabled}
+          />
+        )}
+        {activeTab === "search" &&
+          (settings ? (
+            <div className="settings-sections">
+              <section className="panel" aria-labelledby="network-heading">
+                <div className="panel-heading">
+                  <h2 id="network-heading">{t("networkAccess")}</h2>
+                </div>
+                <Toggle
+                  label={t("openToggle")}
+                  description={t("openDescription")}
+                  active={settings.tools.open.enabled}
+                  disabled={locked}
+                  onChange={(enabled) =>
+                    update({ tools: { open: { enabled } } })
+                  }
+                />
+                <Toggle
+                  label={t("searchToggle")}
+                  description={t("searchDescription")}
+                  active={settings.tools.search.enabled}
+                  disabled={locked}
+                  onChange={(enabled) =>
+                    update({ tools: { search: { enabled } } })
+                  }
+                />
+              </section>
+              <section className="panel" aria-labelledby="search-heading">
+                <div className="panel-heading">
+                  <h2 id="search-heading">{t("webSearch")}</h2>
+                </div>
+                <ProviderOptions
+                  settings={settings}
+                  busy={locked}
+                  testing={busy === "test"}
+                  result={result}
+                  onProvider={(provider) => update({ search: { provider } })}
+                  onSearxng={(searxng) => update({ search: { searxng } })}
+                  onKey={saveKey}
+                  onRemoveKey={removeKey}
+                  onTest={testProvider}
+                  onInvalidEngines={() =>
+                    setNotice({ key: "invalidEngines", variant: "error" })
+                  }
+                  t={t}
+                />
+              </section>
             </div>
-            <Toggle
-              label={t("openToggle")}
-              description={t("openDescription")}
-              active={settings.tools.open.enabled}
-              disabled={Boolean(busy)}
-              onChange={(enabled) => update({ tools: { open: { enabled } } })}
-            />
-            <Toggle
-              label={t("searchToggle")}
-              description={t("searchDescription")}
-              active={settings.tools.search.enabled}
-              disabled={Boolean(busy)}
-              onChange={(enabled) => update({ tools: { search: { enabled } } })}
-            />
-          </section>
-          <section className="panel" aria-labelledby="search-heading">
-            <div className="panel-heading">
-              <h2 id="search-heading">{t("webSearch")}</h2>
+          ) : (
+            <div className="loading">
+              {notice ? (
+                <button
+                  type="button"
+                  className="button secondary"
+                  disabled={locked}
+                  onClick={() =>
+                    void perform("change", async () =>
+                      setSettings(await admin.settings()),
+                    )
+                  }
+                >
+                  {t("retry")}
+                </button>
+              ) : (
+                <p role="status">{t("loading")}</p>
+              )}
             </div>
-            <ProviderOptions
-              settings={settings}
-              busy={Boolean(busy)}
-              testing={busy === "test"}
-              result={result}
-              onProvider={(provider) => update({ search: { provider } })}
-              onSearxng={(searxng) => update({ search: { searxng } })}
-              onKey={saveKey}
-              onRemoveKey={removeKey}
-              onTest={testProvider}
-              onInvalidEngines={() =>
-                setNotice({ key: "invalidEngines", variant: "error" })
-              }
+          ))}
+        {activeTab === "status" && (
+          <div className="settings-sections">
+            <StatusPanel
+              status={status}
+              error={statusError}
+              busy={locked}
+              refresh={() => void perform("status", refreshStatus)}
               t={t}
             />
-            <Toggle
-              label={t("askToggle")}
-              description={t("askDescription")}
-              active={settings.search_without_asking}
-              disabled={Boolean(busy)}
-              onChange={(value) => update({ search_without_asking: value })}
-            />
-          </section>
-          <StatusPanel
-            status={status}
-            error={statusError}
-            busy={Boolean(busy)}
-            refresh={() => void perform("status", refreshStatus)}
-            t={t}
-          />
-        </>
-      ) : (
-        <div className="loading">
-          {notice ? (
-            <button
-              type="button"
-              className="button secondary"
-              disabled={Boolean(busy)}
-              onClick={() =>
-                void perform("change", async () =>
-                  setSettings(await admin.settings()),
-                )
-              }
-            >
-              {t("retry")}
-            </button>
-          ) : (
-            <p role="status">{t("loading")}</p>
-          )}
-        </div>
-      )}
+          </div>
+        )}
+      </div>
     </>
   );
 }
@@ -301,6 +383,12 @@ function StatusPanel({
               <dt>{t("statusVersion")}</dt>
               <dd>{status.version}</dd>
             </div>
+            {status.mcp_url && (
+              <div>
+                <dt>{t("clientMcpUrl")}</dt>
+                <dd>{status.mcp_url}</dd>
+              </div>
+            )}
             {(Object.keys(listenerKeys) as Listener[]).map((name) => {
               const { host, port } = status.listeners[name];
               return (

@@ -5,6 +5,7 @@
 #include <QRegularExpression>
 #include <QUuid>
 #include <qws/config.hpp>
+#include <qws/client_registry.hpp>
 #include <qws/settings.hpp>
 #include <qws/windows.hpp>
 #define NOMINMAX
@@ -359,7 +360,7 @@ void checkConfiguration(const QString &path) {
   const auto c = Config::load(path.toStdString());
   if (!c.value.contains("project_version"))
     throw Error("invalid_configuration", "An installed Windows service requires a versioned runtime configuration.");
-  (void)c.clients();
+  (void)ClientRegistry(c);
   checkSettings(c);
 }
 } // namespace
@@ -504,8 +505,8 @@ QByteArray readWindowsAdminCredential(const QString &path) {
 void writeWindowsAdminCredential(const QString &path, const QByteArray &contents) {
   writeProtectedFile(path, contents, FilePolicy::Admin, false);
 }
-QByteArray readWindowsServicePrivateFile(const QString &path) {
-  return readProtectedFile(path, FilePolicy::ServiceState, 128 * 1024);
+QByteArray readWindowsServicePrivateFile(const QString &path, qint64 maximumBytes) {
+  return readProtectedFile(path, FilePolicy::ServiceState, maximumBytes);
 }
 void writeWindowsServicePrivateFile(const QString &path, const QByteArray &contents) {
   writeProtectedFile(path, contents, FilePolicy::ServiceState, true);

@@ -101,6 +101,19 @@ class Fixture:
     def config(self):
         return json.loads(self.runtime.read_text(encoding="utf-8"))
 
+    @property
+    def registry(self):
+        directory = Path(self.config().get("settings", {}).get("directory", "state"))
+        if not directory.is_absolute():
+            directory = self.runtime.parent / directory
+        return directory / "client-registry.json"
+
+    def registry_config(self):
+        return json.loads(self.registry.read_text(encoding="utf-8"))
+
+    def write_registry(self, value):
+        self.registry.write_text(json.dumps(value), encoding="utf-8")
+
     def write(self, config):
         self.runtime.write_text(json.dumps(config), encoding="utf-8")
 
@@ -168,35 +181,54 @@ def verify_draft(fixture):
     fixture.env.pop(unset_env, None)
     config["clients"][0] = {"id": "local", "token_env": unset_env}
     fixture.write(config)
+    runtime = fixture.runtime.read_bytes()
     require(fixture.command("--CheckConfig").returncode != 0, "The default token environment variable was unset")
     token = generated_token(fixture.command("--GenerateToken", user_input="y\n"))
-    config["clients"][0] = {"id": "local", "token_sha256": digest(token)}
-    require(fixture.config() == config and fixture.command("--CheckConfig").returncode == 0,
+    clients = [dict(entry) for entry in config["clients"]]
+    clients[0] = {"id": "local", "token_sha256": digest(token)}
+    require(fixture.registry_config() == {"schema_version": 1, "clients": clients} and
+            fixture.runtime.read_bytes() == runtime and fixture.command("--CheckConfig").returncode == 0,
             "Default enrollment failed to replace the unset environment source")
 
-    config["clients"] = []
-    fixture.write(config)
-    original = fixture.runtime.read_bytes()
-    require(fixture.command("--CheckConfig").returncode != 0, "A draft cannot serve with zero clients")
+    fixture.write_registry({"schema_version": 1, "clients": []})
+    original = fixture.registry.read_bytes()
+    require(fixture.command("--CheckConfig").returncode == 0,
+            "An empty authoritative registry should remain valid without reviving runtime clients")
     for answer in ("", "\n", " n \n"):
         result = fixture.command("--GenerateToken", user_input=answer)
         require(result.returncode == 0 and not result.stdout and result.stderr.strip(),
                 "Declining generation must only prompt on stderr")
-        require(fixture.runtime.read_bytes() == original, "Declining generation modified the draft")
+        require(fixture.registry.read_bytes() == original and fixture.runtime.read_bytes() == runtime,
+                "Declining generation modified the registry or runtime")
 
     token = generated_token(fixture.command("--GenerateToken", user_input="\ufeff YeS \n"))
-    config["clients"] = [{"id": "local", "token_sha256": digest(token)}]
-    require(fixture.config() == config, "Generation did not provision just the default client's hash")
+    enrolled = fixture.registry_config()
+    require(enrolled["schema_version"] == 1 and len(enrolled["clients"]) == 1,
+            "Generation restored an unrelated runtime client")
+    entry = enrolled["clients"][0]
+    generation = entry.get("generation", "")
+    require(re.fullmatch(r"[a-f0-9]{32}", generation) and
+            entry == {"id": "local", "token_sha256": digest(token), "generation": generation},
+            "Generation did not provision one hash with a new internal identity")
     require(fixture.command("--CheckConfig").returncode == 0, "Provisioned runtime failed validation")
-    committed = fixture.runtime.read_bytes()
+    committed = fixture.registry.read_bytes()
     result = fixture.command("--GenerateToken", "--ClientId", "invalid/client", user_input="yes\n")
-    require(result.returncode != 0 and not result.stdout and fixture.runtime.read_bytes() == committed,
-            "Failed generation published a token or changed the runtime")
+    require(result.returncode != 0 and not result.stdout and fixture.registry.read_bytes() == committed and
+            fixture.runtime.read_bytes() == runtime,
+            "Failed generation published a token or changed persistent configuration")
 
     for invalid in ({"token_sha256": "G" * 64}, {"token_env": "QCWS_TEST_ENROLLMENT_TOKEN"}):
-        fixture.write(config | {"clients": [config["clients"][0] | invalid]})
+        fixture.write_registry(enrolled | {"clients": [entry | invalid]})
         require(fixture.command("--CheckConfig").returncode != 0,
                 "A malformed hash or conflicting credential source passed validation")
+
+    config["clients"][0] = {"id": "local", "token_file": "client.token"}
+    fixture.write(config)
+    fixture.write_registry(enrolled)
+    require(fixture.command("--CheckConfig").returncode == 0, "The corruption fixture must start valid")
+    fixture.registry.write_text("{", encoding="utf-8")
+    require(fixture.command("--CheckConfig").returncode != 0,
+            "A corrupt authoritative registry fell back to runtime credentials")
 
 
 def verify_business(fixture, token):
@@ -262,24 +294,34 @@ def verify_business(fixture, token):
 def verify_rotation(fixture):
     access = runtime_access(fixture.runtime)
     original = fixture.config()
+    runtime = fixture.runtime.read_bytes()
     token = generated_token(fixture.command("--GenerateToken", "--ClientId", "browser", user_input="y\n"))
-    original["clients"].append({"id": "browser", "token_sha256": digest(token)})
-    require(fixture.config() == original, "Named enrollment changed unrelated configuration")
-    snapshot = fixture.runtime.read_bytes()
+    enrolled = fixture.registry_config()
+    browser = next(entry for entry in enrolled["clients"] if entry["id"] == "browser")
+    generation = browser.get("generation", "")
+    require(re.fullmatch(r"[a-f0-9]{32}", generation) and
+            browser == {"id": "browser", "token_sha256": digest(token), "generation": generation},
+            "New enrollment needs a persistent internal identity")
+    require(enrolled == {"schema_version": 1, "clients": original["clients"] + [browser]} and
+            fixture.runtime.read_bytes() == runtime, "Named enrollment changed unrelated configuration")
+    snapshot = fixture.registry.read_bytes()
+    registry_access = runtime_access(fixture.registry)
     require(token.encode("ascii") not in snapshot, "The generated Bearer token was persisted in plaintext")
 
-    replacement = secrets.token_hex(32)
+    replacement = "qcopilots-websearch/xbyang"
     for answer in ("", "\n", "no\n"):
         result = fixture.command("--SetToken", "--ClientId", "browser", user_input=replacement + "\n" + answer)
         require(result.returncode == 0 and not result.stdout and result.stderr.strip() and
                 replacement not in result.stderr, "Declining rotation must only prompt on stderr")
-        require(fixture.runtime.read_bytes() == snapshot, "Declining rotation modified the config")
+        require(fixture.registry.read_bytes() == snapshot and fixture.runtime.read_bytes() == runtime,
+                "Declining rotation modified persistent configuration")
 
-    for invalid in (fixture.environment_token, "too-short", "x" * 31 + " y"):
+    for invalid in (fixture.environment_token, "", "x y", "x\ty", "x\x00y", "授权码", "x" * 8193):
         result = fixture.command("--SetToken", "--ClientId", "browser", user_input=invalid + "\nyes\n")
-        require(result.returncode != 0 and not result.stdout and invalid not in result.stderr,
+        require(result.returncode != 0 and not result.stdout and (not invalid or invalid not in result.stderr),
                 "Invalid or duplicate credentials were accepted or exposed in output")
-        require(fixture.runtime.read_bytes() == snapshot, "An unsuccessful rotation modified the config")
+        require(fixture.registry.read_bytes() == snapshot and fixture.runtime.read_bytes() == runtime,
+                "An unsuccessful rotation modified persistent configuration")
 
     with fixture.running():
         verify_business(fixture, token)
@@ -292,14 +334,27 @@ def verify_rotation(fixture):
                 fixture.public("GET", "/v1/status", replacement)[0] == 401,
                 "Rotation changed active credentials before restart")
 
-    original["clients"][-1]["token_sha256"] = digest(replacement)
-    require(fixture.config() == original, "Rotation changed unrelated configuration")
-    require(replacement.encode("ascii") not in fixture.runtime.read_bytes(), "Rotation persisted a raw token")
+    browser["token_sha256"] = digest(replacement)
+    require(fixture.registry_config() == enrolled and fixture.runtime.read_bytes() == runtime,
+            "Rotation changed unrelated configuration or the client's internal identity")
+    require(replacement.encode("ascii") not in fixture.registry.read_bytes(), "Rotation persisted a raw token")
     require(runtime_access(fixture.runtime) == access, "Rotation changed runtime-file permissions")
+    require(runtime_access(fixture.registry) == registry_access, "Rotation changed registry-file permissions")
     with fixture.running():
         require(fixture.public("GET", "/v1/status", token)[0] == 401 and
                 fixture.public("GET", "/v1/status", replacement)[0] == 200,
                 "Restart did not apply the credential rotation")
+
+    custom_tokens = {"short-one": "a", "short-name": "xbyang", "short-project": "qcopilots-websearch",
+                     "longest": "t" * 8192}
+    for client_id, custom_token in custom_tokens.items():
+        result = fixture.command("--SetToken", "--ClientId", client_id, user_input=custom_token + "\nyes\n")
+        require(result.returncode == 0 and not result.stdout and custom_token not in result.stderr.splitlines(),
+                "A custom credential was rejected or exposed in output")
+    with fixture.running():
+        for custom_token in custom_tokens.values():
+            require(fixture.public("GET", "/v1/status", custom_token)[0] == 200,
+                    "A valid custom credential could not authenticate after restart")
 
 
 def verify_concurrent_enrollment(fixture):
@@ -310,11 +365,19 @@ def verify_concurrent_enrollment(fixture):
         token = generated_token(fixture.command("--GenerateToken", "--ClientId", client, user_input="yes\n"))
         return {"id": client, "token_sha256": digest(token)}
 
-    original = fixture.config()["clients"]
+    original = fixture.registry_config()["clients"]
+    runtime = fixture.runtime.read_bytes()
     with ThreadPoolExecutor(max_workers=2) as pool:
         added = list(pool.map(enroll, ("concurrent-a", "concurrent-b")))
-    actual = fixture.config()["clients"]
-    require(sorted(actual, key=lambda entry: entry["id"]) == sorted(original + added, key=lambda entry: entry["id"]),
+    actual = fixture.registry_config()["clients"]
+    additions = {entry["id"]: entry for entry in actual if entry["id"] in {item["id"] for item in added}}
+    require(len(additions) == len(added) and
+            all(re.fullmatch(r"[a-f0-9]{32}", entry.get("generation", "")) for entry in additions.values()) and
+            len({entry["generation"] for entry in additions.values()}) == len(added),
+            "Concurrent new clients did not receive distinct persistent identities")
+    expected = original + [item | {"generation": additions[item["id"]]["generation"]} for item in added]
+    require(sorted(actual, key=lambda entry: entry["id"]) == sorted(expected, key=lambda entry: entry["id"]) and
+            fixture.runtime.read_bytes() == runtime,
             "Concurrent enrollment lost or replaced a client")
     require(fixture.command("--CheckConfig").returncode == 0, "Concurrent enrollment left an invalid runtime")
 
@@ -352,7 +415,7 @@ def verify_release_config(executable, folder):
     require(command(managed, *options).returncode == 0, "Managed config initialization failed")
     actual = json.loads(managed.read_text(encoding="utf-8"))
     listeners = {actual[role]["port"] for role in ("business", "control", "admin")}
-    known = {value["business"]["port"], value["control"]["port"], 8091}
+    known = {value["business"]["port"], value["control"]["port"], value.get("admin", {}).get("port", 8091)}
     require(len(listeners) == 3 and not (known & listeners), "An idle release's ports were reused")
     require(Path(actual["cache"]["directory"]) == state / "cache" and
             Path(actual["settings"]["directory"]) == state, "Managed state directory is wrong")

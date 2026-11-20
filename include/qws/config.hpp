@@ -13,6 +13,8 @@ const Json &readSchema(const std::string &name);
 const Json &toolCatalog();
 Json defaultConfiguration();
 Json defaultSettings();
+// A supplied port is the actual business port, including internal port-zero binds.
+std::string businessMcpUrl(const Json &business, int boundPort = -1);
 void assignAvailableListenerPorts(Json &configuration, const QString &configPath);
 void initializeConfiguration(const std::string &path, bool selectAvailablePorts = false,
                              const QString &stateDirectory = {});
@@ -22,13 +24,15 @@ void validateSchema(const Json &schema, const Json &value);
 struct ClientIdentity {
   std::string id;
   QByteArray tokenHash;
+  std::string principal = {};
 };
 struct Config {
   Json value;
   std::string baseDirectory;
+  std::string sourcePath = {};
   static Config load(const std::string &path);
   std::string path(const std::string &value) const;
-  std::string secret(const Json &source, bool required) const;
+  std::string secret(const Json &source, bool required, int minimumLength = 32) const;
   std::vector<ClientIdentity> clients() const;
 };
 std::string authenticate(const std::vector<ClientIdentity> &, const std::string &authorization);

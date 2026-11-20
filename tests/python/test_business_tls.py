@@ -7,7 +7,7 @@ import socket
 import ssl
 import tempfile
 
-from test_admin_http import request
+from test_admin_http import read_admin_status, request
 from test_client_tokens import Fixture, HOST, require, verify_business
 from tls_fixture import certificates
 
@@ -49,6 +49,10 @@ def verify(executable, openssl, root):
     trusted = ssl.create_default_context(cafile=str(root / "ca.pem"))
     unrelated = ssl.create_default_context(cafile=str(root / "other-ca.pem"))
     with fixture.running(origin_tls=trusted):
+        admin_token = (root / "admin.token").read_text(encoding="ascii").strip()
+        status = read_admin_status(config["admin"]["port"], admin_token)
+        require(status["mcp_url"] == f"https://127.0.0.1:{fixture.business}/mcp",
+                "TLS administration status advertised a plaintext business endpoint")
         rejected_handshake(fixture.business, unrelated, "127.0.0.1")
         rejected_handshake(fixture.business, trusted, "wrong-name.invalid")
         try:

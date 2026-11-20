@@ -15,6 +15,9 @@ jobs:
   version:
     runs-on: ubuntu-26.04
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -28,6 +31,10 @@ jobs:
           version = re.search(r'^set\(QCWS_VERSION "([0-9]+\.[0-9]+\.[0-9]+)"', Path("CMakeLists.txt").read_text(encoding="utf-8"), re.MULTILINE)
           if version is None or os.environ["GITHUB_REF_NAME"] != f"v{version[1]}":
               raise RuntimeError("The release tag must match QCWS_VERSION in CMakeLists.txt")
+      - name: Require main CI to pass for this exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/release_gate.py
 
   build:
     needs: version

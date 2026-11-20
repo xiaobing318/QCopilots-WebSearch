@@ -2,6 +2,7 @@
 import argparse
 import http.client
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -35,7 +36,23 @@ def request(port, method, path, headers=None, body=None):
         connection.close()
 
 
-def browser(port, executable, runtime, token):
+def read_admin_status(port, token):
+    """Read status through an authenticated administration session."""
+    origin = f"http://127.0.0.1:{port}"
+    headers = {"Origin": origin, "Content-Type": "application/json"}
+    code, response, session = request(port, "POST", "/admin/api/v1/session", headers, {"token": token})
+    assert code == 200
+    cookie = {"Cookie": response["Set-Cookie"].split(";", 1)[0]}
+    try:
+        code, _, status = request(port, "GET", "/admin/api/v1/status", cookie)
+        assert code == 200
+        return status
+    finally:
+        assert request(port, "DELETE", "/admin/api/v1/session",
+                       headers | cookie | {"X-QCWS-CSRF": session["csrf"]})[0] == 200
+
+
+def browser(port, executable, runtime, token, expected_mcp_url):
     origin = f"http://127.0.0.1:{port}"
     base = "/admin/api/v1"
     raw = subprocess.check_output([executable, "--ConfigPath", str(runtime), "--SettingsUrl"],
@@ -79,31 +96,79 @@ def browser(port, executable, runtime, token):
     assert request(port, "DELETE", key_path, write)[2]["providers"]["brave"]["key_set"] is False
     test = request(port, "POST", base + "/providers/brave/test", write, {})
     assert test[0] == 200 and test[2]["error"]["code"] == "provider_not_configured"
-    assert request(port, "GET", base + "/status", cookie)[2]["listeners"]["admin"]["port"] == port
+    status, _, service = request(port, "GET", base + "/status", cookie)
+    assert status == 200 and service["listeners"]["admin"]["port"] == port
+    assert service["mcp_url"] == expected_mcp_url, "Administration status returned the wrong client MCP endpoint"
     assert request(port, "DELETE", base + "/session", write)[0] == 200
     assert request(port, "GET", base + "/settings", cookie)[0] == 401
     assert request(port, "POST", base + "/session", login, {"token": token})[0] == 200
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--Executable", required=True)
-    args = parser.parse_args()
+def verify_public_url_configuration(base, runtime, config):
+    accepted = (
+        "https://search.example.test/mcp",
+        "https://search.example.test:443/mcp",
+        "https://search.example.test:65535/mcp",
+        "https://192.0.2.1:8443/mcp",
+        "https://[2001:db8::1]:8443/mcp",
+    )
+    rejected = (
+        "http://search.example.test/mcp",
+        "https://search.example.test/",
+        "https://search.example.test/mcp/",
+        "https://search.example.test/v1/status",
+        "https://search.example.test/%6Dcp",
+        "https://search.example.test/mc%70",
+        "https://user@search.example.test/mcp",
+        "https://user:password@search.example.test/mcp",
+        "https://@search.example.test/mcp",
+        "https://search.example.test/mcp?query=value",
+        "https://search.example.test/mcp?",
+        "https://search.example.test/mcp#fragment",
+        "https://search.example.test/mcp#",
+        "https:///mcp",
+        "https://search.example.test:0/mcp",
+        "https://search.example.test:65536/mcp",
+        "https://bad_host.example/mcp",
+        "https://-invalid.example/mcp",
+        "https://invalid-.example/mcp",
+        "https://bad..example/mcp",
+        "https://" + "a" * 64 + ".example/mcp",
+    )
+    try:
+        for expected, urls in ((True, accepted), (False, rejected)):
+            for url in urls:
+                candidate = config | {"business": config["business"] | {"public_url": url}}
+                runtime.write_text(json.dumps(candidate), encoding="utf-8")
+                result = subprocess.run([*base, "--CheckConfig"], capture_output=True, text=True, timeout=5)
+                assert (result.returncode == 0) == expected, f"Unexpected public_url validation result: {url}"
+                if not expected:
+                    assert "invalid_configuration" in result.stderr
+    finally:
+        runtime.write_text(json.dumps(config), encoding="utf-8")
+
+
+def verify_http(executable, public_url):
     with tempfile.TemporaryDirectory(prefix="qcws-admin-") as temp:
         root = Path(temp)
         runtime = root / "runtime.json"
-        base = [args.Executable, "--ConfigPath", str(runtime)]
+        base = [executable, "--ConfigPath", str(runtime)]
         subprocess.run([*base, "--InitializeConfig"], check=True, capture_output=True, timeout=5)
         config = json.loads(runtime.read_text(encoding="utf-8"))
         business, control, admin = ports()
         for label, port in (("business", business), ("control", control)):
             config[label].update(port=port, allowed_hosts=[f"127.0.0.1:{port}"])
         config["admin"] = {"enabled": True, "port": admin}
+        if public_url is not None:
+            config["business"]["public_url"] = public_url
         runtime.write_text(json.dumps(config), encoding="utf-8")
+        if public_url is None:
+            verify_public_url_configuration(base, runtime, config)
         token = (root / "admin.token").read_text(encoding="ascii").strip()
         assert subprocess.run([*base, "--SettingsUrl"], capture_output=True, timeout=6).returncode == 1
         subprocess.run([*base, "--CheckConfig"], check=True, capture_output=True, timeout=5)
-        with subprocess.Popen(base, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) as service:
+        windows = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+        with subprocess.Popen(base, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, **windows) as service:
             try:
                 for _ in range(50):
                     if service.poll() is not None:
@@ -115,10 +180,14 @@ def main():
                         time.sleep(0.1)
                 else:
                     raise RuntimeError("Administration listener did not start")
-                browser(admin, args.Executable, runtime, token)
+                browser(admin, executable, runtime, token, public_url or f"http://127.0.0.1:{business}/mcp")
                 business_token = (root / "client.token").read_text(encoding="ascii").strip()
                 headers = {"Authorization": f"Bearer {business_token}", "Content-Type": "application/json"}
                 assert request(business, "GET", "/v1/status", headers)[2]["settings"]["search_enabled"] is False
+                if public_url is not None:
+                    assert request(business, "GET", "/v1/status",
+                                   headers | {"Host": urlsplit(public_url).netloc})[0] == 403, \
+                        "Endpoint display metadata silently expanded the business Host allowlist"
                 status, _, body = request(business, "POST", "/v1/search", headers, {"query": "QGIS"})
                 assert status == 403 and body["error"]["code"] == "tool_disabled"
                 status, _, body = request(business, "POST", "/v1/open", headers, {"page_id": "cached-id"})
@@ -130,6 +199,15 @@ def main():
                         service.wait(5)
                     except subprocess.TimeoutExpired:
                         service.kill()
+                        service.wait(5)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--Executable", required=True)
+    args = parser.parse_args()
+    for public_url in (None, "https://search.example.test/mcp"):
+        verify_http(args.Executable, public_url)
 
 
 if __name__ == "__main__":
