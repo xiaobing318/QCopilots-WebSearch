@@ -105,12 +105,15 @@ def running_portable(executable, cwd, env, runtime, racers=1):
 
     def launch():
         gate.wait()
-        output = tempfile.TemporaryFile()
-        output_files.append(output)
-        proc = subprocess.Popen([executable], cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.DEVNULL, stderr=output, **hidden_console())
+        # Inherited handles share a file position. Reading through the parent's
+        # writer handle can rewind a child that is still printing its summary.
+        with tempfile.NamedTemporaryFile(delete=False) as output:
+            log = Path(output.name)
+            output_files.append(log)
+            proc = subprocess.Popen([executable], cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=output, **hidden_console())
         processes.append(proc)
-        proc.startup_output = output
+        proc.startup_output = log
 
     try:
         with ThreadPoolExecutor(max_workers=racers) as pool:
@@ -126,12 +129,13 @@ def running_portable(executable, cwd, env, runtime, racers=1):
                     config = json.loads(runtime.read_bytes())
                     token = (runtime.parent / 'client.token').read_text('ascii').strip()
                     if request(config['control']['port'], token, timeout=0.5).get('live') is True:
-                        running[0].startup_output.seek(0)
-                        summary = running[0].startup_output.read().decode('utf-8')
+                        summary = running[0].startup_output.read_text(encoding='utf-8')
                         if 'Press Ctrl+C to stop.' in summary:
-                            need(all(f'127.0.0.1:{config[role]["port"]}' in summary
-                                     for role in ('business', 'control', 'admin')),
-                                 'Startup summary did not show every actual listener')
+                            missing = {role: config[role]['port'] for role in ('business', 'control', 'admin')
+                                       if f'127.0.0.1:{config[role]["port"]}' not in summary}
+                            observed = sorted(set(re.findall(r'127\.0\.0\.1:(\d+)', summary)))
+                            need(not missing, 'Startup summary did not show every actual listener '
+                                 f'(missing={missing}, observed_loopback_ports={observed})')
                             need(str(runtime) in summary and '--SettingsUrl' in summary and '/mcp' in summary,
                                  'Startup summary omitted configuration or login guidance')
                             admin_token = (runtime.parent / 'admin.token').read_text('ascii').strip()
@@ -148,7 +152,7 @@ def running_portable(executable, cwd, env, runtime, racers=1):
     finally:
         stopped = [stop_process(proc) for proc in processes if proc.poll() is None]
         for output in output_files:
-            output.close()
+            output.unlink()
         need(all(report['passed'] for report in stopped), 'Portable server cleanup failed')
 
 
