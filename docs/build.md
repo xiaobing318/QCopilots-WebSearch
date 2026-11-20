@@ -8,7 +8,7 @@
 
 ## 前置条件
 
-- Windows 需要 Visual Studio 2022 或 2026，并安装「使用 C++ 的桌面开发」工作负载和 Windows SDK。同时需要 CMake 3.30 或更高版本、Ninja、Git 和 Python 3.12 或更高版本。构建流程会自动查找 x64 工具，也可使用 Visual Studio 自带的 CMake 和 Ninja。Windows 上的 TLS 由 Schannel 提供。
+- Windows 需要 Visual Studio 2022 或 2026，并安装「使用 C++ 的桌面开发」工作负载和 Windows SDK。同时需要 CMake 3.30 或更高版本、Ninja、Git 和 Python 3.12 或更高版本。构建流程会自动查找 x64 工具，也可使用 Visual Studio 自带的 CMake 和 Ninja。构建时会校验并静态链接 Mbed TLS 3.6.8，用于接收业务 HTTPS 请求。libcurl 通过系统 Schannel 访问搜索源和网页。
 - Ubuntu 在运行 Bash 构建脚本前需要 Python 3.12 或更高版本，并提供 venv 和 pip。`bootstrap` 阶段通过 apt 安装 GCC、CMake、Ninja、Git、发行版提供的 OpenSSL 开发文件及其他原生依赖。安装系统软件包需要以 root 身份执行，或使用非交互式 sudo。
 - `bootstrap` 阶段会准备 Qt 6.12.0、Node 24.22.3 和隔离的 Python 工具环境。Node 用于构建内置设置界面。安装后的原生服务已经内置该界面，并使用 Qt 共享库。
 

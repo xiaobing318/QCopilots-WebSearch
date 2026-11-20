@@ -47,6 +47,15 @@ def system_tool(name):
     return Path(os.environ['SystemRoot']) / 'System32' / name
 
 
+def fixture_openssl():
+    openssl = shutil.which('openssl')
+    if openssl:
+        return Path(openssl).resolve(strict=True)
+    git = shutil.which('git')
+    need(git, 'Generating temporary origin certificates requires OpenSSL or Git for Windows')
+    return (Path(git).resolve().parents[1] / 'usr' / 'bin' / 'openssl.exe').resolve(strict=True)
+
+
 def check_read_only(executable, cwd, env, data):
     whoami = subprocess.check_output([system_tool('whoami.exe'), '/user', '/fo', 'csv', '/nh'], env=env, timeout=8)
     sid = re.search(rb'"(S-1-[0-9-]+)"', whoami)
@@ -323,6 +332,11 @@ def main():
                 del env[key]
         env['PATH'] = os.pathsep.join(str(path) for path in (system / 'System32', system))
         portable = verify_portable(found[0], folder, cwd, env)
+        tls_test = Path(__file__).resolve().parents[1] / 'tests' / 'python' / 'test_business_tls.py'
+        tls_code, tls_forced = run_sdk([sys.executable, '-B', str(tls_test), '--Executable', str(found[0]),
+                                       '--OpenSSL', str(fixture_openssl())], env, cwd, timeout=90)
+        need(tls_code == 0 and not tls_forced, 'Portable origin TLS or its fixture cleanup failed')
+        portable['origin_https'] = True
         exit_code, forced = run_sdk([sys.executable, '-B', str(Path(__file__).with_name('test_mcp_sdk.py')),
             '--Executable',str(found[0]),'--Output',str(folder / 'sdk.json')],
             env,cwd)

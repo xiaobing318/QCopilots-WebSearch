@@ -7,7 +7,11 @@ install(DIRECTORY "${QCWS_QT_SOURCE_DIR}/LICENSES/" DESTINATION "${_app_share}/l
 install(DIRECTORY "${QCWS_QT_SOURCE_DIR}/src/3rdparty/" DESTINATION "${_app_share}/licenses/qt/thirdparty"
   FILES_MATCHING PATTERN "*LICENSE*" PATTERN "*COPYING*" PATTERN "qt_attribution.json"
   PATTERN "*.c" EXCLUDE PATTERN "*.h" EXCLUDE)
-foreach(dep cares curl httplib lexbor nlohmann_json json_schema_validator)
+set(_licensed_dependencies cares curl httplib lexbor nlohmann_json json_schema_validator)
+if(WIN32)
+  list(APPEND _licensed_dependencies mbedtls)
+endif()
+foreach(dep IN LISTS _licensed_dependencies)
   file(GLOB _licenses LIST_DIRECTORIES FALSE
     "${${dep}_SOURCE_DIR}/LICENSE*" "${${dep}_SOURCE_DIR}/COPYING*"
     "${${dep}_SOURCE_DIR}/NOTICE*" "${${dep}_SOURCE_DIR}/AUTHORS*")

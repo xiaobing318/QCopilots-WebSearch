@@ -27,3 +27,7 @@ libcurl 使用 c-ares 解析地址。访问公开的搜索源和网页时，服�
 TLS 在 Windows 上使用 Schannel，在 Ubuntu 上使用发行版提供的 OpenSSL，以验证主机名和证书链。Schannel 默认使用 Windows 信任库。私有后端可以配置自己的 CA 文件。Windows 上的 TLS 测试观察到，当缺少中间证书时，系统会通过 AIA 获取中间证书。部署端点时应提供完整的证书链。管理员可通过 Windows 的 `MaxAIAUrlRetrievalCountPerChain` 设置管理 AIA 获取行为。两个平台的测试都验证了不会向网络发起 CRL 或 OCSP 查询。Ubuntu 测试还验证了不会发起 AIA 获取请求。
 
 经哈希校验的 cpp-httplib 补丁为请求读取设定两秒的总时限，涵盖请求头、正文、分块传输的帧结构和尾部字段。应用操作另有各自的截止时间。关闭服务时会中断所有已接受的连接，包括仍在等待工作线程的连接。
+
+## 入站 HTTPS
+
+业务监听器默认在回环地址提供 HTTP。配置 `business.tls` 后，cpp-httplib 在同一端口使用 HTTPS 提供 REST 和 MCP。Windows 使用静态链接的 Mbed TLS 3.6.8，Ubuntu 使用系统 OpenSSL。证书链与私钥在检查配置和启动服务时加载，更换证书后需重启。控制和管理监听器继续在独立的回环端口提供 HTTP。[部署与证书配置](deployment.md#windows-cloudflare-tunnel)

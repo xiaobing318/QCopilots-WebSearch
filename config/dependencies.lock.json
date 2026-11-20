@@ -66,6 +66,12 @@
       "sha256": "537a77cdb96d3b4ad64d0b7103971de52eac75cd4ee03a2fdb84417b0d742459",
       "sourceDir": "cpp-httplib-0.66.0"
     },
+    "mbedtls": {
+      "url": "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.8/mbedtls-3.6.8.tar.bz2",
+      "sha256": "bc54b818e87f49c0b3281dd85d24adaede0e63b4e822e3fbd49c005a38b9595b",
+      "sourceDir": "mbedtls-3.6.8",
+      "platform": "windows-x64"
+    },
     "lexbor": {
       "url": "https://codeload.github.com/lexbor/lexbor/tar.gz/refs/tags/v3.0.0",
       "sha256": "eafaa79ef9871f0bbb1978eda8677d184f7ecdcaa203d7cd25b3f86e32c014c2",

@@ -3,7 +3,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 import hashlib
-from http.client import HTTPConnection
+from http.client import HTTPConnection, HTTPSConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -58,7 +58,11 @@ class BusinessProxy(BaseHTTPRequestHandler):
         payload = self.rfile.read(int(self.headers.get("Content-Length", "0"))) or None
         hop_headers = {"connection", "keep-alive", "transfer-encoding"}
         forwarded = {key: value for key, value in self.headers.items() if key.lower() not in hop_headers}
-        with closing(HTTPConnection("127.0.0.1", self.server.upstream_port, timeout=3)) as upstream:
+        port = self.server.upstream_port
+        context = self.server.origin_tls
+        connection = (HTTPSConnection("127.0.0.1", port, timeout=3, context=context) if context
+                      else HTTPConnection("127.0.0.1", port, timeout=3))
+        with closing(connection) as upstream:
             upstream.request(self.command, self.path, body=payload, headers=forwarded)
             response = upstream.getresponse()
             content = response.read()
@@ -114,7 +118,7 @@ class Fixture:
         return request(self.proxy_port, method, path, forwarded | (headers or {}), body)
 
     @contextmanager
-    def running(self):
+    def running(self, origin_tls=None):
         windows = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
         with (
             ThreadingHTTPServer(("127.0.0.1", 0), BusinessProxy) as proxy,
@@ -122,6 +126,7 @@ class Fixture:
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **windows) as service,
         ):
             proxy.upstream_port = self.business
+            proxy.origin_tls = origin_tls
             self.proxy_port = proxy.server_port
             proxy_thread = threading.Thread(target=proxy.serve_forever, kwargs={"poll_interval": 0.05})
             try:

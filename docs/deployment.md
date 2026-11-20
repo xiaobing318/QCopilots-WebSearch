@@ -19,7 +19,7 @@ MSI 和 DEB 安装包会为每个项目版本注册独立服务。新版本首�
 使用 apt 安装发布版 DEB，将 `version` 设为安装包文件名中的版本号。每个安装包都会创建该版本专用的非特权服务账号和 systemd 单元。DEB 要求 `/opt` 归 `root` 所有，且仅允许所有者写入。
 
 ```bash
-version=0.2.1
+version=0.2.2
 package=qcopilots-websearch-$version
 sudo apt install "./${package}_${version}_amd64.deb"
 sudo systemctl status "$package.service"
@@ -67,10 +67,8 @@ MSI 安装 `QCopilotsWebSearch-<version>` 系统服务，运行账号为虚拟�
 如需改用其他目录，请在以管理员身份打开的命令提示符中设置 `INSTALL_ROOT`。程序及其 `bin\data` 目录均位于指定位置。请为不同版本选择各自的安装目录。
 
 ```cmd
-msiexec.exe /i "C:\Downloads\QCopilots-WebSearch-0.2.1-win64.msi" INSTALL_ROOT="C:\Program Files\QCopilots-WebSearch-Custom-0.2.1"
+msiexec.exe /i "C:\Downloads\QCopilots-WebSearch-0.2.2-win64.msi" INSTALL_ROOT="C:\Program Files\QCopilots-WebSearch-Custom-0.2.2"
 ```
-
-Windows 使用 Schannel。
 
 本机交互式用户可以读取 `admin.token`，用于登录设置页并管理搜索设置。运行配置、客户端令牌和搜索源密钥各自受文件 ACL 保护。在目标版本安装目录的 `bin` 下运行 `qcopilots-websearch.exe --SettingsUrl`，即可为正在运行的服务生成一次性链接。
 
@@ -80,11 +78,75 @@ Windows 使用 Schannel。
 
 用 `--ConfigPath FILE` 指定其他配置文件。要初始化自定义路径，请使用 `--InitializeConfig --ConfigPath FILE`。可加上 `--SelectAvailablePorts` 为新配置选择可用的回环端口。新配置默认使用自动搜索，因此可以按需接入私有 SearXNG 实例。
 
+<a name="windows-cloudflare-tunnel"></a>
+
+### 通过 Cloudflare Tunnel 发布 Windows HTTPS 源站
+
+0.2.2 可直接在回环业务端口提供 HTTPS。以下示例假设 `cloudflared` 和 WebSearch 位于同一台 Windows 主机，公网主机名为 `search.example.org`，固定源站为 `https://127.0.0.1:8088`。请替换公网主机名。如果源站运行 0.2.1，业务监听器仅支持 HTTP，需升级到支持 TLS 的版本或在其前面部署 HTTPS 反向代理。
+
+1. 以目标版本初始化配置。在新解压目录运行 `.\bin\qcopilots-websearch.exe --InitializeConfig --ConfigPath .\bin\data\runtime.json`。确认 8088 可由此实例独占，已有实例保留自己的版本目录和数据。
+2. 准备用于 TLS 服务端身份验证的 PEM 证书链和配套的无口令 PEM 私钥。证书须包含 IP 类型的 SAN `127.0.0.1`。证书链将叶证书放在首位，随后附上中间证书。用 Windows ACL 将私钥读取权限限于运行 WebSearch 的账号和管理人员。为 `cloudflared` 服务账号提供私有根 CA **公钥证书**的可读路径。
+3. 编辑生成的 `bin\data\runtime.json`，按下例修改其中的 `business`。相对证书路径以该配置文件所在目录为基准。示例把证书和私钥放在 `bin\data\tls`，也可以填写版本目录外的绝对路径。更新证书后重新检查配置并重启。
+
+```json
+{
+  "business": {
+    "host": "127.0.0.1",
+    "port": 8088,
+    "allowed_hosts": ["127.0.0.1:8088", "search.example.org", "search.example.org:443"],
+    "origins": [],
+    "tls": {
+      "certificate_chain_file": "tls/origin-cert.pem",
+      "private_key_file": "tls/origin-key.pem"
+    }
+  }
+}
+```
+
+4. 从解压目录运行以下命令。`--CheckConfig` 成功后再启动服务。服务持续运行时，用另一个终端执行验证命令。
+
+```powershell
+.\bin\qcopilots-websearch.exe --ConfigPath .\bin\data\runtime.json --CheckConfig
+if ($LASTEXITCODE -eq 0) { .\bin\qcopilots-websearch.exe }
+```
+
+5. 在 Cloudflare 的 **Networking → Tunnels** 选择隧道，打开 **Routes** 并编辑或新增 **Published application**。选择公网主机名并留空 Path。Service URL 填 `https://127.0.0.1:8088`。若界面分别显示 Type 和 URL，则选择 **HTTPS** 并输入 `127.0.0.1:8088`。业务监听器使用 HTTP/1.1，请保持 **HTTP/2 to origin** 关闭，保留默认的公网 Host 和 TLS 证书验证。对本例的 IP 证书，留空 **Origin Server Name**，保持 **Match SNI to Host** 关闭。使用私有 CA 时，在 **CA Pool** 填连接器本机的 CA 证书文件绝对路径。若证书使用 DNS 类型的 SAN，将 **Origin Server Name** 设为该 DNS 名称。控制和管理端口只供本机使用。[Cloudflare 路由设置](https://developers.cloudflare.com/tunnel/get-started/#publish-an-application) · [源站 TLS 参数](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/origin-parameters/)
+6. 逐台核对同一隧道的所有副本。每台连接器访问的是自己的 `127.0.0.1:8088`，都需能读取路由指定路径的 CA 文件，并连接到具有有效证书和相同业务凭据的服务。MCP 会话与已打开的网页快照属于处理请求的 WebSearch 实例，跨不同实例的后续调用可能找不到会话或页面。需要连续调用的验收应安排到同一实例。
+
+以下示例在每台源站校验证书与接口，再从公网验证同一个接口。将第一条命令的 CA 路径替换为本机实际文件。本例私有 CA 未发布吊销信息，Windows 自带的 curl 使用 `--ssl-revoke-best-effort` 允许缺少该信息，同时验证 CA 和源站身份。未携带 Bearer 的源站检查应得到 HTTP 401。公网检查使用初始 `local` 客户端的 `client.token`，如果已更换令牌，请从实际凭据来源读取。成功时会显示 `contract_version` 为 1、`service` 为 `ready`。
+
+```powershell
+curl.exe --noproxy "*" --cacert .\bin\data\tls\origin-ca.pem --ssl-revoke-best-effort -sS -o NUL -w "%{http_code}\n" https://127.0.0.1:8088/v1/status
+$token = (Get-Content -Raw .\bin\data\client.token).Trim()
+Invoke-RestMethod -Uri 'https://search.example.org/v1/status' -Headers @{ Authorization = "Bearer $token" } |
+  Select-Object contract_version,service
+```
+
+公网出现 502 时，先在报错副本上运行源站检查，核对监听端口、HTTP 或 HTTPS、证书有效期、SAN 和 CA 文件访问权限。401 表示需要核对该实例的业务令牌，403 时检查实际的 Host 和浏览器 Origin。仅访问公网根路径无法验收业务接口。设置页面使用独立的管理监听器。在源站另开终端运行 `.\bin\qcopilots-websearch.exe --SettingsUrl --Open` 可直接打开设置页。单独使用 `--SettingsUrl` 会打印链接，将输出粘贴到浏览器地址栏，两分钟内可登录一次。
+
+#### 为测试源站签发证书
+
+已有受信任证书的部署可直接使用已有证书链。若需为测试源站建立私有 CA，在一台管理机上选择专用的空目录，先通过 ACL 限制访问，再用 OpenSSL 3 执行以下 PowerShell 命令。前两条命令会分别生成签发用私钥和源站私钥。每台源站独立生成密钥及请求，可由同一 CA 签发。
+
+```powershell
+openssl req -x509 -newkey rsa:3072 -noenc -sha256 -days 1825 -subj "/CN=WebSearch Test Origin CA" `
+  -addext "basicConstraints=critical,CA:TRUE,pathlen:0" -addext "keyUsage=critical,keyCertSign,cRLSign" `
+  -keyout issuer-key.pem -out origin-ca.pem
+openssl req -new -newkey rsa:3072 -noenc -sha256 -subj "/CN=127.0.0.1" `
+  -addext "basicConstraints=critical,CA:FALSE" -addext "keyUsage=critical,digitalSignature,keyEncipherment" `
+  -addext "extendedKeyUsage=serverAuth" -addext "subjectAltName=IP:127.0.0.1" -keyout origin-key.pem -out origin.csr
+openssl x509 -req -in origin.csr -CA origin-ca.pem -CAkey issuer-key.pem -CAcreateserial `
+  -days 365 -sha256 -copy_extensions copy -out origin-cert.pem
+openssl verify -x509_strict -purpose sslserver -verify_ip 127.0.0.1 -CAfile origin-ca.pem origin-cert.pem
+```
+
+验证输出应为 `origin-cert.pem: OK`。源站监听器读取 `origin-cert.pem` 和 `origin-key.pem`。连接器的 **CA Pool** 使用 `origin-ca.pem`。将 `issuer-key.pem` 留在签发端，供证书续期使用。
+
 <a name="manage-client-tokens"></a>
 
 ## 管理客户端令牌
 
-CLI 可以为现有运行配置生成新令牌，也可以登记已有令牌。两条命令都会在标准错误输出中请求确认，需要输入 `y` 或 `yes`。设置令牌时，命令从标准输入读取令牌，并在交互式终端中隐藏输入。请在同一行输入 32 至 8192 个可见 ASCII 字符，再在下一行确认。生成令牌时，命令会在保存配置后将新令牌写入标准输出。
+CLI 可以为现有运行配置生成新令牌，也可以登记已有令牌。两条命令都会在标准错误输出中请求确认，需要输入 `y` 或 `yes`。设置令牌时，命令从标准输入读取令牌，并在交互式终端中隐藏输入。请在同一行输入 32 至 8192 个可见 ASCII 字符，再在下一行确认。短于 32 个字符的测试口令会被拒绝，可用 `--GenerateToken` 生成 64 个十六进制字符的随机业务令牌。生成令牌时，命令会在保存配置后将新令牌写入标准输出。
 
 ```text
 qcopilots-websearch --ConfigPath FILE --GenerateToken [--ClientId ID]
@@ -98,7 +160,7 @@ qcopilots-websearch --ConfigPath FILE --SetToken [--ClientId ID]
 对于 DEB 安装，以管理员身份生成凭据，再用该版本的服务账号检查配置并重启服务。
 
 ```bash
-version=0.2.1
+version=0.2.2
 package=qcopilots-websearch-$version
 executable="/opt/$package/bin/qcopilots-websearch"
 config_path="/opt/$package/bin/data/runtime.json"
@@ -111,7 +173,7 @@ sudo systemctl restart "$package.service"
 对于 MSI 安装，将 `installRoot` 设为安装程序实际使用的目录，然后在以管理员身份打开的 PowerShell 中运行以下命令。便携版请指定其运行配置路径，并省略 `--ServiceName`。
 
 ```powershell
-$version = '0.2.1'
+$version = '0.2.2'
 $serviceName = "QCopilotsWebSearch-$version"
 $installRoot = Join-Path $env:ProgramFiles "QCopilots-WebSearch-$version"
 $executable = Join-Path $installRoot 'bin\qcopilots-websearch.exe'
@@ -133,7 +195,7 @@ Restart-Service -Name $serviceName
 
 ## 运行时证书信任与代理
 
-运行时 HTTPS 使用[架构说明](architecture.md)中列出的信任来源。请在 HTTPS 端点配置完整的服务器证书链。Windows 可通过 AIA 获取中间证书，Linux 则使用端点提供的证书链和本机信任库。两种平台均省略在线 CRL 和 OCSP 查询。运行时请求直接连接目标地址，请配置可直接访问的 SearXNG 端点。构建配置中的代理仅用于下载依赖。
+服务访问搜索源和网页时，出站 HTTPS 使用平台信任库。请在 HTTPS 端点配置完整的服务器证书链。Windows 可通过 AIA 获取中间证书，Linux 则使用端点提供的证书链和本机信任库。两种平台均省略在线 CRL 和 OCSP 查询。运行时请求直接连接目标地址，请配置可直接访问的 SearXNG 端点。构建配置中的代理仅用于下载依赖。[运行时架构](architecture.md)
 
 ## QGIS
 
@@ -154,11 +216,13 @@ Restart-Service -Name $serviceName
 
 ### 配置适配器
 
-将适配器的配置示例复制到私有目录，再通过 `QCOPILOTS_WEBSEARCH_CONFIG` 指定路径。也可直接将其保存为 `<QCOPILOTS_HOME>/web_search/config.json`。请使用专用的 `token_env` 或 `token_file`。已有的 `formal_restricted` 网络允许列表必须明确允许后端源地址。容器继续按既有规则验证回环地址。
+在 QGIS 的 **MCP Servers** 页面启动 **QCopilots MCP Server Web Search**。内嵌页面的 **Configure Server** 对应该插件在 Manager 中登记的虚拟 MCP 服务。保留 **Server URL** 的 `https://qcopilots.localmachine/mcp/qcopilots.mcp_server_web_search` 和默认 **Authorization**。QGIS 插件另行连接公网后端，它将 `/v1/status`、`/v1/search` 等路径追加到 `backend_url`。例如，使用 `web-search.vastarmorai.com` 部署时，`backend_url` 填 `https://web-search.vastarmorai.com`。独立 MCP 客户端直连这个域名时，地址为 `https://web-search.vastarmorai.com/mcp`，凭据为后端签发的业务 Bearer。
+
+将适配器的配置示例复制到私有目录，再通过 `QCOPILOTS_WEBSEARCH_CONFIG` 指定配置文件绝对路径。也可直接将其保存为 `<QCOPILOTS_HOME>/web_search/config.json`。通过 `auth.token_env`（默认 `QCOPILOTS_WEBSEARCH_BACKEND_TOKEN`）或 `auth.token_file` 指定后端业务令牌。使用环境变量时应在启动 QGIS 前设置，以便插件读取。默认的 `compatible` 模式支持公网后端，`formal_restricted` 模式只允许明确批准的回环源地址。
 
 | 适配器设置 | 对应的服务端配置 |
 | --- | --- |
-| `backend_url` | 本地地址使用准确的 `http://127.0.0.1:<business.port>`，并将该主机和端口加入 `business.allowed_hosts`。明文 HTTP 只接受回环 IP 字面量，因此会拒绝 `localhost`。服务绑定 `127.0.0.1`，所以也会拒绝 `[::1]`。远程后端使用不带路径的 HTTPS 源地址，并启用证书验证。 |
+| `backend_url` | 公网后端使用不带路径的 HTTPS 源地址，并在服务端允许对应的 Host。QGIS 验证公网证书链，连接器用源站 CA 验证本机证书。明文 HTTP 仅接受与服务实际监听地址相符的回环 IP，例如 `http://127.0.0.1:<business.port>`。 |
 | `timeout_seconds` | 取 `limits.search_timeout_seconds` 和 `limits.open_timeout_seconds` 中的较大值，再增加约五秒。客户端默认值为 25 秒，两项服务端的默认超时分别为 15 和 20 秒。客户端超时过短会在服务仍处理请求时返回 `timeout`，重试会重新发起页面读取。 |
 | `max_concurrency` | 不超过 `limits.max_concurrent`，该服务端并发上限由所有客户端共用。 |
 | `max_response_bytes` | 至少 262144。工具载荷上限为 240 KiB，默认的 1 MiB 可容纳外围响应结构。 |

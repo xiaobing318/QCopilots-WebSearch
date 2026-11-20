@@ -16,7 +16,7 @@
       "properties": {
         "host": {
           "type": "string",
-          "description": "Listen address. Accepts 127.0.0.1 or ::1. Chooses IPv4 or IPv6 loopback behind the TLS proxy.",
+          "description": "Business listener address. Accepts IPv4 or IPv6 loopback with either HTTP or HTTPS.",
           "enum": [
             "127.0.0.1",
             "::1"
@@ -29,6 +29,26 @@
           "default": 8088,
           "minimum": 1,
           "maximum": 65535
+        },
+        "tls": {
+          "type": "object",
+          "description": "Serve HTTPS on the business port. Omit this object for HTTP. Restart after changing the configuration or certificate files.",
+          "properties": {
+            "certificate_chain_file": {
+              "type": "string",
+              "description": "PEM server certificate followed by its intermediates. Paths may be absolute or relative to runtime.json.",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "private_key_file": {
+              "type": "string",
+              "description": "Matching unencrypted PEM private key. Paths may be absolute or relative to runtime.json.",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          },
+          "required": ["certificate_chain_file", "private_key_file"],
+          "additionalProperties": false
         },
         "allowed_hosts": {
           "type": "array",
@@ -64,7 +84,7 @@
         "origins"
       ],
       "additionalProperties": false,
-      "description": "Business listener configuration. Accepts the specified loopback host, port, Host and Origin fields. Controls REST and MCP ingress."
+      "description": "Business listener for REST and MCP. The optional TLS configuration applies to this listener only."
     },
     "control": {
       "type": "object",

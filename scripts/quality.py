@@ -17,7 +17,7 @@ import xml.etree.ElementTree as ET
 from pipeline import apt_command
 
 ROOT = Path(__file__).resolve().parents[1]
-REQUIRED = {'core', 'http-limits', 'tls', 'stdio-process', 'release-quality', 'build-pipeline',
+REQUIRED = {'core', 'http-limits', 'tls', 'business-tls', 'stdio-process', 'release-quality', 'build-pipeline',
             'settings', 'admin-http', 'providers', 'fuzz-html-seeds', 'fuzz-url-seeds',
             'fuzz-jsonrpc-seeds', 'fuzz-serp-seeds'}
 FUZZERS = {'html': 1048578, 'url': 16384, 'jsonrpc': 1048576, 'serp': 1048576}

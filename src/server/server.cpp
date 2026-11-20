@@ -1,4 +1,6 @@
 #include "stdio_output.hpp"
+#include <QFile>
+#include <QFileInfo>
 #include <QStringList>
 #include <QUuid>
 #include <httplib.h>
@@ -12,6 +14,10 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#ifdef CPPHTTPLIB_MBEDTLS_SUPPORT
+#include <mbedtls/threading.h>
+#include <psa/crypto.h>
+#endif
 #else
 #include <cerrno>
 #include <poll.h>
@@ -82,19 +88,110 @@ Json parse(const std::string &body) {
     throw Error("invalid_argument", "Request must contain valid UTF-8 JSON.");
   return j;
 }
+
+QByteArray readTlsPem(const Config &config, const Json &tls, const char *field) {
+  constexpr qint64 maxBytes = 1024 * 1024;
+  const auto &path = tls.at(field).get_ref<const std::string &>();
+  QFile file(QString::fromStdString(config.path(path)));
+  if (path.find('\0') != std::string::npos || !QFileInfo(file).isFile() || !file.open(QIODevice::ReadOnly))
+    throw Error("invalid_configuration", std::string("Cannot open business.tls.") + field + ".");
+  auto contents = file.read(maxBytes + 1);
+  if (file.error() != QFileDevice::NoError || contents.isEmpty() || contents.size() > maxBytes ||
+      contents.contains('\0'))
+    throw Error("invalid_configuration",
+                std::string("Invalid or oversized PEM file for business.tls.") + field + ".");
+  return contents;
+}
+
+#if defined(_WIN32) && defined(CPPHTTPLIB_MBEDTLS_SUPPORT)
+// A listener's worker threads share its key, random generator and PSA state.
+struct MbedTlsRuntime {
+  MbedTlsRuntime() {
+    mbedtls_threading_set_alt(
+        [](mbedtls_threading_mutex_t *mutex) { InitializeSRWLock(mutex); },
+        [](mbedtls_threading_mutex_t *) {},
+        [](mbedtls_threading_mutex_t *mutex) {
+          AcquireSRWLockExclusive(mutex);
+          return 0;
+        },
+        [](mbedtls_threading_mutex_t *mutex) {
+          ReleaseSRWLockExclusive(mutex);
+          return 0;
+        });
+    if (psa_crypto_init() != PSA_SUCCESS) {
+      mbedtls_threading_free_alt();
+      throw Error("invalid_configuration", "Cannot initialize TLS cryptography.");
+    }
+  }
+  ~MbedTlsRuntime() {
+    mbedtls_psa_crypto_free();
+    mbedtls_threading_free_alt();
+  }
+};
+#endif
+
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+void addIntermediateCertificates(httplib::SSLServer &server, const QByteArray &chain) {
+  // cpp-httplib's OpenSSL in-memory loader installs the leaf only. Mbed TLS
+  // consumes the entire PEM chain in the SSLServer constructor.
+  const auto count = chain.count("-----BEGIN CERTIFICATE-----");
+  if (count < 2)
+    return;
+  std::unique_ptr<BIO, decltype(&BIO_free)> input(BIO_new_mem_buf(chain.constData(), int(chain.size())),
+                                                   BIO_free);
+  if (!input)
+    throw Error("invalid_configuration", "Cannot load the business TLS certificate chain.");
+  auto *context = static_cast<SSL_CTX *>(server.tls_context());
+  for (qsizetype i = 0; i < count; ++i) {
+    std::unique_ptr<X509, decltype(&X509_free)> cert(PEM_read_bio_X509(input.get(), nullptr, nullptr, nullptr),
+                                                     X509_free);
+    if (!cert || (i > 0 && SSL_CTX_add1_chain_cert(context, cert.get()) != 1))
+      throw Error("invalid_configuration", "Cannot load the business TLS certificate chain.");
+  }
+}
+#endif
+
+std::unique_ptr<httplib::Server> businessListener(const Config &config) {
+  const auto &business = config.value.at("business");
+  if (!business.contains("tls"))
+    return std::make_unique<httplib::Server>();
+  const auto &tls = business.at("tls");
+  const auto chain = readTlsPem(config, tls, "certificate_chain_file");
+  const auto key = readTlsPem(config, tls, "private_key_file");
+#if defined(_WIN32) && defined(CPPHTTPLIB_MBEDTLS_SUPPORT)
+  static const MbedTlsRuntime runtime;
+#endif
+  // Supplying an empty password prevents an interactive OpenSSL passphrase
+  // prompt when an encrypted key is accidentally configured for the service.
+  auto server = std::make_unique<httplib::SSLServer>(httplib::SSLServer::PemMemory{
+      chain.constData(), size_t(chain.size()), key.constData(), size_t(key.size()), nullptr, 0, ""});
+  if (!server->is_valid())
+    throw Error("invalid_configuration", "Cannot load the business TLS certificate and matching private key.");
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+  addIntermediateCertificates(*server, chain);
+#endif
+  return server;
+}
 } // namespace
+void checkBusinessTls(const Config &config) {
+  if (config.value.at("business").contains("tls"))
+    (void)businessListener(config);
+}
 struct HttpServer::Impl {
   Service &service;
   Config config;
   Protocol protocol;
   AdminServer admin;
   std::vector<ClientIdentity> clients;
-  httplib::Server business, control;
+  std::unique_ptr<httplib::Server> business;
+  httplib::Server control;
   std::thread businessThread, controlThread;
   int bp = 0, cp = 0;
   bool started = false;
-  Impl(Service &s, Config c) : service(s), config(std::move(c)), protocol(s), admin(s, config), clients(config.clients()) {
-    setup(business, config.value["business"], false);
+  Impl(Service &s, Config c)
+      : service(s), config(std::move(c)), protocol(s), admin(s, config), clients(config.clients()),
+        business(businessListener(config)) {
+    setup(*business, config.value["business"], false);
     setup(control, config.value["control"], true);
   }
   std::string authorize(const httplib::Request &request) const {
@@ -258,18 +355,18 @@ struct HttpServer::Impl {
         return s.bind_to_any_port(host);
       return s.bind_to_port(host, p) ? p : -1;
     };
-    bp = bind(business, config.value["business"]);
+    bp = bind(*business, config.value["business"]);
     if (bp < 0)
       throw Error("invalid_configuration", "Cannot bind business listener.");
     cp = bind(control, config.value["control"]);
     if (cp < 0) {
-      business.stop();
+      business->stop();
       throw Error("invalid_configuration", "Cannot bind control listener.");
     }
-    businessThread = std::thread([this] { business.listen_after_bind(); });
+    businessThread = std::thread([this] { business->listen_after_bind(); });
     controlThread = std::thread([this] { control.listen_after_bind(); });
     started = true;
-    business.wait_until_ready();
+    business->wait_until_ready();
     control.wait_until_ready();
     try {
       admin.start();
@@ -284,7 +381,7 @@ struct HttpServer::Impl {
     protocol.shutdown();
     service.shutdown();
     admin.stop();
-    business.stop();
+    business->stop();
     control.stop();
     if (businessThread.joinable())
       businessThread.join();

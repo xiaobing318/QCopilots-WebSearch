@@ -376,6 +376,7 @@ int main(int argc, char **argv) {
     if (check) {
       auto c = qws::Config::load(configPath);
       (void)c.clients();
+      qws::checkBusinessTls(c);
       qws::checkSettings(c);
       std::cout << "Configuration valid.\n";
       return 0;

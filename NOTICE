@@ -19,7 +19,9 @@ govern redistribution. Windows system libraries are not included.
 Linux system libraries remain managed by the operating system package manager.
 The DEB dependency metadata identifies required runtime packages.
 
-Windows uses the system Schannel TLS backend.
+Windows uses system Schannel for outbound HTTPS. Its optional HTTPS listener
+uses Mbed TLS 3.6.8, distributed under the Apache-2.0 option. The upstream
+license is installed under licenses/mbedtls.
 
 The settings frontend redistributes its third-party notices in
 THIRD_PARTY_NOTICES.txt. The automatic web search provider draws on Strata

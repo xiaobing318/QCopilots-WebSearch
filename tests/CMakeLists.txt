@@ -22,6 +22,9 @@ find_program(QCWS_TEST_OPENSSL NAMES openssl HINTS "${_git_bin}/../usr/bin" REQU
 add_test(NAME tls COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/python/tls_fixture.py"
   --OpenSSL "${QCWS_TEST_OPENSSL}" --Probe "$<TARGET_FILE:qcws_tests>")
 set_tests_properties(tls PROPERTIES TIMEOUT 90)
+add_test(NAME business-tls COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/python/test_business_tls.py"
+  --OpenSSL "${QCWS_TEST_OPENSSL}" --Executable "$<TARGET_FILE:qcopilots-websearch>")
+set_tests_properties(business-tls PROPERTIES TIMEOUT 90)
 add_executable(qcws_process_tests cpp/test_process.cpp)
 target_link_libraries(qcws_process_tests PRIVATE qcws_core)
 add_test(NAME stdio-process COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/python/test_stdio_transport.py"

@@ -432,6 +432,8 @@ class Pipeline:
         self.run(["cmake", "--install", dep_build])
         sources = []
         for name, spec in self.lock["sources"].items():
+            if "platform" in spec and spec["platform"] != self.profile["platform"]:
+                continue
             prepared = self.source(spec)
             if name == "httplib":
                 prepared = self.patched_httplib(prepared)

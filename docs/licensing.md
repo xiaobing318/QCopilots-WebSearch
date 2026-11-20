@@ -22,7 +22,9 @@
 
 原生构建静态链接 cpp-httplib（MIT）、libcurl（curl license）、c-ares（MIT）、Lexbor（Apache-2.0）、nlohmann/json（MIT）、JSON Schema Validator（MIT）和 zlib（Zlib）。这些组件的原始声明安装在 `licenses` 目录中。Linux 版 Qt 还包含 ICU 73.2 库及其 Unicode/ICU 声明。
 
-Linux 使用由发行版管理的 OpenSSL 共享库。DEB 软件包会记录所需的系统依赖。安装 Ubuntu 安全更新后，请重启服务以加载更新后的库。Windows 使用操作系统提供的 Schannel。
+Windows 版通过静态链接的 Mbed TLS 3.6.8 接收业务 HTTPS 请求。上游提供 Apache-2.0 或 GPL-2.0-or-later 双许可，本项目选择 Apache-2.0。软件包在 `licenses/mbedtls` 中附有上游许可原文。Windows 的出站 HTTPS 使用操作系统提供的 Schannel。[Mbed TLS 上游许可证](https://github.com/Mbed-TLS/mbedtls/blob/mbedtls-3.6.8/LICENSE)
+
+Linux 的入站和出站 HTTPS 使用由发行版管理的 OpenSSL 共享库。DEB 软件包会记录所需的系统依赖。安装 Ubuntu 安全更新后，请重启服务以加载更新后的库。
 
 前端产物包含 `THIRD_PARTY_NOTICES.txt`，用于列明前端依赖的声明。自动搜索后端及搜索结果页（SERP）的处理参考了 Strata。其 MIT 许可证和著作权声明安装在 `licenses/strata` 下。
 
