@@ -36,6 +36,16 @@ def request(port, method, path, headers=None, body=None):
         connection.close()
 
 
+def require_error(response, status, code, reason=None):
+    assert response[0] == status
+    error = response[2]["error"]
+    assert error["code"] == code
+    if reason is not None:
+        assert error["reason"] == reason
+    assert "diagnostic-secret-sentinel" not in json.dumps(error)
+    return error
+
+
 def read_admin_status(port, token):
     """Read status through an authenticated administration session."""
     origin = f"http://127.0.0.1:{port}"
@@ -65,43 +75,129 @@ def browser(port, executable, runtime, token, expected_mcp_url):
     code, headers, page = request(port, "GET", "/settings/")
     assert code == 200 and b"html" in page
     assert headers["Content-Security-Policy"] and "Access-Control-Allow-Origin" not in headers
-    assert request(port, "GET", "/settings/", {"Host": "other.invalid"})[0] == 403
-    assert request(port, "GET", base + "/settings")[0] == 401
-    assert request(port, "GET", base + "/no-such-route")[2]["error"]["code"] == "not_found"
-    assert request(port, "POST", base + "/login-links", {"Authorization": f"Bearer {token}",
-                                                        "Origin": origin})[0] == 403
+    require_error(request(port, "GET", "/settings/", {"Host": "other.invalid"}),
+                  403, "forbidden", "admin_host_rejected")
+    require_error(request(port, "GET", base + "/settings"), 401, "unauthorized", "admin_session_expired")
+    require_error(request(port, "GET", base + "/no-such-route"), 404, "not_found", "admin_endpoint_not_found")
+    require_error(request(port, "POST", base + "/login-links", {"Authorization": f"Bearer {token}",
+                                                               "Origin": origin}),
+                  403, "forbidden", "admin_native_login_required")
     bad = {"Origin": "http://other.invalid", "Content-Type": "application/json"}
-    assert request(port, "POST", base + "/session", bad, {"code": login_code})[0] == 403
+    require_error(request(port, "POST", base + "/session", bad, {"code": login_code}),
+                  403, "forbidden", "admin_origin_rejected")
     login = {"Origin": origin, "Content-Type": "application/json"}
+    require_error(request(port, "POST", base + "/session", login, {"unexpected": "diagnostic-secret-sentinel"}),
+                  400, "invalid_argument", "admin_login_request_invalid")
+    require_error(request(port, "POST", base + "/session", login | {"Content-Type": "text/plain"},
+                          {"code": login_code}), 415, "invalid_argument", "admin_content_type_invalid")
     code, headers, data = request(port, "POST", base + "/session", login, {"code": login_code})
     assert code == 200
     full_cookie = headers["Set-Cookie"]
     assert "HttpOnly" in full_cookie and "SameSite=Strict" in full_cookie
-    assert request(port, "POST", base + "/session", login, {"code": login_code})[0] == 401
+    require_error(request(port, "POST", base + "/session", login, {"code": login_code}),
+                  401, "unauthorized", "admin_login_code_invalid")
+    require_error(request(port, "POST", base + "/session", login, {"token": "diagnostic-secret-sentinel"}),
+                  401, "unauthorized", "admin_credential_invalid")
     cookie = {"Cookie": full_cookie.split(";", 1)[0]}
     assert request(port, "GET", base + "/session", cookie)[2] == data
     old = request(port, "GET", base + "/settings", cookie)[2]
     patch = {"revision": old["revision"], "patch": {"tools": {
         "search": {"enabled": False}, "open": {"enabled": False}}}}
-    assert request(port, "PUT", base + "/settings", login | cookie, patch)[0] == 403
+    require_error(request(port, "PUT", base + "/settings", login | cookie, patch),
+                  403, "forbidden", "admin_csrf_rejected")
     write = login | cookie | {"X-QCWS-CSRF": data["csrf"]}
+    require_error(request(port, "PUT", base + "/settings", write | {"X-QCWS-CSRF": "wrong"}, patch),
+                  403, "forbidden", "admin_csrf_rejected")
+    require_error(request(port, "PUT", base + "/settings", write,
+                          {"revision": old["revision"], "patch": {"unexpected": "diagnostic-secret-sentinel"}}),
+                  400, "invalid_argument", "settings_patch_invalid")
     updated = request(port, "PUT", base + "/settings", write, patch)
     assert updated[0] == 200 and updated[2]["tools"]["search"]["enabled"] is False
-    assert request(port, "PUT", base + "/settings", write, patch)[0] == 409
+    require_error(request(port, "PUT", base + "/settings", write, patch),
+                  409, "revision_conflict", "settings_revision_conflict")
     secret = "test-provider-key"
     key_path = base + "/providers/brave/key"
     response = request(port, "PUT", key_path, write, {"key": secret})
     assert response[0] == 200 and response[2]["providers"]["brave"]["key_set"] is True
     assert secret not in json.dumps(response[2])
     assert request(port, "DELETE", key_path, write)[2]["providers"]["brave"]["key_set"] is False
+    require_error(request(port, "PUT", key_path, write, {"key": "diagnostic-secret-sentinel invalid"}),
+                  400, "invalid_argument", "provider_key_invalid")
+    require_error(request(port, "DELETE", base + "/providers/unknown/key", write),
+                  400, "invalid_argument", "provider_unknown")
     test = request(port, "POST", base + "/providers/brave/test", write, {})
     assert test[0] == 200 and test[2]["error"]["code"] == "provider_not_configured"
     status, _, service = request(port, "GET", base + "/status", cookie)
     assert status == 200 and service["listeners"]["admin"]["port"] == port
     assert service["mcp_url"] == expected_mcp_url, "Administration status returned the wrong client MCP endpoint"
+    assert service["settings_error"] is None and service["settings_error_detail"] is None
+
+    # The detailed status must describe the failed reload while the last valid
+    # settings remain usable, then clear after the file is repaired.
+    settings_path = runtime.parent / "state" / "settings.json"
+    valid_settings = settings_path.read_bytes()
+    active_settings = request(port, "GET", base + "/settings", cookie)[2]
+    try:
+        settings_path.write_bytes(b"{")
+        for _ in range(60):
+            observed = request(port, "GET", base + "/status", cookie)[2]
+            if observed["settings_error"] is not None:
+                break
+            time.sleep(0.1)
+        else:
+            raise AssertionError("Invalid settings were not reported by administration status")
+        assert observed["settings_error"] == "settings_error"
+        assert observed["settings_error_detail"]["reason"] == "settings_json_invalid"
+        assert request(port, "GET", base + "/settings", cookie)[2] == active_settings
+    finally:
+        settings_path.write_bytes(valid_settings)
+    for _ in range(60):
+        observed = request(port, "GET", base + "/status", cookie)[2]
+        if observed["settings_error"] is None and observed["settings_error_detail"] is None:
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("Repaired settings did not clear the administration diagnostic")
+
+    view = request(port, "GET", base + "/clients", cookie)[2]
+    client = next(item for item in view["clients"] if item["id"] == "local")
+    assert client["can_reveal"] is True and "token" not in client
+    reveal = {"id": "local", "revision": view["revision"]}
+    require_error(request(port, "POST", base + "/clients/reveal", login, reveal),
+                  403, "forbidden", "admin_csrf_rejected")
+    require_error(request(port, "POST", base + "/clients/reveal", write | {"Origin": "http://foreign.invalid"}, reveal),
+                  403, "forbidden", "admin_origin_rejected")
+    require_error(request(port, "POST", base + "/clients/reveal", write, reveal | {"revision": "0" * 64}),
+                  409, "revision_conflict")
+    require_error(request(port, "POST", base + "/clients/reveal", write, reveal | {"id": "absent"}),
+                  404, "not_found", "client_not_found")
+    require_error(request(port, "POST", base + "/clients/reveal", write,
+                          reveal | {"unexpected": "diagnostic-secret-sentinel"}),
+                  400, "invalid_argument", "admin_request_invalid")
+    code, revealed_headers, revealed = request(port, "POST", base + "/clients/reveal", write, reveal)
+    assert code == 200 and revealed_headers["Cache-Control"] == "no-store"
+    assert revealed == {"id": "local", "revision": view["revision"], "active": True,
+                        "token": (runtime.parent / "client.token").read_text(encoding="ascii").strip()}
     assert request(port, "DELETE", base + "/session", write)[0] == 200
-    assert request(port, "GET", base + "/settings", cookie)[0] == 401
-    assert request(port, "POST", base + "/session", login, {"token": token})[0] == 200
+    require_error(request(port, "GET", base + "/settings", cookie),
+                  401, "unauthorized", "admin_session_expired")
+    require_error(request(port, "POST", base + "/clients/reveal", write, reveal),
+                  401, "unauthorized", "admin_session_expired")
+    code, new_headers, new_session = request(port, "POST", base + "/session", login, {"token": token})
+    assert code == 200
+    assert request(port, "DELETE", base + "/session",
+                   login | {"Cookie": new_headers["Set-Cookie"].split(";", 1)[0],
+                            "X-QCWS-CSRF": new_session["csrf"]})[0] == 200
+    for _ in range(8):
+        assert request(port, "POST", base + "/login-links", {"Authorization": f"Bearer {token}"})[0] == 200
+    require_error(request(port, "POST", base + "/login-links", {"Authorization": f"Bearer {token}"}),
+                  429, "rate_limited", "admin_login_links_exhausted")
+    for _ in range(8):
+        require_error(request(port, "POST", base + "/session", login, {"token": "diagnostic-secret-sentinel"}),
+                      401, "unauthorized", "admin_credential_invalid")
+    limited = require_error(request(port, "POST", base + "/session", login, {"token": token}),
+                            429, "rate_limited", "admin_login_rate_limited")
+    assert 1 <= limited["retry_after_seconds"] <= 600
 
 
 def verify_public_url_configuration(base, runtime, config):

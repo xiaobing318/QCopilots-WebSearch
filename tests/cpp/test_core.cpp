@@ -1,5 +1,6 @@
 #include <QCoreApplication>
 #include <QCryptographicHash>
+#include <QDir>
 #include <QFile>
 #include <QLockFile>
 #include <QProcess>
@@ -35,6 +36,26 @@ template <class F> void error(const char *code, F f) {
     return;
   }
   throw std::runtime_error(std::string("Expected error: ") + code);
+}
+template <class F> Error cacheError(const char *reason, F f) {
+  try {
+    f();
+  } catch (const Error &e) {
+    REQUIRE(e.code == "cache_unavailable");
+    REQUIRE(e.status == 503);
+    REQUIRE(e.reason == reason);
+    REQUIRE(std::string(e.what()) != "Cache is unavailable.");
+    REQUIRE(e.localDiagnostic.find("Cache database: ") != std::string::npos);
+    REQUIRE(e.localDiagnostic.find("Cache lock: ") != std::string::npos);
+    const auto publicError = errorPayload(e);
+    REQUIRE(publicError.at("error").at("code") == "cache_unavailable");
+    REQUIRE(publicError.at("error").at("reason") == reason);
+    REQUIRE(!publicError.at("error").contains("localDiagnostic"));
+    REQUIRE(publicError.dump().find("Cache database:") == std::string::npos);
+    REQUIRE(publicError.dump().find("Lock owner PID:") == std::string::npos);
+    return e;
+  }
+  throw std::runtime_error(std::string("Expected cache error reason: ") + reason);
 }
 std::shared_ptr<CancelToken> token(int ms = 3000) {
   auto t = std::make_shared<CancelToken>();
@@ -422,17 +443,25 @@ void cacheTests() {
     time = 110;
     REQUIRE(!cache.get("a"));
     REQUIRE(cache.stats()["entries"] == 0);
-    error("cache_unavailable", [&] { Cache other(dir.path().toStdString() + "/cache.sqlite"); });
+    const auto conflict = cacheError("instance_already_running", [&] {
+      Cache other(dir.path().toStdString() + "/cache.sqlite");
+    });
+    const auto cachePath = QDir::toNativeSeparators(dir.filePath("cache.sqlite")).toStdString();
+    REQUIRE(conflict.retryable);
+    REQUIRE(conflict.localDiagnostic.find("Lock owner PID: " +
+                std::to_string(QCoreApplication::applicationPid()) + "\n") != std::string::npos);
+    REQUIRE(conflict.localDiagnostic.find("Cache database: " + cachePath + "\n") != std::string::npos);
+    REQUIRE(errorPayload(conflict).dump().find(cachePath) == std::string::npos);
     for (int i = 0; i < 100; ++i)
       cache.put(std::to_string(i), {{"data", std::string(100000, 'a')}}, 60);
     REQUIRE(cache.stats()["storage_bytes"].get<long long>() <= 16 * 1024 * 1024);
     cache.close();
     cache.close();
-    error("cache_unavailable", [&] { cache.get("a"); });
+    cacheError("cache_worker_unavailable", [&] { cache.get("a"); });
   }
   REQUIRE(QSqlDatabase::connectionNames().size() == baseline);
   for (int i = 0; i < 10; ++i)
-    error("cache_unavailable", [&] { Cache bad(dir.path().toStdString()); });
+    cacheError("cache_database_open_failed", [&] { Cache bad(dir.path().toStdString()); });
   REQUIRE(QSqlDatabase::connectionNames().size() == baseline);
 }
 struct SqlFixture {
@@ -480,7 +509,10 @@ void cacheFailureTests() {
     fixture.execute("BEGIN IMMEDIATE");
     REQUIRE(cache.get("stable")->at("value") == "original");
     const auto began = Clock::now();
-    error("cache_unavailable", [&] { cache.put("stable", {{"value", "replacement"}}, 60); });
+    const auto busy = cacheError("cache_database_busy", [&] {
+      cache.put("stable", {{"value", "replacement"}}, 60);
+    });
+    REQUIRE(busy.retryable);
     REQUIRE(Clock::now() - began < std::chrono::seconds(2));
     fixture.execute("ROLLBACK");
     REQUIRE(cache.get("stable")->at("value") == "original");
@@ -490,7 +522,7 @@ void cacheFailureTests() {
     fixture.execute("INSERT INTO fixture_filler VALUES(zeroblob(3*1024*1024))");
     Json large = {{"data", std::string(2 * 1024 * 1024, 'x')}};
     REQUIRE(large.dump().size() < cache.stats()["effective_payload_limit"].get<std::size_t>());
-    error("cache_unavailable", [&] { cache.put("stable", large, 60); });
+    cacheError("cache_storage_full", [&] { cache.put("stable", large, 60); });
     REQUIRE(cache.get("stable")->at("value") == "original");
     fixture.execute("DROP TABLE fixture_filler");
     cache.put("stable", large, 60);
@@ -510,11 +542,11 @@ void cacheFailureTests() {
       SqlFixture fixture(lruPath);
       fixture.execute("BEGIN IMMEDIATE");
       REQUIRE(cache.get("a")->at("value") == 1);
-      error("cache_unavailable", [&] { cache.put("c", {{"value", 3}}, 60); });
+      cacheError("cache_database_busy", [&] { cache.put("c", {{"value", 3}}, 60); });
       fixture.execute("ROLLBACK");
       fixture.execute("CREATE TRIGGER fixture_fail_insert BEFORE INSERT ON entries "
                       "BEGIN SELECT RAISE(ABORT,'fixture'); END");
-      error("cache_unavailable", [&] { cache.put("c", {{"value", 3}}, 60); });
+      cacheError("cache_database_error", [&] { cache.put("c", {{"value", 3}}, 60); });
       fixture.execute("DROP TRIGGER fixture_fail_insert");
     }
     cache.put("c", {{"value", 3}}, 60);
@@ -534,7 +566,8 @@ void cacheFailureTests() {
     REQUIRE(file.open(QIODevice::WriteOnly));
     REQUIRE(file.write("not a SQLite database") == 21);
   }
-  error("cache_unavailable", [&] { Cache broken(corrupt.toStdString()); });
+  const auto corruptError = cacheError("cache_database_corrupt", [&] { Cache broken(corrupt.toStdString()); });
+  REQUIRE(!corruptError.retryable);
   REQUIRE(QSqlDatabase::connectionNames().size() == baseline);
   QLockFile lock(corrupt + ".lock");
   REQUIRE(lock.tryLock(0));
@@ -1569,7 +1602,7 @@ int main(int argc, char **argv) {
       Cache cache(argv[2], 16 * 1024 * 1024, 100);
       return expectOpen ? 0 : 31;
     } catch (const Error &e) {
-      return !expectOpen && e.code == "cache_unavailable" ? 0 : 32;
+      return !expectOpen && e.code == "cache_unavailable" && e.reason == "instance_already_running" ? 0 : 32;
     }
   }
   if (argc == 5 && std::string(argv[1]) == "--tls-probe") {

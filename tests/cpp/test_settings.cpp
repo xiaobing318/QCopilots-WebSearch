@@ -9,6 +9,18 @@
 int main(int argc, char **argv) {
   QCoreApplication app(argc, argv);
   try {
+    const auto requireReason = [](const char *code, const char *reason, const auto &action) {
+      try {
+        action();
+      } catch (const qws::Error &error) {
+        require(error.code == code, "Unexpected diagnostic error code.");
+        require(error.reason == reason, "Unexpected diagnostic reason.");
+        require(qws::errorPayload(error).dump().find("diagnostic-secret-sentinel") == std::string::npos,
+                "An error diagnostic exposed caller data.");
+        return;
+      }
+      throw std::runtime_error("Expected a diagnostic error.");
+    };
     QTemporaryDir temporary;
     require(temporary.isValid(), "Temporary directory required.");
     qws::Config config{qws::defaultConfiguration(), temporary.path().toStdString()};
@@ -59,6 +71,8 @@ int main(int argc, char **argv) {
     invalid.close();
     reopened.reloadIfChanged();
     require(reopened.error() == "settings_error", "Invalid external edits must be reported.");
+    require(reopened.errorDetails()["reason"] == "settings_json_invalid",
+            "Invalid JSON must have a precise storage diagnostic.");
     require(reopened.provider(*reopened.current()).id == "brave", "Invalid edits must retain last settings.");
 
     for (const auto *id : {"perplexity", "deepseek"}) {
@@ -76,6 +90,95 @@ int main(int argc, char **argv) {
       require(persisted.policy(*persisted.current())["provider_ready"] == true, "A keyed provider is ready.");
       require(reopened.clearKey(id)["providers"][id]["key_set"] == false, "New provider keys can be cleared.");
     }
+
+    requireReason("revision_conflict", "settings_revision_conflict", [&] {
+      reopened.update(qws::Json::object(), std::string(16, '0'));
+    });
+    requireReason("invalid_argument", "settings_patch_invalid", [&] {
+      reopened.update({{"unexpected", "diagnostic-secret-sentinel"}}, reopened.current()->revision);
+    });
+    requireReason("invalid_argument", "settings_endpoint_invalid", [&] {
+      reopened.update({{"search", {{"searxng", {{"url", "https://diagnostic-secret-sentinel@example.test/"}}}}}},
+                      reopened.current()->revision);
+    });
+    requireReason("invalid_argument", "provider_key_invalid", [&] {
+      reopened.setKey("brave", "diagnostic-secret-sentinel with spaces");
+    });
+    requireReason("invalid_argument", "provider_unknown", [&] {
+      reopened.clearKey("unknown");
+    });
+    reopened.reloadIfChanged();
+    require(reopened.error().empty() && reopened.errorDetails().is_null(),
+            "Valid restored files must clear both legacy and detailed diagnostics.");
+
+    QFile invalidSchema(QDir(temporary.path()).filePath("state/settings.json"));
+    const QByteArray invalidSettings = R"({"schema_version":1,"unexpected":"diagnostic-secret-sentinel"})";
+    require(invalidSchema.open(QIODevice::WriteOnly) && invalidSchema.write(invalidSettings) == invalidSettings.size(),
+            "Cannot write invalid schema fixture.");
+    invalidSchema.close();
+    reopened.reloadIfChanged();
+    require(reopened.errorDetails()["reason"] == "settings_schema_invalid",
+            "Settings schema failures must be distinct from JSON failures.");
+    require(reopened.errorDetails().dump().find("diagnostic-secret-sentinel") == std::string::npos,
+            "Settings schema diagnostics exposed saved data.");
+    reopened.update(qws::Json::object(), reopened.current()->revision);
+    reopened.reloadIfChanged();
+
+    QFile invalidSecrets(QDir(temporary.path()).filePath("state/secrets.json"));
+    require(invalidSecrets.open(QIODevice::WriteOnly) && invalidSecrets.write("{") == 1,
+            "Cannot write invalid secrets fixture.");
+    invalidSecrets.close();
+    reopened.reloadIfChanged();
+    require(reopened.errorDetails()["reason"] == "secrets_json_invalid",
+            "Secret JSON errors must identify the secret store without exposing its contents.");
+    const QByteArray malformedSecrets = R"({"schema_version":1,"keys":{"unknown":"diagnostic-secret-sentinel"}})";
+    require(invalidSecrets.open(QIODevice::WriteOnly) && invalidSecrets.write(malformedSecrets) == malformedSecrets.size(),
+            "Cannot write invalid secrets schema fixture.");
+    invalidSecrets.close();
+    reopened.reloadIfChanged();
+    require(reopened.errorDetails()["reason"] == "secrets_schema_invalid",
+            "Secret schema failures must be distinct from JSON failures.");
+    require(reopened.errorDetails().dump().find("diagnostic-secret-sentinel") == std::string::npos,
+            "Secret schema diagnostics exposed a provider key.");
+    reopened.setKey("brave", "restored-provider-key");
+    reopened.reloadIfChanged();
+    require(reopened.errorDetails().is_null(), "Repairing provider keys must clear storage diagnostics.");
+
+    const auto unchanged = reopened.current();
+    require(QFile::remove(invalidSchema.fileName()) && QDir().mkpath(invalidSchema.fileName()),
+            "Cannot prepare a directory occupying the settings file.");
+    requireReason("internal_error", "settings_path_invalid", [&] {
+      reopened.update({{"search", {{"provider", "auto"}}}}, unchanged->revision);
+    });
+    require(reopened.current() == unchanged, "Failed writes must not publish settings.");
+    reopened.reloadIfChanged();
+    require(reopened.errorDetails()["reason"] == "settings_path_invalid",
+            "A directory occupying a settings file must have its own diagnostic.");
+    require(QFile::remove(invalidSecrets.fileName()) && QDir().mkpath(invalidSecrets.fileName()),
+            "Cannot prepare a directory occupying the provider key file.");
+#ifdef _WIN32
+    constexpr auto secretPathCode = "invalid_configuration";
+#else
+    constexpr auto secretPathCode = "internal_error";
+#endif
+    requireReason(secretPathCode, "secrets_path_invalid", [&] {
+      reopened.setKey("brave", "replacement-provider-key");
+    });
+    require(reopened.current() == unchanged, "Rejected provider key writes must retain the previous snapshot.");
+
+    QTemporaryDir blockedDirectory;
+    require(blockedDirectory.isValid(), "Temporary directory required.");
+    QFile blocker(QDir(blockedDirectory.path()).filePath("state"));
+    require(blocker.open(QIODevice::WriteOnly) && blocker.write("occupied") == 8,
+            "Cannot prepare a blocked settings directory.");
+    blocker.close();
+    qws::SettingsStore blocked({qws::defaultConfiguration(), blockedDirectory.path().toStdString()});
+    requireReason("internal_error", "settings_directory_unavailable", [&] {
+      blocked.update(qws::Json::object(), blocked.current()->revision);
+    });
+    requireReason("internal_error", "secrets_directory_unavailable", [&] {
+      blocked.setKey("brave", "example-provider-key");
+    });
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';
     return 1;

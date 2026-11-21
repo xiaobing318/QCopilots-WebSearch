@@ -48,6 +48,12 @@ set_tests_properties(client-tokens PROPERTIES TIMEOUT 60)
 add_test(NAME client-registry COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/python/test_client_registry.py"
   --Executable "$<TARGET_FILE:qcopilots-websearch>")
 set_tests_properties(client-registry PROPERTIES TIMEOUT 90)
+add_test(NAME startup-diagnostics COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/python/test_startup_diagnostics.py"
+  --Executable "$<TARGET_FILE:qcopilots-websearch>")
+set_tests_properties(startup-diagnostics PROPERTIES TIMEOUT 120)
+add_test(NAME mcp-icons COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/python/test_mcp_icons.py"
+  --Executable "$<TARGET_FILE:qcopilots-websearch>" --Icon "${PROJECT_SOURCE_DIR}/resources/websearch.svg")
+set_tests_properties(mcp-icons PROPERTIES TIMEOUT 45)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/cpp/test_providers.cpp")
   add_executable(qcws_provider_tests cpp/test_providers.cpp)
   target_link_libraries(qcws_provider_tests PRIVATE qcws_core httplib::httplib)

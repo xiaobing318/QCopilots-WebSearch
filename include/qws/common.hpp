@@ -43,13 +43,32 @@ inline Json parseBoundedJson(std::string_view input) {
 class Error final : public std::runtime_error {
 public:
   Error(std::string value, std::string safeMessage, int httpStatus = 400, bool canRetry = false,
-        int retryAfter = 0)
+        int retryAfter = 0, std::string specificReason = {}, Json safeParameters = Json::object(),
+        std::string diagnostic = {})
       : std::runtime_error(std::move(safeMessage)), code(std::move(value)), status(httpStatus),
-        retryable(canRetry), retryAfterSeconds(retryAfter) {}
+        retryable(canRetry), retryAfterSeconds(retryAfter), reason(std::move(specificReason)),
+        parameters(std::move(safeParameters)), localDiagnostic(std::move(diagnostic)) {}
   const std::string code;
   const int status;
   const bool retryable;
   const int retryAfterSeconds;
+  const std::string reason;
+  const Json parameters;
+  // Deployment paths and OS diagnostics must never enter public errorPayload().
+  const std::string localDiagnostic;
+
+  Error withReason(std::string value, Json values = Json::object()) const {
+    return Error(code, what(), status, retryable, retryAfterSeconds, std::move(value),
+                 std::move(values), localDiagnostic);
+  }
+  Error withLocalDiagnostic(std::string value) const {
+    return Error(code, what(), status, retryable, retryAfterSeconds, reason, parameters,
+                 std::move(value));
+  }
+  Error withMessage(std::string value) const {
+    return Error(code, std::move(value), status, retryable, retryAfterSeconds, reason,
+                 parameters, localDiagnostic);
+  }
 };
 
 struct CancelToken {
@@ -62,6 +81,28 @@ struct CancelToken {
 
 inline Json errorPayload(const Error &error) {
   Json details = {{"code", error.code}, {"message", error.what()}, {"retryable", error.retryable}};
+  const auto safeIdentifier = [](const std::string &value, bool clientId) {
+    if (value.empty() || value.size() > 64)
+      return false;
+    for (const unsigned char character : value) {
+      if (!(character >= 'a' && character <= 'z') && !(character >= '0' && character <= '9') &&
+          character != '_' && !(clientId && ((character >= 'A' && character <= 'Z') ||
+                                             character == '.' || character == '-')))
+        return false;
+    }
+    return true;
+  };
+  if (safeIdentifier(error.reason, false)) {
+    details["reason"] = error.reason;
+    // Only the existing, non-secret client identifier is accepted as a dynamic
+    // message parameter. Never forward arbitrary exception or upstream data.
+    if (error.parameters.is_object() && error.parameters.contains("client_id") &&
+        error.parameters.at("client_id").is_string()) {
+      const auto value = error.parameters.at("client_id").get<std::string>();
+      if (safeIdentifier(value, true))
+        details["parameters"] = {{"client_id", value}};
+    }
+  }
   if (error.retryAfterSeconds > 0)
     details["retry_after_seconds"] = error.retryAfterSeconds;
   return {{"error", std::move(details)}};

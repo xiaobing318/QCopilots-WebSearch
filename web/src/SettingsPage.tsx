@@ -10,11 +10,17 @@ import {
   type SettingsPatch,
   type SettingsView,
 } from "./admin";
-import { errorLabel, providerName, type Text } from "./labels";
+import {
+  errorMessage,
+  providerName,
+  renderMessage,
+  type Message,
+  type Text,
+} from "./labels";
 import { ProviderOptions } from "./ProviderOptions";
 import { ClientTokens } from "./ClientTokens";
 
-type Notice = { key: string; variant: "error" | "success" };
+type Notice = Message & { variant: "error" | "success" };
 type Props = {
   csrf: string;
   t: Text;
@@ -34,7 +40,7 @@ export function SettingsPage({
 }: Props) {
   const [settings, setSettings] = useState<SettingsView>();
   const [status, setStatus] = useState<ServiceStatus>();
-  const [statusError, setStatusError] = useState<string>();
+  const [statusError, setStatusError] = useState<Message>();
   const [notice, setNotice] = useState<Notice>();
   const [busy, setBusy] = useState<"change" | "test" | "status">();
   const [result, setResult] = useState<ProviderResult>();
@@ -73,7 +79,11 @@ export function SettingsPage({
         if (abort.signal.aborted) return;
         if (failure instanceof ApiError && failure.code === "unauthorized")
           onExpired();
-        else setNotice({ key: errorLabel(failure), variant: "error" });
+        else
+          setNotice({
+            ...errorMessage(failure, "settingsLoad"),
+            variant: "error",
+          });
       },
     );
     void admin.status(abort.signal).then(
@@ -84,7 +94,7 @@ export function SettingsPage({
         if (abort.signal.aborted) return;
         if (failure instanceof ApiError && failure.code === "unauthorized")
           onExpired();
-        else setStatusError(errorLabel(failure));
+        else setStatusError(errorMessage(failure, "statusLoad"));
       },
     );
     return () => abort.abort();
@@ -93,6 +103,7 @@ export function SettingsPage({
   async function perform(
     action: NonNullable<typeof busy>,
     task: () => Promise<void>,
+    context = "settingsSave",
   ) {
     if (locked) return;
     setNotice(undefined);
@@ -103,7 +114,7 @@ export function SettingsPage({
       if (failure instanceof ApiError && failure.code === "unauthorized") {
         onExpired();
       } else {
-        setNotice({ key: errorLabel(failure), variant: "error" });
+        setNotice({ ...errorMessage(failure, context), variant: "error" });
       }
     } finally {
       setBusy(undefined);
@@ -131,19 +142,27 @@ export function SettingsPage({
   }
 
   function saveKey(provider: KeyedProvider, key: string) {
-    void perform("change", async () => {
-      setSettings(await admin.saveKey(provider, key, csrf));
-      setResult(undefined);
-      setNotice({ key: "keySaved", variant: "success" });
-    });
+    void perform(
+      "change",
+      async () => {
+        setSettings(await admin.saveKey(provider, key, csrf));
+        setResult(undefined);
+        setNotice({ key: "keySaved", variant: "success" });
+      },
+      "providerKeySave",
+    );
   }
 
   function removeKey(provider: KeyedProvider) {
-    void perform("change", async () => {
-      setSettings(await admin.removeKey(provider, csrf));
-      setResult(undefined);
-      setNotice({ key: "keyRemoved", variant: "success" });
-    });
+    void perform(
+      "change",
+      async () => {
+        setSettings(await admin.removeKey(provider, csrf));
+        setResult(undefined);
+        setNotice({ key: "keyRemoved", variant: "success" });
+      },
+      "providerKeyDelete",
+    );
   }
 
   async function refreshStatus() {
@@ -153,22 +172,29 @@ export function SettingsPage({
     } catch (failure) {
       if (failure instanceof ApiError && failure.code === "unauthorized")
         throw failure;
-      setStatusError(errorLabel(failure));
+      setStatusError(errorMessage(failure, "statusLoad"));
     }
   }
 
   function testProvider(provider: Provider) {
-    void perform("test", async () => {
-      setResult(undefined);
-      const response = await admin.test(provider, csrf);
-      if (response.ok) setResult(response);
-      else
-        setNotice({
-          key: "errors." + (response.error?.code ?? "unknown"),
-          variant: "error",
-        });
-      await refreshStatus();
-    });
+    void perform(
+      "test",
+      async () => {
+        setResult(undefined);
+        const response = await admin.test(provider, csrf);
+        if (response.ok) setResult(response);
+        else
+          setNotice({
+            ...errorMessage(
+              ApiError.fromDetails(response.error),
+              "providerTest",
+            ),
+            variant: "error",
+          });
+        await refreshStatus();
+      },
+      "providerTest",
+    );
   }
 
   return (
@@ -212,7 +238,7 @@ export function SettingsPage({
             className={"message " + notice.variant}
             role={notice.variant === "error" ? "alert" : "status"}
           >
-            {t(notice.key)}
+            {renderMessage(t, notice)}
           </p>
         )}
         {activeTab === "authorization" && (
@@ -280,8 +306,10 @@ export function SettingsPage({
                   className="button secondary"
                   disabled={locked}
                   onClick={() =>
-                    void perform("change", async () =>
-                      setSettings(await admin.settings()),
+                    void perform(
+                      "change",
+                      async () => setSettings(await admin.settings()),
+                      "settingsLoad",
                     )
                   }
                 >
@@ -298,7 +326,9 @@ export function SettingsPage({
               status={status}
               error={statusError}
               busy={locked}
-              refresh={() => void perform("status", refreshStatus)}
+              refresh={() =>
+                void perform("status", refreshStatus, "statusLoad")
+              }
               t={t}
             />
           </div>
@@ -356,7 +386,7 @@ function StatusPanel({
   t,
 }: {
   status?: ServiceStatus;
-  error?: string;
+  error?: Message;
   busy: boolean;
   refresh: () => void;
   t: Text;
@@ -369,12 +399,20 @@ function StatusPanel({
       <div className="panel-body">
         {error && (
           <p className="message error" role="alert">
-            {t(error)}
+            {renderMessage(t, error)}
           </p>
         )}
-        {status?.settings_error && (
+        {(status?.settings_error_detail || status?.settings_error) && (
           <p className="message error" role="alert">
-            {t("settingsError")}
+            {status.settings_error_detail
+              ? renderMessage(
+                  t,
+                  errorMessage(
+                    ApiError.fromDetails(status.settings_error_detail),
+                    "settingsLoad",
+                  ),
+                )
+              : t("settingsError")}
           </p>
         )}
         {status ? (

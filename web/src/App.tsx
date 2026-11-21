@@ -1,12 +1,18 @@
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { admin, ApiError, type Session } from "./admin";
 import { applyLanguage, getLanguage, type Language } from "./i18n/i18n";
-import { errorLabel, localized, type Text } from "./labels";
+import {
+  errorMessage,
+  localized,
+  renderMessage,
+  type Message,
+  type Text,
+} from "./labels";
 import { SettingsPage } from "./SettingsPage";
 
 type State =
   | { mode: "loading" }
-  | { mode: "sign-in"; error?: string }
+  | { mode: "sign-in"; error?: Message }
   | { mode: "settings"; session: Session };
 
 export function App({ loginCode = null }: { loginCode?: string | null }) {
@@ -14,7 +20,7 @@ export function App({ loginCode = null }: { loginCode?: string | null }) {
   const [state, setState] = useState<State>({ mode: "loading" });
   const [pending, setPending] = useState(false);
   const [mutationPending, setMutationPending] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useState<Message>();
   const t = localized(language);
 
   useEffect(() => {
@@ -40,7 +46,7 @@ export function App({ loginCode = null }: { loginCode?: string | null }) {
           failure.code === "unauthorized";
         setState({
           mode: "sign-in",
-          error: expected ? undefined : errorLabel(failure),
+          error: expected ? undefined : errorMessage(failure, "signIn"),
         });
       },
     );
@@ -57,7 +63,7 @@ export function App({ loginCode = null }: { loginCode?: string | null }) {
     try {
       setState({ mode: "settings", session: await admin.signIn({ token }) });
     } catch (failure) {
-      setState({ mode: "sign-in", error: errorLabel(failure) });
+      setState({ mode: "sign-in", error: errorMessage(failure, "signIn") });
     } finally {
       setPending(false);
     }
@@ -65,7 +71,7 @@ export function App({ loginCode = null }: { loginCode?: string | null }) {
 
   const sessionExpired = useCallback(() => {
     setError(undefined);
-    setState({ mode: "sign-in", error: "errors.unauthorized" });
+    setState({ mode: "sign-in", error: { key: "errors.unauthorized" } });
   }, []);
 
   async function signOut() {
@@ -78,7 +84,7 @@ export function App({ loginCode = null }: { loginCode?: string | null }) {
     } catch (failure) {
       if (failure instanceof ApiError && failure.code === "unauthorized")
         sessionExpired();
-      else setError(errorLabel(failure));
+      else setError(errorMessage(failure, "signOut"));
     } finally {
       setPending(false);
     }
@@ -141,7 +147,7 @@ export function App({ loginCode = null }: { loginCode?: string | null }) {
           <>
             {error && (
               <p className="message error" role="alert">
-                {t(error)}
+                {renderMessage(t, error)}
               </p>
             )}
             <SettingsPage
@@ -165,7 +171,7 @@ function LoginPage({
   t,
 }: {
   pending: boolean;
-  error?: string;
+  error?: Message;
   signIn: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   t: Text;
 }) {
@@ -180,7 +186,7 @@ function LoginPage({
         <form className="panel-body" onSubmit={(event) => void signIn(event)}>
           {error && (
             <p className="message error" role="alert">
-              {t(error)}
+              {renderMessage(t, error)}
             </p>
           )}
           <label className="field">

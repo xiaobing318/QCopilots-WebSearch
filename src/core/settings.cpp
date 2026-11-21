@@ -19,60 +19,105 @@ QByteArray hash(const QByteArray &data) {
   return QCryptographicHash::hash(data, QCryptographicHash::Sha256).toHex();
 }
 
-Json decode(const QByteArray &bytes, const char *schemaName) {
+Json decode(const QByteArray &bytes, const char *schemaName, bool secret = false) {
   auto result = parseBoundedJson({bytes.constData(), size_t(bytes.size())});
   if (result.is_discarded())
-    throw Error("invalid_configuration", "Settings files must contain valid JSON.");
-  validateSchema(readSchema(schemaName), result);
+    throw Error("invalid_configuration", "Settings files must contain valid JSON.")
+        .withReason(secret ? "secrets_json_invalid" : "settings_json_invalid");
+  try {
+    validateSchema(readSchema(schemaName), result);
+  } catch (const Error &error) {
+    if (error.code != "invalid_argument")
+      throw;
+    // Schema diagnostics may contain provider keys. Only a fixed safe message
+    // and the affected storage category may leave this layer.
+    throw error.withMessage("Saved configuration does not match its schema.")
+        .withReason(secret ? "secrets_schema_invalid" : "settings_schema_invalid");
+  }
   return result;
 }
 
 QByteArray loadFile(const QString &path, bool secret = false) {
   const QFileInfo info(path);
-  if (info.isSymLink())
-    throw Error("invalid_configuration", "Settings files cannot be symbolic links.");
+  if (info.isSymLink() || info.isJunction())
+    throw Error("invalid_configuration", "Settings files cannot be linked files.")
+        .withReason(secret ? "secrets_path_invalid" : "settings_path_invalid");
   if (!info.exists())
     return {};
-  if (!info.isFile() || info.size() <= 0 || info.size() > 128 * 1024)
-    throw Error("invalid_configuration", "Settings files must be regular and bounded.");
+  if (!info.isFile())
+    throw Error("invalid_configuration", "Settings files must be regular files.")
+        .withReason(secret ? "secrets_path_invalid" : "settings_path_invalid");
+  if (info.size() <= 0 || info.size() > 128 * 1024)
+    throw Error("invalid_configuration", "Settings files must be nonempty and bounded.")
+        .withReason(secret ? "secrets_file_size_invalid" : "settings_file_size_invalid");
 #ifdef _WIN32
-  if (secret)
-    return readWindowsServicePrivateFile(path);
+  if (secret) {
+    try {
+      return readWindowsServicePrivateFile(path);
+    } catch (const Error &error) {
+      throw error.withMessage("Cannot read protected provider key storage.")
+          .withReason("secrets_read_failed");
+    }
+  }
 #else
   if (secret && (info.permissions() & (QFileDevice::ReadGroup | QFileDevice::WriteGroup |
                                        QFileDevice::ExeGroup | QFileDevice::ReadOther |
                                        QFileDevice::WriteOther | QFileDevice::ExeOther)))
-    throw Error("invalid_configuration", "Secrets must be accessible only to the owner.");
+    throw Error("invalid_configuration", "Secrets must be accessible only to the owner.")
+        .withReason("secrets_permissions_invalid");
 #endif
   QFile file(path);
   if (!file.open(QIODevice::ReadOnly))
-    throw Error("invalid_configuration", "Cannot read settings file.");
+    throw Error("invalid_configuration", "Cannot read settings file.")
+        .withReason(secret ? "secrets_read_failed" : "settings_read_failed");
   auto bytes = file.read(128 * 1024 + 1);
   if (bytes.isEmpty() || bytes.size() > 128 * 1024)
-    throw Error("invalid_configuration", "Cannot read bounded settings file.");
+    throw Error("invalid_configuration", "Cannot read bounded settings file.")
+        .withReason(secret ? "secrets_read_failed" : "settings_read_failed");
   return bytes;
 }
 
 void saveFile(const QString &path, const QByteArray &data, bool secret = false) {
-  if (!QDir().mkpath(QFileInfo(path).absolutePath()) || QFileInfo(path).isSymLink())
-    throw Error("internal_error", "Cannot create the settings directory.", 500);
+  const QFileInfo info(path);
+  if (info.isSymLink())
+    throw Error("internal_error", "Settings destination must be a regular file.", 500)
+        .withReason(secret ? "secrets_path_invalid" : "settings_path_invalid");
+  if (info.isJunction() || (info.exists() && !info.isFile())) {
+#ifdef _WIN32
+    if (secret)
+      throw Error("invalid_configuration", "Provider key storage must be a regular file.")
+          .withReason("secrets_path_invalid");
+#endif
+    throw Error("internal_error", "Settings destination must be a regular file.", 500)
+        .withReason(secret ? "secrets_path_invalid" : "settings_path_invalid");
+  }
+  if (!QDir().mkpath(info.absolutePath()))
+    throw Error("internal_error", "Cannot create the settings directory.", 500)
+        .withReason(secret ? "secrets_directory_unavailable" : "settings_directory_unavailable");
 #ifdef _WIN32
   if (secret) {
-    writeWindowsServicePrivateFile(path, data);
+    try {
+      writeWindowsServicePrivateFile(path, data);
+    } catch (const Error &error) {
+      throw error.withMessage("Cannot save protected provider key storage.")
+          .withReason("secrets_write_failed");
+    }
     return;
   }
 #endif
   QSaveFile file(path);
   if (!file.open(QIODevice::WriteOnly) || (secret && !file.setPermissions(ownerReadWrite)) ||
       file.write(data) != data.size() || !file.commit())
-    throw Error("internal_error", "Cannot save settings.", 500);
+    throw Error("internal_error", "Cannot save settings.", 500)
+        .withReason(secret ? "secrets_write_failed" : "settings_write_failed");
 }
 
 void validateEndpoint(const std::string &endpoint) {
   const QUrl url(QString::fromStdString(endpoint), QUrl::StrictMode);
   if (!url.isValid() || url.host().isEmpty() || !url.userInfo().isEmpty() ||
       url.hasQuery() || url.hasFragment() || (url.scheme() != "http" && url.scheme() != "https"))
-    throw Error("invalid_argument", "Use a fixed HTTP(S) search endpoint without credentials or query.");
+    throw Error("invalid_argument", "Use a fixed HTTP(S) search endpoint without credentials or query.")
+        .withReason("settings_endpoint_invalid");
 }
 
 std::shared_ptr<const SettingsSnapshot> snapshot(Json value, Json keys) {
@@ -165,15 +210,32 @@ std::string SettingsStore::error() const {
   std::lock_guard lock(mutex_);
   return error_;
 }
+Json SettingsStore::errorDetails() const {
+  std::lock_guard lock(mutex_);
+  return errorDetails_;
+}
 
 Json SettingsStore::update(const Json &patch, const std::string &expectedRevision) {
-  validateSchema(readSchema("settings-update"), {{"patch", patch}, {"revision", expectedRevision}});
+  try {
+    validateSchema(readSchema("settings-update"), {{"patch", patch}, {"revision", expectedRevision}});
+  } catch (const Error &error) {
+    if (error.code != "invalid_argument")
+      throw;
+    throw error.withMessage("Invalid settings change.").withReason("settings_patch_invalid");
+  }
   std::lock_guard lock(mutex_);
   if (expectedRevision != active_->revision)
-    throw Error("revision_conflict", "Settings changed. Reload before saving.", 409);
+    throw Error("revision_conflict", "Settings changed. Reload before saving.", 409)
+        .withReason("settings_revision_conflict");
   auto merged = active_->value;
   merged.merge_patch(patch);
-  validateSchema(readSchema("settings"), merged);
+  try {
+    validateSchema(readSchema("settings"), merged);
+  } catch (const Error &error) {
+    if (error.code != "invalid_argument")
+      throw;
+    throw error.withMessage("Settings do not match the required schema.").withReason("settings_schema_invalid");
+  }
   const auto replacement = snapshot(std::move(merged), active_->keys);
   const auto data = QByteArray::fromStdString(replacement->value.dump(2) + "\n");
   saveFile(filePath(directory_, "settings.json"), data);
@@ -183,9 +245,11 @@ Json SettingsStore::update(const Json &patch, const std::string &expectedRevisio
 }
 
 Json SettingsStore::setKey(const std::string &id, const std::string &key) {
-  if (!providerHasKey(id) || key.empty() || key.size() > 8192 ||
+  if (!providerHasKey(id))
+    throw Error("invalid_argument", "Unknown provider key.").withReason("provider_unknown");
+  if (key.empty() || key.size() > 8192 ||
       std::any_of(key.begin(), key.end(), [](unsigned char ch) { return ch < 0x21 || ch > 0x7e; }))
-    throw Error("invalid_argument", "A valid provider key is required.");
+    throw Error("invalid_argument", "A valid provider key is required.").withReason("provider_key_invalid");
   std::lock_guard lock(mutex_);
   auto settings = *active_;
   settings.keys[id] = key;
@@ -198,7 +262,7 @@ Json SettingsStore::setKey(const std::string &id, const std::string &key) {
 
 Json SettingsStore::clearKey(const std::string &id) {
   if (!providerHasKey(id))
-    throw Error("invalid_argument", "Unknown provider key.");
+    throw Error("invalid_argument", "Unknown provider key.").withReason("provider_unknown");
   std::lock_guard lock(mutex_);
   auto settings = *active_;
   settings.keys.erase(id);
@@ -218,13 +282,15 @@ void SettingsStore::reloadIfChanged() {
     const auto secretsHash = hash(secrets);
     if (settingsHash != settingsStamp_ || secretsHash != secretsStamp_) {
       active_ = snapshot(settings.isEmpty() ? defaults_ : decode(settings, "settings"),
-                         secrets.isEmpty() ? emptySecrets.at("keys") : decode(secrets, "secrets").at("keys"));
+                         secrets.isEmpty() ? emptySecrets.at("keys") : decode(secrets, "secrets", true).at("keys"));
       settingsStamp_ = settingsHash;
       secretsStamp_ = secretsHash;
     }
     error_.clear();
-  } catch (const Error &) {
+    errorDetails_ = nullptr;
+  } catch (const Error &error) {
     error_ = "settings_error";
+    errorDetails_ = errorPayload(error)["error"];
   }
 }
 
@@ -275,8 +341,11 @@ AdminConfig adminConfiguration(const Config &config, bool readToken) {
 
 void checkSettings(const Config &config) {
   SettingsStore settings(config);
-  if (!settings.error().empty())
-    throw Error("invalid_configuration", "Invalid settings or secrets.");
+  if (!settings.error().empty()) {
+    const auto details = settings.errorDetails();
+    throw Error("invalid_configuration", details.value("message", "Invalid settings or secrets."))
+        .withReason(details.value("reason", ""));
+  }
   (void)adminConfiguration(config);
 }
 } // namespace qws

@@ -335,11 +335,11 @@ function Assert-InstalledTokenConfig([hashtable]$metadata, [string]$bearer, [str
     } finally { $crypto.Dispose() }
     $registryPath = Join-Path $metadata.DataRoot 'state\client-registry.json'
     $text = [IO.File]::ReadAllText($registryPath)
-    Assert (!$text.Contains($bearer)) 'The installed client registry contains a plaintext token.'
     $registry = $text | ConvertFrom-Json
     $entry = @($registry.clients | Where-Object id -eq 'msi-acceptance')
     Assert ($registry.schema_version -eq 1 -and $entry.Count -eq 1 -and
-            $entry[0].token_sha256 -ceq $hash -and $entry[0].generation -cmatch '^[a-f0-9]{32}$') 'The installed client registry did not retain the expected digest and identity.'
+            $entry[0].token_sha256 -ceq $hash -and $entry[0].token_value -ceq $bearer -and
+            $entry[0].generation -cmatch '^[a-f0-9]{32}$') 'The private client registry did not retain the matching credential, digest and identity.'
     Assert (@(Grant-ToInteractive $registryPath).Count -eq 0) 'INTERACTIVE can access the private client registry.'
     Assert ((Get-FileHash -LiteralPath $metadata.Config -Algorithm SHA256).Hash -ceq $runtimeHash) 'Client enrollment changed the deployment configuration.'
     $acl = Get-Acl -LiteralPath $metadata.Config
@@ -450,6 +450,7 @@ function Assert-InstalledTokenRotation([hashtable]$metadata) {
         $replacement = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
         [void](Invoke-InstalledTokenCli $metadata '--SetToken' @($replacement, 'yes'))
         Assert-InstalledTokenConfig $metadata $replacement $dacl $runtimeHash
+        Assert (![IO.File]::ReadAllText((Join-Path $metadata.DataRoot 'state\client-registry.json')).Contains($bearer)) 'The private registry retained the credential replaced by the CLI.'
         Assert ((Send-InstalledMcp $http $uri $replacement $initialize).Status -eq 401) 'The rotated token became active before service restart.'
         Assert-InstalledMcp $http $uri $bearer $initialize
         [void](Stop-OwnedService $metadata)
@@ -459,10 +460,59 @@ function Assert-InstalledTokenRotation([hashtable]$metadata) {
         Assert-InstalledMcp $http $uri $replacement $initialize
     } finally { $http.Dispose() }
 }
+function Send-InstalledClientReveal([string]$origin, $session, [hashtable]$headers, [string]$id, [string]$revision) {
+    $handler = [Net.Http.HttpClientHandler]::new()
+    $handler.UseProxy = $false
+    $handler.CookieContainer = $session.Cookies
+    $http = [Net.Http.HttpClient]::new($handler)
+    $http.Timeout = [TimeSpan]::FromSeconds(5)
+    $http.MaxResponseContentBufferSize = 1048576
+    $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Post, "$origin/admin/api/v1/clients/reveal")
+    try {
+        foreach ($name in $headers.Keys) { [void]$request.Headers.TryAddWithoutValidation($name, [string]$headers[$name]) }
+        $body = @{ id = $id; revision = $revision } | ConvertTo-Json -Compress
+        $request.Content = [Net.Http.StringContent]::new($body, [Text.Encoding]::UTF8, 'application/json')
+        $response = $http.SendAsync($request).GetAwaiter().GetResult()
+        try {
+            $raw = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            return @{
+                Status = [int]$response.StatusCode
+                NoStore = ($null -ne $response.Headers.CacheControl -and $response.Headers.CacheControl.NoStore)
+                Body = $raw | ConvertFrom-Json
+                Raw = $raw
+            }
+        } finally { $response.Dispose() }
+    } finally { $request.Dispose(); $http.Dispose() }
+}
+function Assert-InstalledClientReveal($result, [string]$id, [string]$revision, [string]$bearer) {
+    Assert ($result.Status -eq 200 -and $result.NoStore -and $result.Body.id -ceq $id -and
+            $result.Body.revision -ceq $revision -and $result.Body.token -ceq $bearer -and
+            $result.Body.active -eq $true -and
+            (@($result.Body.PSObject.Properties.Name | Sort-Object) -join ',') -eq 'active,id,revision,token') 'Authenticated client reveal returned an unexpected credential, identity or cache policy.'
+}
+function Assert-InstalledClientView($view) {
+    Assert ((@($view.PSObject.Properties.Name | Sort-Object) -join ',') -eq 'clients,pending_restart,revision') 'The client list returned unexpected fields.'
+    foreach ($client in $view.clients) {
+        Assert ((@($client.PSObject.Properties.Name | Sort-Object) -join ',') -eq 'can_reveal,id,source' -and
+                $client.can_reveal -is [bool]) 'The client list disclosed credential or internal identity fields.'
+    }
+}
+function Assert-InstalledRegistryValue([hashtable]$metadata, [string]$id, [string]$bearer) {
+    $registryPath = Join-Path $metadata.DataRoot 'state\client-registry.json'
+    $registry = [IO.File]::ReadAllText($registryPath) | ConvertFrom-Json
+    $entry = @($registry.clients | Where-Object id -eq $id)
+    $crypto = [Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = [BitConverter]::ToString($crypto.ComputeHash([Text.Encoding]::ASCII.GetBytes($bearer))).Replace('-', '').ToLowerInvariant()
+    } finally { $crypto.Dispose() }
+    Assert ($entry.Count -eq 1 -and $entry[0].token_value -ceq $bearer -and $entry[0].token_sha256 -ceq $hash -and
+            @(Grant-ToInteractive $registryPath).Count -eq 0) 'The service registry credential, digest or private permissions were incorrect.'
+}
 function Assert-InstalledClientRegistry([hashtable]$metadata) {
     Write-Host 'Verify service-account client registry writes and immediate authorization'
     $runtime = [IO.File]::ReadAllText($metadata.Config) | ConvertFrom-Json
     $runtimeHash = (Get-FileHash -LiteralPath $metadata.Config -Algorithm SHA256).Hash
+    $runtimeAcl = AccessRules (Get-Acl -LiteralPath $metadata.Config)
     $servicePid = (Owned-Service $metadata).ProcessId
     $origin = 'http://127.0.0.1:' + $runtime.admin.port
     $url = Get-InstalledSettingsLink $metadata $origin
@@ -473,26 +523,47 @@ function Assert-InstalledClientRegistry([hashtable]$metadata) {
     $http = New-McpClient
     try {
         $view = Invoke-RestMethod -Uri $clientsUri -WebSession $session -TimeoutSec 4
+        Assert-InstalledClientView $view
         Assert (@($view.clients | Where-Object id -eq 'local').Count -eq 1) 'The initial local identity is missing from administration.'
         $bearer = 'web/' + [guid]::NewGuid().ToString('N').Substring(0, 12)
         $body = @{ revision = $view.revision; id = 'msi-web-acceptance'; token = $bearer } | ConvertTo-Json -Compress
         $view = Invoke-RestMethod -Uri $clientsUri -Method Post -Headers $headers -WebSession $session -Body $body @json
+        Assert-InstalledClientView $view
         Assert (!$view.pending_restart -and !($view | ConvertTo-Json -Depth 8).Contains($bearer)) 'Web enrollment was pending or disclosed its credential.'
+        $enrolledRevision = $view.revision
+        Assert-InstalledRegistryValue $metadata 'msi-web-acceptance' $bearer
+        $denied = Send-InstalledClientReveal $origin $session @{ Origin = $origin } 'msi-web-acceptance' $view.revision
+        Assert ($denied.Status -eq 403 -and $denied.NoStore -and !$denied.Raw.Contains($bearer)) 'Client reveal accepted a request without CSRF protection or disclosed its credential.'
+        Assert-InstalledClientReveal (Send-InstalledClientReveal $origin $session $headers 'msi-web-acceptance' $view.revision) 'msi-web-acceptance' $view.revision $bearer
         $uri = "http://127.0.0.1:$($runtime.business.port)/mcp"
         $initialize = New-McpInitialize
         Assert-InstalledMcp $http $uri $bearer $initialize
         $replacement = 'web/' + [guid]::NewGuid().ToString('N').Substring(0, 12)
         $body = @{ revision = $view.revision; token = $replacement } | ConvertTo-Json -Compress
         $view = Invoke-RestMethod -Uri "$clientsUri/msi-web-acceptance" -Method Put -Headers $headers -WebSession $session -Body $body @json
-        Assert (!$view.pending_restart -and (Send-InstalledMcp $http $uri $bearer $initialize).Status -eq 401) 'Web rotation did not revoke the previous credential immediately.'
+        Assert-InstalledClientView $view
+        Assert (!$view.pending_restart -and !($view | ConvertTo-Json -Depth 8).Contains($bearer) -and
+                !($view | ConvertTo-Json -Depth 8).Contains($replacement) -and
+                (Send-InstalledMcp $http $uri $bearer $initialize).Status -eq 401) 'Web rotation disclosed credentials or did not revoke the previous credential immediately.'
+        $stale = Send-InstalledClientReveal $origin $session $headers 'msi-web-acceptance' $enrolledRevision
+        Assert ($stale.Status -eq 409 -and $stale.NoStore -and !$stale.Raw.Contains($bearer) -and !$stale.Raw.Contains($replacement)) 'Client reveal accepted a stale revision or disclosed credentials in its error.'
+        Assert-InstalledClientReveal (Send-InstalledClientReveal $origin $session $headers 'msi-web-acceptance' $view.revision) 'msi-web-acceptance' $view.revision $replacement
+        Assert-InstalledRegistryValue $metadata 'msi-web-acceptance' $replacement
+        Assert (![IO.File]::ReadAllText((Join-Path $metadata.DataRoot 'state\client-registry.json')).Contains($bearer)) 'Web rotation retained the replaced credential in the private registry.'
         Assert-InstalledMcp $http $uri $replacement $initialize
         $body = @{ revision = $view.revision } | ConvertTo-Json -Compress
         $view = Invoke-RestMethod -Uri "$clientsUri/msi-web-acceptance" -Method Delete -Headers $headers -WebSession $session -Body $body @json
-        Assert (!$view.pending_restart -and (Send-InstalledMcp $http $uri $replacement $initialize).Status -eq 401) 'Web deletion did not revoke its credential immediately.'
+        Assert-InstalledClientView $view
+        Assert (!$view.pending_restart -and !($view | ConvertTo-Json -Depth 8).Contains($replacement) -and
+                (Send-InstalledMcp $http $uri $replacement $initialize).Status -eq 401) 'Web deletion disclosed its credential or did not revoke it immediately.'
+        $deleted = Send-InstalledClientReveal $origin $session $headers 'msi-web-acceptance' $view.revision
+        Assert ($deleted.Status -eq 404 -and $deleted.NoStore -and !$deleted.Raw.Contains($bearer) -and !$deleted.Raw.Contains($replacement)) 'Deleted client reveal returned a credential or an unexpected response.'
         $registryPath = Join-Path $metadata.DataRoot 'state\client-registry.json'
         Assert ((Test-Path -LiteralPath $registryPath) -and @(Grant-ToInteractive $registryPath).Count -eq 0) 'The service registry is missing or readable by INTERACTIVE.'
+        Assert (![IO.File]::ReadAllText($registryPath).Contains($replacement)) 'Web deletion retained its credential in the private registry.'
         Assert ((Owned-Service $metadata).ProcessId -eq $servicePid) 'Web client changes restarted the service.'
         Assert ((Get-FileHash -LiteralPath $metadata.Config -Algorithm SHA256).Hash -ceq $runtimeHash) 'Web client changes rewrote the deployment configuration.'
+        Assert ((AccessRules (Get-Acl -LiteralPath $metadata.Config)) -ceq $runtimeAcl) 'Web client changes modified the deployment configuration ACL.'
     } finally {
         $http.Dispose()
         [void](Invoke-RestMethod -Uri "$origin/admin/api/v1/session" -Method Delete -Headers $headers -WebSession $session -Body '{}' @json)

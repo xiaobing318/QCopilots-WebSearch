@@ -31,8 +31,9 @@ constexpr unsigned ProviderRedirectLimit = 3;
 constexpr int MaxRetryAfterSeconds = 600;
 // Public page failures are attributed to the remote site. Only transient
 // conditions are retryable.
-[[noreturn]] void remoteFailure(const std::string &message, bool retryable) {
-  throw Error("upstream_http_error", message, 502, retryable);
+[[noreturn]] void remoteFailure(const std::string &message, bool retryable,
+                               const char *reason) {
+  throw Error("upstream_http_error", message, 502, retryable).withReason(reason);
 }
 constexpr std::size_t HeaderLimit = 64 * 1024;
 struct Runtime {
@@ -67,16 +68,17 @@ template <class T> void option(CURL *h, CURLoption name, T value) {
 }
 void checkMulti(CURLMcode result) {
   if (result != CURLM_OK)
-    throw Error("provider_unavailable", "HTTP transport failed.", 502, true);
+    throw Error("provider_unavailable", "HTTP transport failed.", 502, true)
+        .withReason("network_transport_failed");
 }
 void checkCancellation(const std::shared_ptr<CancelToken> &c,
                        Clock::time_point deadline = Clock::time_point::max()) {
   if (!c)
     throw Error("invalid_argument", "A deadline is required.");
   if (c->cancelled.load())
-    throw Error("cancelled", "Request cancelled.", 499);
+    throw Error("cancelled", "Request cancelled.", 499).withReason("request_cancelled");
   if (Clock::now() >= std::min(c->deadline, deadline))
-    throw Error("timeout", "Request timed out.", 504, true);
+    throw Error("timeout", "Request timed out.", 504, true).withReason("request_timeout");
 }
 QUrl normalizedUrl(const std::string &value) {
   if (value.empty() || value.size() > 8192)
@@ -345,7 +347,7 @@ HttpResponse perform(const QUrl &url, const HttpRequest &request, const std::str
       std::chrono::duration_cast<std::chrono::milliseconds>(std::min(t.cancel->deadline, deadline) - Clock::now())
           .count();
   if (remaining <= 0)
-    throw Error("timeout", "Request timed out.", 504, true);
+    throw Error("timeout", "Request timed out.", 504, true).withReason("request_timeout");
   const long timeout = long(std::min<std::int64_t>(remaining, std::numeric_limits<long>::max()));
   option(h.easy, CURLOPT_TIMEOUT_MS, timeout);
   option(h.easy, CURLOPT_CONNECTTIMEOUT_MS, std::min(timeout, 10000L));
@@ -371,42 +373,66 @@ HttpResponse perform(const QUrl &url, const HttpRequest &request, const std::str
   else
     budget.wire += wire;
   if (t.tooLarge || result == CURLE_FILESIZE_EXCEEDED)
-    throw Error("response_too_large", "Response exceeds its size limit.", 502);
+    throw Error("response_too_large", "Response exceeds its size limit.", 502)
+        .withReason("network_response_too_large");
   if (t.callbackFailed)
     throw Error("internal_error", "HTTP callback failed.", 500);
   if (t.badHeader) {
     if (publicOnly)
-      remoteFailure("Remote resource returned conflicting headers.", false);
-    throw Error("provider_unavailable", "Invalid upstream headers.", 502);
+      remoteFailure("Remote resource returned conflicting headers.", false, "network_response_invalid");
+    throw Error("provider_unavailable", "Invalid upstream headers.", 502)
+        .withReason("network_response_invalid");
   }
   if (result == CURLE_OPERATION_TIMEDOUT)
-    throw Error("timeout", "Request timed out.", 504, true);
+    throw Error("timeout", "Request timed out.", 504, true).withReason("request_timeout");
   if (result != CURLE_OK) {
     if (t.blocked && t.accepted == 0)
-      throw Error("destination_blocked", "URL host resolves only to non-public addresses.", 403);
+      throw Error("destination_blocked", "URL host resolves only to non-public addresses.", 403)
+          .withReason("network_destination_blocked");
     if (result == CURLE_BAD_CONTENT_ENCODING)
-      throw Error("unsupported_content", "Unsupported content encoding.", 415);
-    if (!publicOnly)
-      throw Error("provider_unavailable", "Upstream request failed.", 502, true);
+      throw Error("unsupported_content", "Unsupported content encoding.", 415)
+          .withReason("network_content_unsupported");
+    const char *reason = "network_transport_failed";
+    const char *message = "Remote request failed.";
+    bool retryable = false;
     switch (result) {
     case CURLE_COULDNT_RESOLVE_HOST:
-      remoteFailure("Remote host name could not be resolved.", false);
+      reason = "network_dns_failed";
+      message = "Remote host name could not be resolved.";
+      break;
     case CURLE_COULDNT_CONNECT:
     case CURLE_SEND_ERROR:
     case CURLE_RECV_ERROR:
     case CURLE_GOT_NOTHING:
     case CURLE_PARTIAL_FILE:
-      remoteFailure("Remote connection failed.", true);
+      reason = "network_connection_failed";
+      message = "Remote connection failed.";
+      retryable = true;
+      break;
     case CURLE_PEER_FAILED_VERIFICATION:
-      remoteFailure("TLS verification failed.", false);
+    case CURLE_SSL_CACERT_BADFILE:
+    case CURLE_SSL_CERTPROBLEM:
+      reason = "network_tls_failed";
+      message = "TLS verification failed.";
+      break;
     case CURLE_SSL_CONNECT_ERROR:
-      remoteFailure("TLS handshake failed.", false);
+    case CURLE_SSL_CIPHER:
+      reason = "network_tls_failed";
+      message = "TLS handshake failed.";
+      break;
     case CURLE_WEIRD_SERVER_REPLY:
     case CURLE_UNSUPPORTED_PROTOCOL:
-      remoteFailure("Remote server returned an invalid HTTP response.", false);
+      reason = "network_response_invalid";
+      message = "Remote server returned an invalid HTTP response.";
+      break;
     default:
-      remoteFailure("Remote request failed.", false);
+      break;
     }
+    // Only static messages leave this layer. CURL's error buffer can contain
+    // the configured URL, proxy details or credential-bearing response data.
+    if (!publicOnly)
+      throw Error("provider_unavailable", message, 502, retryable).withReason(reason);
+    remoteFailure(message, retryable, reason);
   }
   long status = 0;
   check(curl_easy_getinfo(h.easy, CURLINFO_RESPONSE_CODE, &status));
@@ -423,16 +449,16 @@ bool isRedirect(int status) {
 QUrl redirectTarget(const QUrl &url, const HttpResponse &response) {
   const auto location = response.headers.find("location");
   if (location == response.headers.end())
-    remoteFailure("Remote resource returned an invalid redirect.", false);
+    remoteFailure("Remote resource returned an invalid redirect.", false, "network_response_invalid");
   // Browsers accept unencoded spaces and similar characters in Location.
   const QUrl relative(QString::fromUtf8(location->second.data(), qsizetype(location->second.size())).trimmed(),
                       QUrl::TolerantMode);
   if (!relative.isValid())
-    remoteFailure("Remote resource returned an invalid redirect.", false);
+    remoteFailure("Remote resource returned an invalid redirect.", false, "network_response_invalid");
   try {
     return normalizedUrl(url.resolved(relative).toEncoded(QUrl::FullyEncoded).toStdString());
   } catch (const Error &) {
-    remoteFailure("Remote resource returned an invalid redirect.", false);
+    remoteFailure("Remote resource returned an invalid redirect.", false, "network_response_invalid");
   }
 }
 
@@ -510,12 +536,12 @@ HttpResponse HttpClient::send(HttpRequest request, std::shared_ptr<CancelToken> 
     if (!isRedirect(response.status) || request.redirectHosts.empty())
       return response;
     if (redirects >= ProviderRedirectLimit)
-      remoteFailure("Provider redirected too many times.", false);
+      remoteFailure("Provider redirected too many times.", false, "provider_redirect_rejected");
     auto next = redirectTarget(url, response);
     const auto host = next.host().toStdString();
     if (!isHttpsOrigin(next) ||
         std::find(request.redirectHosts.begin(), request.redirectHosts.end(), host) == request.redirectHosts.end())
-      remoteFailure("Provider redirected outside its allowed origins.", false);
+      remoteFailure("Provider redirected outside its allowed origins.", false, "provider_redirect_rejected");
     url = std::move(next);
   }
 }
@@ -557,14 +583,15 @@ HttpResponse HttpClient::getPublic(std::string value, std::shared_ptr<CancelToke
     if (!isRedirect(r.status)) {
       if (r.status < 200 || r.status >= 300)
         remoteFailure("Remote resource returned HTTP " + std::to_string(r.status) + ".",
-                      r.status == 429 || r.status >= 500);
+                      r.status == 429 || r.status >= 500, "network_http_error");
       return r;
     }
     if (redirects >= RedirectLimit)
-      remoteFailure("Remote resource redirected too many times.", false);
+      remoteFailure("Remote resource redirected too many times.", false, "network_redirect_rejected");
     auto next = redirectTarget(url, r);
     if (url.scheme() == "https" && next.scheme() != "https")
-      throw Error("destination_blocked", "HTTPS to HTTP redirects are not permitted.", 403);
+      throw Error("destination_blocked", "HTTPS to HTTP redirects are not permitted.", 403)
+          .withReason("network_destination_blocked");
     url = next;
   }
 }
@@ -587,7 +614,8 @@ HttpResponse HttpClient::requestBackend(std::string url, std::string body, std::
   auto r = perform(normalizedUrl(url), request, ca.empty() ? backendCaFile_ : ca, std::move(cancel),
                    false, budget);
   if (r.status >= 300 && r.status < 400)
-    throw Error("provider_unavailable", "Backend redirects not permitted.", 502);
+    throw Error("provider_unavailable", "Backend redirects not permitted.", 502)
+        .withReason("provider_redirect_rejected");
   return r;
 }
 } // namespace qws

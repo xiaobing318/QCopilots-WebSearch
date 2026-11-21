@@ -7,8 +7,13 @@ import {
   EyeOpenIcon,
   PlusIcon,
 } from "@radix-ui/react-icons";
-import { admin, ApiError, type ClientRegistryView } from "./admin";
-import { errorLabel, type Text } from "./labels";
+import {
+  admin,
+  ApiError,
+  type ClientRegistryView,
+  type ClientReveal,
+} from "./admin";
+import { errorMessage, renderMessage, type Message, type Text } from "./labels";
 
 type Props = {
   csrf: string;
@@ -18,7 +23,7 @@ type Props = {
   onBusyChange?: (busy: boolean) => void;
   disabled?: boolean;
 };
-type Notice = { key: string; variant: "error" | "success" };
+type Notice = Message & { variant: "error" | "success" };
 type Editor = { mode: "new" | "replace"; id: string };
 type Method = "random" | "text" | "manual";
 type Step = 1 | 2 | 3;
@@ -60,9 +65,15 @@ export function ClientTokens({
   const [visible, setVisible] = useState(false);
   const [copyNotice, setCopyNotice] = useState<string>();
   const [conflict, setConflict] = useState(false);
+  const [revealed, setRevealed] = useState<ClientReveal>();
+  const [revealing, setRevealing] = useState(false);
+  const [savedVisible, setSavedVisible] = useState(false);
+  const [savedCopyNotice, setSavedCopyNotice] = useState<string>();
   const id = useId();
   const operation = useRef(false);
   const generation = useRef(0);
+  const revealGeneration = useRef(0);
+  const revealAbort = useRef<AbortController | undefined>(undefined);
   const focusNextInput = useRef(false);
   const locked = busy || disabled;
   const editingDisabled = locked || generating;
@@ -76,9 +87,28 @@ export function ClientTokens({
   useEffect(
     () => () => {
       generation.current += 1;
+      revealGeneration.current += 1;
+      revealAbort.current?.abort();
     },
     [],
   );
+  useEffect(() => {
+    if (!disabled) return;
+    generation.current += 1;
+    revealGeneration.current += 1;
+    revealAbort.current?.abort();
+    setRevealed(undefined);
+    setRevealing(false);
+    setSavedVisible(false);
+    setSavedCopyNotice(undefined);
+    setToken("");
+    setSourceText("");
+    setVisible(false);
+    setCopyNotice(undefined);
+    setGenerating(false);
+    setEditor(undefined);
+    setStep(1);
+  }, [disabled]);
   useEffect(() => {
     const abort = new AbortController();
     void admin.clients(abort.signal).then(
@@ -92,13 +122,28 @@ export function ClientTokens({
         if (abort.signal.aborted) return;
         if (failure instanceof ApiError && failure.code === "unauthorized")
           onExpired();
-        else setNotice({ key: errorLabel(failure), variant: "error" });
+        else
+          setNotice({
+            ...errorMessage(failure, "clientLoad"),
+            variant: "error",
+          });
       },
     );
     return () => abort.abort();
   }, [onExpired]);
 
+  function clearRevealed() {
+    revealGeneration.current += 1;
+    revealAbort.current?.abort();
+    revealAbort.current = undefined;
+    setRevealed(undefined);
+    setRevealing(false);
+    setSavedVisible(false);
+    setSavedCopyNotice(undefined);
+  }
+
   function clearDraft() {
+    clearRevealed();
     generation.current += 1;
     focusNextInput.current = false;
     setGenerating(false);
@@ -134,7 +179,7 @@ export function ClientTokens({
       focusNextInput.current = false;
     }
   }
-  async function perform(task: () => Promise<void>) {
+  async function perform(task: () => Promise<void>, context = "clientSave") {
     if (locked || operation.current) return;
     operation.current = true;
     setBusy(true);
@@ -147,7 +192,7 @@ export function ClientTokens({
       else {
         if (failure instanceof ApiError && failure.code === "revision_conflict")
           setConflict(true);
-        setNotice({ key: errorLabel(failure), variant: "error" });
+        setNotice({ ...errorMessage(failure, context), variant: "error" });
       }
     } finally {
       operation.current = false;
@@ -156,6 +201,7 @@ export function ClientTokens({
   }
   function refresh() {
     if (locked || operation.current) return;
+    clearRevealed();
     if (step === 3) clearDraft();
     void perform(async () => {
       const value = await admin.clients();
@@ -170,7 +216,65 @@ export function ClientTokens({
         !value.clients.some((client) => client.id === editor.id)
       )
         setNotice({ key: "clientNoLongerExists", variant: "error" });
-    });
+    }, "clientLoad");
+  }
+
+  async function revealSaved(action: "show" | "copy") {
+    if (locked || revealing || conflict || !current?.can_reveal || !view)
+      return;
+    clearRevealed();
+    const requestedGeneration = revealGeneration.current;
+    const abort = new AbortController();
+    revealAbort.current = abort;
+    setRevealing(true);
+    setNotice(undefined);
+    try {
+      const value = await admin.revealClient(
+        view.revision,
+        current.id,
+        csrf,
+        abort.signal,
+      );
+      if (
+        abort.signal.aborted ||
+        revealGeneration.current !== requestedGeneration
+      )
+        return;
+      setRevealed(value);
+      setSavedVisible(action === "show");
+      if (action === "copy") {
+        try {
+          await navigator.clipboard.writeText(value.token);
+          if (revealGeneration.current === requestedGeneration)
+            setSavedCopyNotice("clientCopied");
+        } catch {
+          if (revealGeneration.current === requestedGeneration) {
+            setSavedCopyNotice("clientSavedCopyFailed");
+          }
+        }
+      }
+    } catch (failure) {
+      if (
+        abort.signal.aborted ||
+        revealGeneration.current !== requestedGeneration
+      )
+        return;
+      if (failure instanceof ApiError && failure.code === "unauthorized")
+        onExpired();
+      else {
+        if (failure instanceof ApiError && failure.code === "revision_conflict")
+          setConflict(true);
+        setNotice({
+          ...errorMessage(failure, "clientReveal"),
+          variant: "error",
+        });
+      }
+    } finally {
+      if (revealGeneration.current === requestedGeneration) {
+        setRevealing(false);
+        revealAbort.current = undefined;
+      }
+    }
   }
   function chooseMethod(value: Method) {
     if (editingDisabled) return;
@@ -254,6 +358,7 @@ export function ClientTokens({
   }
   function remove() {
     if (!view || !current || conflict) return;
+    clearRevealed();
     void perform(async () => {
       const value = await admin.deleteClient(view.revision, current.id, csrf);
       setView(value);
@@ -261,7 +366,7 @@ export function ClientTokens({
       setSelected(value.clients[0]?.id);
       setDeleting(false);
       setNotice({ key: "clientDeleted", variant: "success" });
-    });
+    }, "clientDelete");
   }
   async function copy(value: string, message: string) {
     const requestedGeneration = generation.current;
@@ -271,7 +376,6 @@ export function ClientTokens({
     } catch {
       if (requestedGeneration === generation.current) {
         setCopyNotice("clientCopyFailed");
-        setVisible(true);
       }
     }
   }
@@ -360,7 +464,7 @@ export function ClientTokens({
             className={"message " + notice.variant}
             role={notice.variant === "error" ? "alert" : "status"}
           >
-            {t(notice.key)}
+            {renderMessage(t, notice)}
           </p>
         )}
         {view?.pending_restart && (
@@ -370,7 +474,9 @@ export function ClientTokens({
         )}
         {conflict && (
           <div className="conflict-actions">
-            <p>{t("clientConflictHelp")}</p>
+            <p>
+              {t(editor ? "clientConflictHelp" : "clientRevealConflictHelp")}
+            </p>
             <button
               type="button"
               className="button secondary"
@@ -747,9 +853,82 @@ export function ClientTokens({
               </div>
               <div>
                 <dt>{t("clientToken")}</dt>
-                <dd>{t("clientStoredHidden")}</dd>
+                <dd>
+                  {t(
+                    current.can_reveal
+                      ? "clientStoredHidden"
+                      : "clientRevealUnavailable",
+                  )}
+                </dd>
               </div>
             </dl>
+            {!deleting &&
+              (current.can_reveal ? (
+                <div className="saved-code-panel field">
+                  <label htmlFor={id + "-retrieved-token"}>
+                    {t("clientSavedToken")}
+                  </label>
+                  <div className="copy-field">
+                    <div className="secret-input">
+                      <input
+                        id={id + "-retrieved-token"}
+                        type={savedVisible ? "text" : "password"}
+                        value={revealed?.token ?? ""}
+                        placeholder={t("clientHiddenPlaceholder")}
+                        readOnly
+                        autoComplete="off"
+                        spellCheck={false}
+                      />
+                      <button
+                        type="button"
+                        className="icon-button"
+                        disabled={locked || revealing || conflict}
+                        aria-label={t(
+                          savedVisible ? "clientHideSaved" : "clientShowSaved",
+                        )}
+                        onClick={() =>
+                          savedVisible
+                            ? clearRevealed()
+                            : void revealSaved("show")
+                        }
+                      >
+                        {savedVisible ? <EyeClosedIcon /> : <EyeOpenIcon />}
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      className="button secondary"
+                      disabled={locked || revealing || conflict}
+                      onClick={() => void revealSaved("copy")}
+                    >
+                      <CopyIcon aria-hidden="true" />
+                      {t("clientCopySaved")}
+                    </button>
+                  </div>
+                  {revealing && (
+                    <p className="key-state" role="status">
+                      {t("clientRevealing")}
+                    </p>
+                  )}
+                  {revealed && (
+                    <p
+                      className={revealed.active ? "key-state" : "message"}
+                      role="status"
+                    >
+                      {t(
+                        revealed.active
+                          ? "clientRevealedActive"
+                          : "clientRevealedPending",
+                      )}
+                    </p>
+                  )}
+                  {savedCopyNotice && (
+                    <p className="key-state" role="status">
+                      {t(savedCopyNotice)}
+                    </p>
+                  )}
+                </div>
+              ) : null)}
             {deleting ? (
               <div
                 className="revoke-confirm"

@@ -32,15 +32,23 @@ function json(value: unknown, status = 200) {
 function mockService({
   signedIn = true,
   pendingClientSave,
+  pendingClientReveal,
+  providerTestError,
+  signOutFailure = false,
+  status = defaultStatus,
 }: {
   signedIn?: boolean;
   pendingClientSave?: Promise<Response>;
+  pendingClientReveal?: Promise<Response>;
+  providerTestError?: object;
+  signOutFailure?: boolean;
+  status?: object;
 } = {}) {
   let authenticated = signedIn;
   let current = structuredClone(fixture) as SettingsView;
   let clients: ClientRegistryView = {
     revision: "clients-v1",
-    clients: [{ id: "local", source: "file" }],
+    clients: [{ id: "local", source: "file", can_reveal: true }],
     pending_restart: false,
   };
   const fetcher = vi.fn((path: string, options: RequestInit) => {
@@ -55,12 +63,24 @@ function mockService({
         authenticated = true;
         return json({ csrf });
       case "DELETE /admin/api/v1/session":
+        if (signOutFailure)
+          return Promise.reject(new TypeError("network unavailable"));
         authenticated = false;
         return json({ ok: true });
       case "GET /admin/api/v1/settings":
         return json(current);
       case "GET /admin/api/v1/clients":
         return json(clients);
+      case "POST /admin/api/v1/clients/reveal":
+        return (
+          pendingClientReveal ??
+          json({
+            id: "local",
+            token: "stored-local-code",
+            revision: clients.revision,
+            active: true,
+          })
+        );
       case "PUT /admin/api/v1/clients": {
         const { id } = JSON.parse(String(options.body));
         if (!clients.clients.some((client) => client.id === id))
@@ -70,7 +90,9 @@ function mockService({
           ...clients,
           revision: "clients-v2",
           clients: clients.clients.map((client) =>
-            client.id === id ? { id, source: "manual" } : client,
+            client.id === id
+              ? { id, source: "manual", can_reveal: true }
+              : client,
           ),
         };
         return json(clients);
@@ -87,8 +109,10 @@ function mockService({
         return json(current);
       }
       case "GET /admin/api/v1/status":
-        return json(defaultStatus);
+        return json(status);
       case "POST /admin/api/v1/providers/auto/test":
+        if (providerTestError)
+          return json({ ok: false, error: providerTestError });
         return json({
           ok: true,
           source: "bing",
@@ -419,4 +443,170 @@ it("prevents changing tabs or signing out while an authorization save is pending
   ).toBeEnabled();
   for (const tab of screen.getAllByRole("tab")) expect(tab).toBeEnabled();
   expect(screen.getByRole("button", { name: "Sign out" })).toBeEnabled();
+});
+
+it("clears revealed saved credentials when leaving the authorization tab without automatically fetching them again", async () => {
+  const user = userEvent.setup();
+  const fetcher = mockService();
+  render(<App />);
+  await user.click(
+    await screen.findByRole("button", { name: "Show saved code" }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByLabelText("Saved Bearer authorization code"),
+    ).toHaveValue("stored-local-code"),
+  );
+  await user.click(screen.getByRole("tab", { name: "Search settings" }));
+  expect(screen.queryByDisplayValue("stored-local-code")).toBeNull();
+  await user.click(screen.getByRole("tab", { name: "Access authorization" }));
+  await screen.findByRole("button", { name: "Show saved code" });
+  expect(screen.getByLabelText("Saved Bearer authorization code")).toHaveValue(
+    "",
+  );
+  expect(
+    fetcher.mock.calls.filter(([path]) => path.endsWith("/reveal")),
+  ).toHaveLength(1);
+});
+
+it.each(["tab", "sign-out"])(
+  "allows %s during a pending reveal and does not restore the late credential",
+  async (action) => {
+    const user = userEvent.setup();
+    const clipboard = vi
+      .spyOn(navigator.clipboard, "writeText")
+      .mockResolvedValue();
+    let finish!: (response: Response) => void;
+    const pendingClientReveal = new Promise<Response>((resolve) => {
+      finish = resolve;
+    });
+    const fetcher = mockService({ pendingClientReveal });
+    render(<App />);
+    await user.click(
+      await screen.findByRole("button", { name: "Copy saved Bearer" }),
+    );
+    for (const tab of screen.getAllByRole("tab")) expect(tab).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeEnabled();
+    const request = fetcher.mock.calls.find(([path]) =>
+      path.endsWith("/reveal"),
+    )![1];
+    if (action === "tab")
+      await user.click(screen.getByRole("tab", { name: "Search settings" }));
+    else {
+      await user.click(screen.getByRole("button", { name: "Sign out" }));
+      await screen.findByLabelText("Administrator token");
+    }
+    expect(request.signal?.aborted).toBe(true);
+    await act(async () => {
+      finish(
+        json({
+          id: "local",
+          token: "late-after-navigation",
+          revision: "clients-v1",
+          active: true,
+        }),
+      );
+      await pendingClientReveal;
+    });
+    expect(clipboard).not.toHaveBeenCalled();
+    expect(screen.queryByDisplayValue("late-after-navigation")).toBeNull();
+    if (action === "tab") {
+      await user.click(
+        screen.getByRole("tab", { name: "Access authorization" }),
+      );
+      await screen.findByRole("button", { name: "Show saved code" });
+      expect(
+        screen.getByLabelText("Saved Bearer authorization code"),
+      ).toHaveValue("");
+    }
+  },
+);
+
+it("keeps provider-test errors contextual and preserves retry timing without exposing raw server text", async () => {
+  const user = userEvent.setup();
+  mockService({
+    providerTestError: {
+      code: "provider_unavailable",
+      retry_after_seconds: 5,
+      message: "raw-secret-provider-body",
+    },
+  });
+  render(<App />);
+  await user.click(await screen.findByRole("tab", { name: "Search settings" }));
+  await user.click(screen.getByRole("button", { name: "Test provider" }));
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("The provider test could not be completed.");
+  expect(alert).toHaveTextContent("Try again in 5 seconds.");
+  expect(document.body).not.toHaveTextContent("raw-secret-provider-body");
+});
+
+it("clears an already revealed code even when signing out fails immediately and leaves the settings page open", async () => {
+  const user = userEvent.setup();
+  mockService({ signOutFailure: true });
+  render(<App />);
+  await user.click(
+    await screen.findByRole("button", { name: "Show saved code" }),
+  );
+  const token = screen.getByLabelText("Saved Bearer authorization code");
+  await waitFor(() => expect(token).toHaveValue("stored-local-code"));
+  expect(token).toHaveAttribute("type", "text");
+  await user.click(screen.getByRole("button", { name: "Sign out" }));
+  await screen.findByRole("alert");
+  expect(
+    screen.getByRole("heading", { name: "Access authorization" }),
+  ).toBeVisible();
+  expect(screen.getByLabelText("Saved Bearer authorization code")).toHaveValue(
+    "",
+  );
+  expect(
+    screen.getByLabelText("Saved Bearer authorization code"),
+  ).toHaveAttribute("type", "password");
+  expect(screen.getByRole("button", { name: "Show saved code" })).toBeEnabled();
+});
+
+it("uses structured settings errors on the status tab without exposing raw messages or private paths", async () => {
+  const user = userEvent.setup();
+  mockService({
+    status: {
+      ...defaultStatus,
+      settings_error: "raw-legacy-error C:\\private\\settings.json",
+      settings_error_detail: {
+        code: "internal_error",
+        reason: "settings_read_failed",
+        message: "raw-detail-error C:\\sensitive\\runtime.json",
+        retryable: false,
+      },
+    },
+  });
+  render(<App />);
+  await user.click(await screen.findByRole("tab", { name: "Service status" }));
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("Could not load search settings.");
+  expect(alert).toHaveTextContent(
+    "The saved search settings could not be read. Review the service diagnostics.",
+  );
+  expect(alert).not.toHaveTextContent(
+    "The last valid settings are still active.",
+  );
+  expect(document.body).not.toHaveTextContent("raw-legacy-error");
+  expect(document.body).not.toHaveTextContent("raw-detail-error");
+  expect(document.body).not.toHaveTextContent("C:\\private\\settings.json");
+  expect(document.body).not.toHaveTextContent("C:\\sensitive\\runtime.json");
+});
+
+it("keeps legacy status errors generic when the server has no structured settings error", async () => {
+  const user = userEvent.setup();
+  mockService({
+    status: {
+      ...defaultStatus,
+      settings_error: "legacy-raw-error C:\\private\\old-settings.json",
+    },
+  });
+  render(<App />);
+  await user.click(await screen.findByRole("tab", { name: "Service status" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "The settings file could not be loaded. The last valid settings are still active.",
+  );
+  expect(document.body).not.toHaveTextContent("legacy-raw-error");
+  expect(document.body).not.toHaveTextContent("C:\\private\\old-settings.json");
 });

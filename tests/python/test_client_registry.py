@@ -98,7 +98,7 @@ class Fixture:
         require(isinstance(view["pending_restart"], bool) and isinstance(view["clients"], list),
                 "Invalid client list metadata")
         for client in view["clients"]:
-            require(set(client) == {"id", "source"} and
+            require(set(client) == {"id", "source", "can_reveal"} and isinstance(client["can_reveal"], bool) and
                     client["source"] in ("manual", "file", "environment"),
                     "Client view exposed credential or internal identity data")
         require(len({entry["id"] for entry in view["clients"]}) == len(view["clients"]),
@@ -111,6 +111,14 @@ class Fixture:
         require(not view["pending_restart"], "A web change did not apply the complete registry")
         self.unchanged_runtime()
         return view
+
+    def reveal(self, client_id, token, active=True):
+        revision = self.view()["revision"]
+        status, headers, result = self.admin_request("POST", "/reveal", {"id": client_id, "revision": revision})
+        require(status == 200 and result == {"id": client_id, "token": token, "revision": revision,
+                                            "active": active}, "Single-client reveal returned incorrect data")
+        require(headers.get("Cache-Control") == "no-store", "Revealed credentials could be cached")
+        require(self.view()["revision"] == revision, "Revealing a credential modified the registry")
 
     @contextmanager
     def running(self):
@@ -173,6 +181,7 @@ def verify_body_id_routes(fixture):
         before = fixture.view()["revision"]
         added = fixture.change("POST", fields={"id": client_id, "token": token})
         require(fixture.public(token)[0] == 200, "A dot client could not authenticate after creation")
+        fixture.reveal(client_id, token)
         require(fixture.admin_request("PUT", body={"revision": before, "id": client_id,
                 "token": replacement})[0] == 409, "Body-ID replacement ignored a stale revision")
         for method, body in (
@@ -204,6 +213,8 @@ def verify_crud(fixture):
     with fixture.running():
         view = fixture.view()
         require_sources(view, initial)
+        fixture.reveal("local", fixture.file_token)
+        fixture.reveal("legacy-env", fixture.environment_token)
         require(not view["pending_restart"], "Inherited credentials unexpectedly need a restart")
         require(request(fixture.admin, "GET", API + "/clients")[0] == 401,
                 "Client list did not require an administrator session")
@@ -218,21 +229,38 @@ def verify_crud(fixture):
         require_sources(added, initial | {"browser": "manual"})
         require(fixture.registry.is_file(), "The first change did not create the client registry")
         require(fixture.public(manual)[0] == 200, "A short custom token was not immediately usable")
+        fixture.reveal("browser", manual)
         for token in (fixture.file_token, fixture.environment_token):
             require(fixture.public(token)[0] == 200, "Migration broke an inherited credential")
         require(fixture.admin_request("POST", body=body)[0] == 409,
                 "A stale revision was allowed to overwrite the registry")
         current = added["revision"]
-        for method, suffix, fields, expected in (
-            ("POST", "", {"id": "browser", "token": replacement}, 400),
-            ("POST", "", {"id": "duplicate-token", "token": manual}, 400),
-            ("PUT", "/absent", {"token": replacement}, 404),
-            ("DELETE", "/absent", {}, 404),
+        for method, suffix, fields, expected, reason, client in (
+            ("POST", "", {"id": "browser", "token": replacement}, 400, "client_id_exists", "browser"),
+            ("POST", "", {"id": "duplicate-token", "token": manual}, 400, "client_credential_duplicate", "browser"),
+            ("PUT", "/absent", {"token": replacement}, 404, "client_not_found", "absent"),
+            ("DELETE", "/absent", {}, 404, "client_not_found", "absent"),
         ):
             result = fixture.admin_request(method, suffix, {"revision": current} | fields)
             require(result[0] == expected, "Client identity conflict returned the wrong status")
+            require(result[2]["error"].get("reason") == reason and
+                    result[2]["error"].get("parameters") == {"client_id": client},
+                    "A client conflict did not identify its safe, specific cause")
             require(manual not in json.dumps(result[2]) and replacement not in json.dumps(result[2]),
                     "An error response exposed a client credential")
+        for method, client_id, duplicate_token, owner in (
+            ("POST", "duplicate-file", fixture.file_token, "local"),
+            ("POST", "duplicate-env", fixture.environment_token, "legacy-env"),
+            ("PUT", "browser", fixture.file_token, "local"),
+            ("PUT", "local", manual, "browser"),
+        ):
+            status, _, result = fixture.admin_request(method, body={"revision": current, "id": client_id,
+                                                                   "token": duplicate_token})
+            require(status == 400 and result["error"].get("reason") == "client_credential_duplicate" and
+                    result["error"].get("parameters") == {"client_id": owner} and
+                    duplicate_token not in json.dumps(result), "Duplicate source or replacement identified the wrong client")
+        require(fixture.view()["revision"] == current and fixture.public(manual)[0] == 200 and
+                fixture.public(fixture.file_token)[0] == 200, "A duplicate-credential error changed active authorization")
         for invalid in ("", "contains space", "line\nbreak", "tab\tvalue", "\x00", "\x7f", "非ASCII", "a" * 8193):
             status, _, _ = fixture.admin_request("PUT", "/browser", {"revision": current, "token": invalid})
             require(status == 400, "An invalid business credential was accepted")
@@ -240,6 +268,7 @@ def verify_crud(fixture):
 
         session = fixture.new_session(manual)
         fixture.change("PUT", "/browser", {"token": replacement})
+        fixture.reveal("browser", replacement)
         require(fixture.public(manual)[0] == 401 and fixture.public(replacement)[0] == 200,
                 "Token rotation did not apply immediately")
         status, _, reply = fixture.mcp(replacement, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, session)
@@ -259,11 +288,12 @@ def verify_crud(fixture):
         require(fixture.public("a" * 8192)[0] == 200, "The documented maximum credential length was rejected")
         fixture.change("DELETE", "/one-character")
         encoded = fixture.registry.read_bytes()
-        require(manual.encode() not in encoded and replacement.encode() not in encoded,
-                "The registry stored a manual credential in plaintext")
+        stored = next(entry for entry in json.loads(encoded)["clients"] if entry["id"] == "browser")
+        require(stored["token_value"] == replacement and stored["token_sha256"] == digest(replacement) and
+                manual.encode() not in encoded, "The protected registry retained an obsolete credential")
         response = json.dumps(fixture.view())
-        require(digest(manual) not in response and digest(replacement) not in response,
-                "The client view exposed a credential digest")
+        require(all(value not in response for value in (manual, replacement, digest(manual), digest(replacement))),
+                "The client view exposed a credential or digest")
         # Existing path-based PUT and DELETE calls above remain compatibility coverage.
         verify_body_id_routes(fixture)
 
@@ -271,6 +301,7 @@ def verify_crud(fixture):
         require_sources(fixture.view(), initial | {"browser": "manual"})
         for token in (replacement, fixture.file_token, fixture.environment_token):
             require(fixture.public(token)[0] == 200, "A registry credential did not survive restart")
+        fixture.reveal("browser", replacement)
         require(fixture.public(manual)[0] == 401, "Restart restored an obsolete credential")
         fixture.unchanged_runtime()
 
@@ -295,22 +326,28 @@ def verify_cli_pending(fixture):
         require_sources(pending, {"local": "file", "legacy-env": "environment"} |
                         {name: "manual" for name in tokens})
         require(pending["pending_restart"], "CLI changes were not reported as pending")
+        for name, token in tokens.items():
+            fixture.reveal(name, token, active=False)
         for token in tokens.values():
             require(fixture.public(token)[0] == 401, "CLI enrollment changed the active registry before apply")
         require(fixture.admin_request("POST", body={"revision": previous["revision"],
                 "id": "stale", "token": "stale/input"})[0] == 409,
                 "A stale web update overwrote concurrent CLI enrollment")
         fixture.change("POST", fields={"id": "web-apply", "token": "web/apply"})
-        for token in tokens.values():
+        for name, token in tokens.items():
             require(fixture.public(token)[0] == 200, "Web apply omitted pending CLI changes")
+            fixture.reveal(name, token)
         result = fixture.command("--SetToken", "--ClientId", "concurrent-a", user_input=replacement + "\ny\n")
         require(result.returncode == 0 and replacement not in result.stdout + result.stderr,
                 "CLI rotation failed or exposed a manual token")
         require(fixture.view()["pending_restart"] and fixture.public(tokens["concurrent-a"])[0] == 200 and
                 fixture.public(replacement)[0] == 401, "CLI rotation did not remain pending until restart")
-        encoded = fixture.registry.read_bytes()
-        require(all(token.encode() not in encoded for token in [*tokens.values(), replacement]),
-                "CLI enrollment stored a manual credential in plaintext")
+        fixture.reveal("concurrent-a", replacement, active=False)
+        fixture.reveal("concurrent-b", tokens["concurrent-b"])
+        encoded = json.loads(fixture.registry.read_bytes())
+        stored = {entry["id"]: entry.get("token_value") for entry in encoded["clients"]}
+        require(stored["concurrent-a"] == replacement and stored["concurrent-b"] == tokens["concurrent-b"],
+                "CLI enrollment did not retain the recoverable values in its protected registry")
         fixture.unchanged_runtime()
 
     with fixture.running():
@@ -318,6 +355,7 @@ def verify_cli_pending(fixture):
         require(fixture.public(replacement)[0] == 200 and fixture.public(tokens["concurrent-a"])[0] == 401 and
                 fixture.public(tokens["concurrent-b"])[0] == 200,
                 "Restart did not apply the CLI registry without losing another client")
+        fixture.reveal("concurrent-a", replacement)
         fixture.unchanged_runtime()
 
 
@@ -354,11 +392,204 @@ def verify_zero_clients(fixture):
         fixture.unchanged_runtime()
 
 
+def verify_reveal(fixture):
+    token = "reveal/" + secrets.token_hex(24)
+    with fixture.running():
+        stale = fixture.view()["revision"]
+        fixture.change("POST", fields={"id": "visible", "token": token})
+        revision = fixture.view()["revision"]
+        body = {"id": "visible", "revision": revision}
+        for headers, expected in (
+            ({key: value for key, value in fixture.write_headers.items() if key != "Cookie"}, 401),
+            ({key: value for key, value in fixture.write_headers.items() if key != "X-QCWS-CSRF"}, 403),
+            (fixture.write_headers | {"Origin": "http://foreign.invalid"}, 403),
+        ):
+            status, _, result = request(fixture.admin, "POST", API + "/clients/reveal", headers, body)
+            require(status == expected and token not in json.dumps(result),
+                    "Reveal bypassed authentication, CSRF or Origin protection")
+        status, _, result = fixture.admin_request("POST", "/reveal", body | {"revision": stale})
+        require(status == 409 and result["error"]["code"] == "revision_conflict" and
+                token not in json.dumps(result), "Reveal ignored a stale client revision")
+        status, _, result = fixture.admin_request("POST", "/reveal", body | {"id": "absent"})
+        require(status == 404 and result["error"].get("reason") == "client_not_found",
+                "Reveal did not identify a missing client")
+        for invalid in ({"id": "visible"}, body | {"id": []}, body | {"token": token}):
+            status, _, result = fixture.admin_request("POST", "/reveal", invalid)
+            require(status == 400 and token not in json.dumps(result), "Reveal accepted or reflected an invalid body")
+        fixture.reveal("visible", token)
+
+        # File sources are shown without changing their ownership or provenance.
+        # An externally rotated file is not the already-running authentication snapshot.
+        source = fixture.runtime.parent / "client.token"
+        original = source.read_bytes()
+        replacement = "file/" + secrets.token_hex(24)
+        try:
+            source.write_text(replacement + "\n", encoding="ascii")
+            fixture.reveal("local", replacement, active=False)
+            require(fixture.public(fixture.file_token)[0] == 200 and fixture.public(replacement)[0] == 401,
+                    "Reading a changed file source applied it to the active service")
+            hidden = source.with_name("client.unavailable")
+            source.rename(hidden)
+            try:
+                status, _, result = fixture.admin_request("POST", "/reveal", body | {"id": "local"})
+                require(status == 400 and result["error"].get("reason") == "credential_source_unavailable" and
+                        replacement not in json.dumps(result), "An unavailable source was not reported safely")
+                before = fixture.view()
+                saved = fixture.registry.read_bytes()
+                candidate = "unapplied/" + secrets.token_hex(24)
+                for method, fields in (
+                    ("POST", {"id": "blocked-by-source", "token": candidate}),
+                    ("PUT", {"id": "visible", "token": candidate}),
+                    ("DELETE", {"id": "visible"}),
+                ):
+                    status, _, result = fixture.admin_request(method, body={"revision": before["revision"]} | fields)
+                    require(status == 400 and result["error"]["code"] == "invalid_configuration" and
+                            result["error"].get("reason") == "credential_source_unavailable" and
+                            result["error"].get("parameters") == {"client_id": "local"},
+                            "Client changes did not identify the unavailable credential source")
+                    response = json.dumps(result)
+                    require(all(value not in response for value in
+                                (token, candidate, replacement, fixture.file_token, str(source))),
+                            "An unavailable source error exposed a credential or source path")
+                    require(fixture.view() == before and fixture.registry.read_bytes() == saved and
+                            fixture.public(token)[0] == 200 and fixture.public(fixture.file_token)[0] == 200 and
+                            fixture.public(candidate)[0] == 401,
+                            "A failed source lookup changed disk state or the authentication snapshot")
+            finally:
+                hidden.rename(source)
+        finally:
+            source.write_bytes(original)
+        fixture.reveal("local", fixture.file_token)
+
+        committed = fixture.registry.read_bytes()
+        document = json.loads(committed)
+        stored = next(item for item in document["clients"] if item["id"] == "visible")
+        try:
+            del stored["token_value"]
+            fixture.registry.write_text(json.dumps(document), encoding="utf-8")
+            old = fixture.view()
+            require(not next(item for item in old["clients"] if item["id"] == "visible")["can_reveal"],
+                    "A hash-only record was incorrectly described as recoverable")
+            status, _, result = fixture.admin_request("POST", "/reveal", {"id": "visible", "revision": old["revision"]})
+            require(status == 400 and result["error"].get("reason") == "credential_not_recoverable" and
+                    fixture.public(token)[0] == 200, "Hash-only reveal changed authentication or hid its cause")
+            require(fixture.command("--CheckConfig").returncode == 0, "Hash-only credentials no longer authenticate")
+            stored["token_value"] = "incorrect/" + secrets.token_hex(24)
+            fixture.registry.write_text(json.dumps(document), encoding="utf-8")
+            status, _, result = fixture.admin_request("POST", "/reveal",
+                                                      {"id": "visible", "revision": fixture.view()["revision"]})
+            require(status == 400 and result["error"].get("reason") == "credential_digest_mismatch" and
+                    stored["token_value"] not in json.dumps(result), "A mismatched credential was disclosed")
+            checked = fixture.command("--CheckConfig")
+            require(checked.returncode != 0 and token not in checked.stdout + checked.stderr and
+                    stored["token_value"] not in checked.stdout + checked.stderr,
+                    "Corrupt credential state passed validation or leaked values")
+        finally:
+            fixture.registry.write_bytes(committed)
+
+        require(request(fixture.admin, "DELETE", API + "/session", fixture.write_headers)[0] == 200,
+                "Administrator sign-out failed")
+        status, _, result = fixture.admin_request("POST", "/reveal", body)
+        require(status == 401 and token not in json.dumps(result), "A retired administrator session could reveal a code")
+        fixture.login()
+        fixture.reveal("visible", token)
+        fixture.change("DELETE", fields={"id": "visible"})
+        require(fixture.public(token)[0] == 401, "Deleting a revealed credential did not revoke it")
+        fixture.unchanged_runtime()
+
+
+def verify_registry_capacity(fixture):
+    # Obtain a registry with the product's actual protected ACL, then supply the
+    # largest schema-valid document. Escaping doubles these credential bytes.
+    require(fixture.command("--SetToken", "--ClientId", "capacity-seed", user_input="seed/code\nyes\n").returncode == 0,
+            "Could not prepare a protected capacity fixture")
+    tokens = {f"capacity-{index}": "\\" * 8188 + f"{index:04d}" for index in range(100)}
+    document = {"schema_version": 1, "clients": [
+        {"id": client, "token_sha256": digest(token), "token_value": token, "generation": secrets.token_hex(16)}
+        for client, token in tokens.items()
+    ]}
+    encoded = json.dumps(document, indent=2).encode("utf-8")
+    require(1024 * 1024 < len(encoded) < 2 * 1024 * 1024, "Capacity fixture does not exercise escaped credentials")
+    fixture.registry.write_bytes(encoded)
+    require(fixture.command("--CheckConfig").returncode == 0, "A valid maximum-size registry was rejected")
+    with fixture.running():
+        require(len(fixture.view()["clients"]) == 100, "The largest registry lost clients")
+        fixture.reveal("capacity-99", tokens["capacity-99"])
+        revision = fixture.view()["revision"]
+        status, _, result = fixture.admin_request("POST", body={"id": "overflow", "token": "new/code",
+                                                               "revision": revision})
+        require(status == 400 and result["error"].get("reason") == "client_limit_reached" and
+                fixture.view()["revision"] == revision, "The client limit was not reported without mutation")
+        replacement = '"' * 8188 + "next"
+        fixture.change("PUT", fields={"id": "capacity-0", "token": replacement})
+        fixture.reveal("capacity-0", replacement)
+        require(fixture.public(replacement)[0] == 200, "Maximum escaped credential did not authenticate")
+        committed = fixture.registry.read_bytes()
+        try:
+            fixture.registry.write_bytes(committed + b" " * (2 * 1024 * 1024 + 1 - len(committed)))
+            status, _, result = fixture.admin_request()
+            require(status == 400 and result["error"].get("reason") == "client_registry_too_large",
+                    "An oversized registry was not explicitly rejected")
+            require(fixture.public(replacement)[0] == 200, "Oversized disk state replaced the valid active snapshot")
+        finally:
+            fixture.registry.write_bytes(committed)
+        fixture.unchanged_runtime()
+    with fixture.running():
+        fixture.reveal("capacity-0", replacement)
+        fixture.reveal("capacity-99", tokens["capacity-99"])
+
+
+def verify_write_failure(fixture):
+    with fixture.running():
+        fixture.change("POST", fields={"id": "write-check", "token": "before/write"})
+        committed = fixture.registry.read_bytes()
+        revision = fixture.view()["revision"]
+        replacement = "after/" + secrets.token_hex(16)
+        handle = None
+        directory_mode = None
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                          wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+            kernel.CreateFileW.restype = wintypes.HANDLE
+            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel.CloseHandle.restype = wintypes.BOOL
+            # Permit reading, but prevent the atomic replacement of this file.
+            handle = kernel.CreateFileW(str(fixture.registry), 0x80000000, 1, None, 3, 0x80, None)
+            require(handle not in (None, ctypes.c_void_p(-1).value), "Could not create the Windows write-failure fixture")
+        elif os.geteuid() != 0:
+            directory_mode = stat.S_IMODE(fixture.registry.parent.stat().st_mode)
+            fixture.registry.parent.chmod(0o500)
+        else:
+            # A privileged process bypasses chmod. Service-account write paths
+            # are separately exercised by DEB acceptance under the real account.
+            return
+        try:
+            status, _, result = fixture.admin_request("PUT", body={"id": "write-check", "token": replacement,
+                                                                  "revision": revision})
+            expected = "client_registry_write_failed" if os.name == "nt" else "client_registry_permissions"
+            require(status == 400 and result["error"].get("reason") == expected and
+                    replacement not in json.dumps(result), "A failed write had no safe, specific error")
+            require(fixture.registry.read_bytes() == committed and fixture.public("before/write")[0] == 200 and
+                    fixture.public(replacement)[0] == 401, "A failed write changed disk state or live authentication")
+            fixture.reveal("write-check", "before/write")
+        finally:
+            if handle is not None:
+                kernel.CloseHandle(handle)
+            if directory_mode is not None:
+                fixture.registry.parent.chmod(directory_mode)
+        fixture.change("PUT", fields={"id": "write-check", "token": replacement})
+        fixture.reveal("write-check", replacement)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--Executable", required=True)
     executable = parser.parse_args().Executable
-    for verify in (verify_crud, verify_cli_pending, verify_zero_clients):
+    for verify in (verify_crud, verify_cli_pending, verify_zero_clients, verify_reveal,
+                   verify_registry_capacity, verify_write_failure):
         with tempfile.TemporaryDirectory(prefix="qcws client registry ") as folder:
             fixture = Fixture(executable, Path(folder))
             try:

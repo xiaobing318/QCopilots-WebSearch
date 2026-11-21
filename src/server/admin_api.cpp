@@ -51,7 +51,7 @@ bool jsonContent(const Request &req) {
 Json parseBody(const Request &req) {
   auto json = parseBoundedJson(req.body);
   if (!json.is_object())
-    throw Error("invalid_argument", "A JSON object is required.");
+    throw Error("invalid_argument", "A JSON object is required.").withReason("admin_request_invalid");
   return json;
 }
 } // namespace
@@ -85,10 +85,15 @@ struct AdminServer::Impl {
     });
     server.set_pre_routing_handler([this](const Request &req, Response &res) {
       if (req.get_header_value_count("Host") != 1 ||
-          !allowed(config.hosts, req.get_header_value("Host"), true) ||
-          req.get_header_value_count("Origin") > 1 ||
+          !allowed(config.hosts, req.get_header_value("Host"), true)) {
+        sendJson(res, errorPayload(Error("forbidden", "Host is not allowed.", 403)
+                                      .withReason("admin_host_rejected")), 403);
+        return httplib::Server::HandlerResponse::Handled;
+      }
+      if (req.get_header_value_count("Origin") > 1 ||
           (req.has_header("Origin") && !allowed(config.origins, req.get_header_value("Origin")))) {
-        sendJson(res, errorPayload(Error("forbidden", "Host or Origin is not allowed.", 403)), 403);
+        sendJson(res, errorPayload(Error("forbidden", "Origin is not allowed.", 403)
+                                      .withReason("admin_origin_rejected")), 403);
         return httplib::Server::HandlerResponse::Handled;
       }
       return httplib::Server::HandlerResponse::Unhandled;
@@ -99,14 +104,17 @@ struct AdminServer::Impl {
       if (res.status == 413)
         sendJson(res, errorPayload(Error("payload_too_large", "Request exceeds 64 KiB.", 413)), 413);
       else if (res.status == 404)
-        sendJson(res, errorPayload(Error("not_found", "Administration endpoint was not found.", 404)), 404);
+        sendJson(res, errorPayload(Error("not_found", "Administration endpoint was not found.", 404)
+                                      .withReason("admin_endpoint_not_found")), 404);
     });
     mountSettingsAssets(server);
     bind("POST", "/login-links", [this](const auto &req, auto &res) {
       if (req.has_header("Origin") || req.has_header("Cookie"))
-        throw Error("forbidden", "Use the native client to request a login link.", 403);
+        throw Error("forbidden", "Use the native client to request a login link.", 403)
+            .withReason("admin_native_login_required");
       if (req.get_header_value_count("Authorization") != 1)
-        throw Error("unauthorized", "An administration credential is required.", 401);
+        throw Error("unauthorized", "An administration credential is required.", 401)
+            .withReason("admin_credential_invalid");
       const auto code = sessions.issue(req.get_header_value("Authorization"));
       sendJson(res, {{"url", config.origin + "/settings/#login=" + code}, {"expires_in", 120}});
     });
@@ -133,14 +141,20 @@ struct AdminServer::Impl {
     bind("PUT", "/settings", [this](const auto &req, auto &res) {
       verifySessionWrite(req);
       const auto body = parseBody(req);
-      validateSchema(readSchema("settings-update"), body);
+      try {
+        validateSchema(readSchema("settings-update"), body);
+      } catch (const Error &error) {
+        if (error.code != "invalid_argument")
+          throw;
+        throw error.withMessage("Invalid settings change.").withReason("settings_patch_invalid");
+      }
       sendJson(res, service.settings().update(body["patch"], body["revision"]));
     });
     bind("PUT", R"(/providers/([a-z]+)/key)", [this](const auto &req, auto &res) {
       verifySessionWrite(req);
       const auto body = parseBody(req);
       if (body.size() != 1 || !body.contains("key") || !body["key"].is_string())
-        throw Error("invalid_argument", "A provider key is required.");
+        throw Error("invalid_argument", "A provider key is required.").withReason("provider_key_invalid");
       sendJson(res, service.settings().setKey(req.matches[1].str(), body["key"]));
     });
     bind("DELETE", R"(/providers/([a-z]+)/key)", [this](const auto &req, auto &res) {
@@ -156,7 +170,8 @@ struct AdminServer::Impl {
       const auto error = service.settings().error();
       sendJson(res, {{"version", QCWS_VERSION}, {"listeners", service.listeningAddresses()}, {"mcp_url", mcpUrl},
                      {"cooldown", service.providerStatus()},
-                     {"settings_error", error.empty() ? Json(nullptr) : Json(error)}});
+                     {"settings_error", error.empty() ? Json(nullptr) : Json(error)},
+                     {"settings_error_detail", service.settings().errorDetails()}});
     });
     bind("GET", "/clients", [this](const auto &req, auto &res) {
       (void)sessions.require(requestCookie(req));
@@ -166,6 +181,11 @@ struct AdminServer::Impl {
       verifySessionWrite(req);
       const auto body = clientBody(req, true, true);
       sendJson(res, clients.create(body.at("id"), QByteArray::fromStdString(body.at("token")), body.at("revision")));
+    });
+    bind("POST", "/clients/reveal", [this](const auto &req, auto &res) {
+      verifySessionWrite(req);
+      const auto body = clientBody(req, true, false);
+      sendJson(res, clients.reveal(body.at("id"), body.at("revision")));
     });
     bind("PUT", "/clients", [this](const auto &req, auto &res) {
       verifySessionWrite(req);
@@ -199,7 +219,7 @@ struct AdminServer::Impl {
         body["revision"].get_ref<const std::string &>().size() != 64 ||
         (withId && (!body.contains("id") || !body["id"].is_string())) ||
         (withToken && (!body.contains("token") || !body["token"].is_string())))
-      throw Error("invalid_argument", "Invalid client change.");
+      throw Error("invalid_argument", "Invalid client request.").withReason("admin_request_invalid");
     return body;
   }
 
@@ -209,14 +229,15 @@ struct AdminServer::Impl {
   }
   void verifyWrite(const Request &req) const {
     if (req.get_header_value_count("Origin") != 1)
-      throw Error("forbidden", "A same-origin write is required.", 403);
+      throw Error("forbidden", "A same-origin write is required.", 403).withReason("admin_origin_rejected");
     if (!jsonContent(req))
-      throw Error("invalid_argument", "Content-Type application/json is required.", 415);
+      throw Error("invalid_argument", "Content-Type application/json is required.", 415)
+          .withReason("admin_content_type_invalid");
   }
   void verifySessionWrite(const Request &req) {
     verifyWrite(req);
     if (req.get_header_value_count("X-QCWS-CSRF") != 1)
-      throw Error("forbidden", "A CSRF token is required.", 403);
+      throw Error("forbidden", "A CSRF token is required.", 403).withReason("admin_csrf_rejected");
     const auto csrf = req.get_header_value("X-QCWS-CSRF");
     (void)sessions.require(requestCookie(req), &csrf);
   }
@@ -227,12 +248,11 @@ struct AdminServer::Impl {
         handler(req, res);
       } catch (const Error &error) {
         // Schema diagnostics can contain caller-supplied strings, including secrets.
-        sendJson(res, errorPayload(Error(error.code, error.code == "invalid_argument" ? "Invalid request."
-                                                                                    : error.what(),
-                                             error.status, error.retryable, error.retryAfterSeconds)),
+        sendJson(res, errorPayload(error.code == "invalid_argument" ? error.withMessage("Invalid request.") : error),
                  error.status);
       } catch (const std::exception &) {
-        sendJson(res, errorPayload(Error("internal_error", "Administration request failed.", 500)), 500);
+        sendJson(res, errorPayload(Error("internal_error", "Administration request failed.", 500)
+                                      .withReason("admin_internal_error")), 500);
       }
     };
     if (method == "GET")

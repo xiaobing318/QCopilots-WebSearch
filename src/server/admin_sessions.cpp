@@ -26,15 +26,19 @@ std::string AdminSessions::issue(const std::string &authorization) {
   const auto now = Clock::now();
   expire(now);
   if (failures_.size() >= 10)
-    throw Error("rate_limited", "Too many login failures.", 429, true);
+    throw Error("rate_limited", "Too many login failures.", 429, true,
+                int(std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::minutes(10) - (now - failures_.front())).count()) + 1)
+        .withReason("admin_login_rate_limited");
   try {
     (void)authenticate(credential_, authorization);
-  } catch (const Error &) {
+  } catch (const Error &error) {
     failures_.push_back(now);
-    throw;
+    throw error.withReason("admin_credential_invalid");
   }
   if (codes_.size() >= 8)
-    throw Error("rate_limited", "Too many pending login links.", 429, true);
+    throw Error("rate_limited", "Too many pending login links.", 429, true)
+        .withReason("admin_login_links_exhausted");
   const auto code = generateToken().toStdString();
   codes_.emplace(digest(code), now + std::chrono::seconds(120));
   return code;
@@ -44,23 +48,28 @@ Json AdminSessions::login(const Json &body, std::string &cookie) {
   const bool code = body.is_object() && body.size() == 1 && body.contains("code") && body["code"].is_string();
   const bool token = body.is_object() && body.size() == 1 && body.contains("token") && body["token"].is_string();
   if (!code && !token)
-    throw Error("invalid_argument", "A login code or token is required.");
+    throw Error("invalid_argument", "A login code or token is required.")
+        .withReason("admin_login_request_invalid");
   std::lock_guard guard(mutex_);
   const auto now = Clock::now();
   expire(now);
   if (failures_.size() >= 10)
-    throw Error("rate_limited", "Too many login failures.", 429, true);
+    throw Error("rate_limited", "Too many login failures.", 429, true,
+                int(std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::minutes(10) - (now - failures_.front())).count()) + 1)
+        .withReason("admin_login_rate_limited");
   try {
     if (code) {
       const auto &value = body["code"].get_ref<const std::string &>();
       if (value.size() != 64 || !codes_.erase(digest(value)))
-        throw Error("unauthorized", "Invalid or expired login code.", 401);
+        throw Error("unauthorized", "Invalid or expired login code.", 401)
+            .withReason("admin_login_code_invalid");
     } else {
       (void)authenticate(credential_, "Bearer " + body["token"].get<std::string>());
     }
-  } catch (const Error &) {
+  } catch (const Error &error) {
     failures_.push_back(now);
-    throw;
+    throw error.withReason(code ? "admin_login_code_invalid" : "admin_credential_invalid");
   }
   if (sessions_.size() == 16) {
     const auto oldest = std::min_element(sessions_.begin(), sessions_.end(),
@@ -79,9 +88,10 @@ Json AdminSessions::require(const std::string &cookie, const std::string *csrf) 
   expire(now);
   const auto session = cookie.size() == 64 ? sessions_.find(digest(cookie)) : sessions_.end();
   if (session == sessions_.end())
-    throw Error("unauthorized", "An administration session is required.", 401);
+    throw Error("unauthorized", "An administration session is required.", 401)
+        .withReason("admin_session_expired");
   if (csrf && *csrf != session->second.csrf)
-    throw Error("forbidden", "The CSRF token is invalid.", 403);
+    throw Error("forbidden", "The CSRF token is invalid.", 403).withReason("admin_csrf_rejected");
   session->second.touched = now;
   return {{"csrf", session->second.csrf}};
 }

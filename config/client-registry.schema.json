@@ -34,6 +34,13 @@
             "description": "Lowercase SHA-256 digest of a client credential. Created by the token configuration commands and read at startup.",
             "pattern": "^[a-f0-9]{64}$"
           },
+          "token_value": {
+            "type": "string",
+            "description": "Recoverable client credential. Stored only in the protected client registry and returned only by an authenticated single-client reveal request. Must match token_sha256.",
+            "minLength": 1,
+            "maxLength": 8192,
+            "pattern": "^[!-~]+$"
+          },
           "generation": {
             "type": "string",
             "pattern": "^[a-f0-9]{32}$",
@@ -44,6 +51,9 @@
           "id"
         ],
         "additionalProperties": false,
+        "dependencies": {
+          "token_value": ["token_sha256"]
+        },
         "oneOf": [
           {
             "required": [

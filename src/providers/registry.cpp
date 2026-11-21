@@ -12,7 +12,8 @@ public:
 
   SearchOutcome search(const SearchRequest &request, const std::shared_ptr<CancelToken> &token) override {
     if (!config_.ready())
-      throw Error("provider_not_configured", "The search provider needs a key.", 503);
+      throw Error("provider_not_configured", "The search provider needs a key.", 503)
+          .withReason("provider_not_configured");
     checkSearchCancellation(token);
     try {
       return search_(request, config_, send_, token);
@@ -21,7 +22,9 @@ public:
       // report endpoint failures without copying upstream messages or bodies.
       if (error.code == "upstream_http_error" || error.code == "destination_blocked" ||
           error.code == "response_too_large" || error.code == "unsupported_content")
-        throw Error("provider_unavailable", "Search provider request failed.", 502, error.retryable);
+        throw Error("provider_unavailable", "Search provider request failed.", 502, error.retryable,
+                    error.retryAfterSeconds)
+            .withReason(error.reason.empty() ? "network_transport_failed" : error.reason);
       throw;
     }
   }
@@ -58,7 +61,7 @@ std::unique_ptr<SearchProvider> ProviderRegistry::create(const ProviderConfig &c
     return std::make_unique<KeyedProvider>(config, std::move(send), searchPerplexity);
   if (config.id == "deepseek")
     return std::make_unique<KeyedProvider>(config, std::move(send), searchDeepSeek);
-  throw Error("invalid_argument", "Unknown search provider.");
+  throw Error("invalid_argument", "Unknown search provider.").withReason("provider_unknown");
 }
 
 Json ProviderRegistry::status() const {
@@ -69,9 +72,9 @@ void checkSearchCancellation(const std::shared_ptr<CancelToken> &token) {
   if (!token)
     throw Error("invalid_argument", "A search deadline is required.");
   if (token->cancelled.load())
-    throw Error("cancelled", "Search was cancelled.", 499);
+    throw Error("cancelled", "Search was cancelled.", 499).withReason("request_cancelled");
   if (Clock::now() >= token->deadline)
-    throw Error("timeout", "Search deadline expired.", 504, true);
+    throw Error("timeout", "Search deadline expired.", 504, true).withReason("request_timeout");
 }
 
 std::string resultText(const Json &object, const char *field) {
@@ -81,13 +84,19 @@ std::string resultText(const Json &object, const char *field) {
 
 Json readProviderResults(const HttpResponse &response, const char *container) {
   if (response.status == 429)
-    throw Error("rate_limited", "Search provider is rate limited.", 429, true, retryAfterSeconds(response));
+    throw Error("rate_limited", "Search provider is rate limited.", 429, true, retryAfterSeconds(response))
+        .withReason("provider_rate_limited");
   if (response.status != 200) {
     const auto status = response.status;
     throw Error("provider_unavailable", "Search provider did not return a usable response.", 502,
-                status == 408 || status >= 500);
+                status == 408 || status >= 500)
+        .withReason(status == 401 || status == 403 ? "provider_credentials_rejected" :
+                    status >= 300 && status < 400 ? "provider_redirect_rejected" : "provider_http_error");
   }
   auto data = parseBoundedJson(response.body);
+  if (data.is_discarded())
+    throw Error("provider_unavailable", "Search provider returned invalid JSON results.", 502, true)
+        .withReason("provider_invalid_json");
   if (data.is_object()) {
     auto items = &data;
     if (container) {
@@ -95,13 +104,15 @@ Json readProviderResults(const HttpResponse &response, const char *container) {
       if ((nested == data.end() || nested->is_null()) && resultText(data, "type") == "search")
         return Json::array();
       if (nested == data.end() || !nested->is_object())
-        throw Error("provider_unavailable", "Search provider returned invalid JSON results.", 502, true);
+        throw Error("provider_unavailable", "Search provider returned invalid JSON results.", 502, true)
+            .withReason("provider_invalid_response");
       items = &*nested;
     }
     if (const auto results = items->find("results"); results != items->end() && results->is_array())
       return std::move(*results);
   }
-  throw Error("provider_unavailable", "Search provider returned invalid JSON results.", 502, true);
+  throw Error("provider_unavailable", "Search provider returned invalid JSON results.", 502, true)
+      .withReason("provider_invalid_response");
 }
 
 Json resultItem(std::string_view source, std::string url, std::string title, std::string summary,

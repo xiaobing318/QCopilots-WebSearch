@@ -34,13 +34,21 @@ public:
                                      : http_.requestBackend(config_.url, std::move(body), config_.key,
                                                             token, config_.caFile);
     if (response.status == 429)
-      throw Error("rate_limited", "Search provider is rate limited.", 429, true, retryAfterSeconds(response));
+      throw Error("rate_limited", "Search provider is rate limited.", 429, true, retryAfterSeconds(response))
+          .withReason("provider_rate_limited");
     if (response.status != 200)
       throw Error("provider_unavailable", "Search provider did not return a usable response.", 502,
-                  response.status != 401 && response.status != 403);
+                  response.status != 401 && response.status != 403)
+          .withReason(response.status == 401 || response.status == 403 ? "provider_credentials_rejected" :
+                      response.status >= 300 && response.status < 400 ? "provider_redirect_rejected" :
+                      "provider_http_error");
     auto data = parseBoundedJson(response.body);
+    if (data.is_discarded())
+      throw Error("provider_unavailable", "Search provider returned invalid JSON results.", 502, true)
+          .withReason("provider_invalid_json");
     if (!data.is_object() || !data.contains("results") || !data["results"].is_array())
-      throw Error("provider_unavailable", "Search provider returned invalid JSON results.", 502, true);
+      throw Error("provider_unavailable", "Search provider returned invalid JSON results.", 502, true)
+          .withReason("provider_invalid_response");
     return {std::move(data), "searxng"};
   }
 private:

@@ -19,7 +19,7 @@ MSI 和 DEB 安装包会为每个项目版本注册独立服务。新版本首�
 使用 apt 安装发布版 DEB，将 `version` 设为安装包文件名中的版本号。每个安装包都会创建该版本专用的非特权服务账号和 systemd 单元。DEB 要求 `/opt` 归 `root` 所有，且仅允许所有者写入。
 
 ```bash
-version=0.3.0
+version=0.3.1
 package=qcopilots-websearch-$version
 sudo apt install "./${package}_${version}_amd64.deb"
 sudo systemctl status "$package.service"
@@ -67,14 +67,14 @@ MSI 安装 `QCopilotsWebSearch-<version>` 系统服务，运行账号为虚拟�
 如需改用其他目录，请在以管理员身份打开的命令提示符中设置 `INSTALL_ROOT`。程序及其 `bin\data` 目录均位于指定位置。请为不同版本选择各自的安装目录。
 
 ```cmd
-msiexec.exe /i "C:\Downloads\QCopilots-WebSearch-0.3.0-win64.msi" INSTALL_ROOT="C:\Program Files\QCopilots-WebSearch-Custom-0.3.0"
+msiexec.exe /i "C:\Downloads\QCopilots-WebSearch-0.3.1-win64.msi" INSTALL_ROOT="C:\Program Files\QCopilots-WebSearch-Custom-0.3.1"
 ```
 
 本机交互式用户可以读取 `admin.token`，用于登录设置页并管理搜索设置。运行配置、客户端令牌和搜索源密钥各自受文件 ACL 保护。在目标版本安装目录的 `bin` 下运行 `qcopilots-websearch.exe --SettingsUrl`，即可为正在运行的服务生成一次性链接。
 
 请以管理员身份运行 MSI，并阅读安装程序显示的 Apache 许可条款和 Microsoft 运行库条款。安装包的签名状态以发布说明为准，未特别说明时为未签名。在 Windows 的“已安装的应用”中按版本选择要卸载的 MSI。卸载会移除该版本的程序文件和服务，并保留配置和数据。
 
-将便携 ZIP 解压到私有可写目录，每个便携实例使用独立的解压目录。例如，将 `QCopilots-WebSearch-0.3.0-win64.zip` 下载到 `C:\Softwares\QCopilots-WebSearch`，解压后确认 `C:\Softwares\QCopilots-WebSearch\QCopilots-WebSearch-0.3.0-win64\bin\qcopilots-websearch.exe` 存在，避免重复嵌套同名目录。在解压目录运行 `.\bin\qcopilots-websearch.exe`，即可在前台启动服务。
+将便携 ZIP 解压到私有可写目录，每个便携实例使用独立的解压目录。例如，将 `QCopilots-WebSearch-0.3.1-win64.zip` 下载到 `C:\Softwares\QCopilots-WebSearch`，解压后确认 `C:\Softwares\QCopilots-WebSearch\QCopilots-WebSearch-0.3.1-win64\bin\qcopilots-websearch.exe` 存在，避免重复嵌套同名目录。在解压目录运行 `.\bin\qcopilots-websearch.exe`，即可在前台启动服务。
 
 首次启动会创建 `bin\data\runtime.json`，并生成客户端令牌和管理令牌。监听器准备就绪后，终端显示实际的业务、MCP、控制、设置地址、配置和数据路径，以及登录方法。默认业务端口为 3181，控制端口为 3182，设置端口为 3183。若首次初始化选用了其他端口，以启动信息和运行配置为准。服务运行期间，从另一个终端执行 `.\bin\qcopilots-websearch.exe --SettingsUrl`，打开该实例的设置页。
 
@@ -91,7 +91,7 @@ msiexec.exe /i "C:\Downloads\QCopilots-WebSearch-0.3.0-win64.msi" INSTALL_ROOT="
 1. 在解压目录运行 `.\bin\qcopilots-websearch.exe` 完成首次启动。按 Ctrl+C 停止程序后，打开 `bin\data\runtime.json`，确认 `business.host` 为 `127.0.0.1` 并记下 `business.port`。下面假定端口是 3181。如果配置中是其他端口，后续步骤使用实际值。
 2. 在 `business.allowed_hosts` 中保留现有的回环地址（如 `127.0.0.1:3181`），追加 `search.example.org` 和 `search.example.org:443`。将 `business.public_url` 设为 `https://search.example.org/mcp`，让设置页的连接步骤显示可复制的公网 MCP 地址。默认 HTTP 配置没有 `business.tls` 字段。从此前的 HTTPS 配置切换时，移除这一字段。保存文件，运行 `.\bin\qcopilots-websearch.exe --CheckConfig`，检查通过后再无参数启动程序。
 3. 在 Cloudflare 的 **Networking → Tunnels → 目标隧道 → Routes** 编辑或添加 **Published application**。主机名填公网域名，Path 留空。在 **Service** 中选择 **HTTP**，**URL** 填 `127.0.0.1:3181`。若页面只有 **Service URL** 一栏，填写 `http://127.0.0.1:3181`。只发布业务端口，控制和管理端口供本机使用。[Cloudflare 路由设置](https://developers.cloudflare.com/tunnel/get-started/#publish-an-application)
-4. 保持服务运行，在解压目录另开 PowerShell 进行公网验证。下列第一条命令应显示 `401`，最后一条应显示 `contract_version` 为 `1`、`service` 为 `ready`。示例使用首次启动生成的业务令牌。如果已通过页面或 CLI 轮换该令牌，请将 `$token` 设为此前保存的新 Bearer。轮换不会更新 `client.token`，注册表仅保存摘要，无法找回原码。
+4. 保持服务运行，在解压目录另开 PowerShell 进行公网验证。下列第一条命令应显示 `401`，最后一条应显示 `contract_version` 为 `1`、`service` 为 `ready`。示例使用首次启动生成的业务令牌。如果已通过页面或 CLI 轮换该令牌，请将 `$token` 设为此前保存的新 Bearer。轮换不会更新 `client.token`，新保存的授权码可在本机管理页选择该客户端后按需查看或复制。
 
 ```powershell
 curl.exe -sS -o NUL -w "%{http_code}\n" https://search.example.org/v1/status
@@ -180,11 +180,11 @@ openssl verify -x509_strict -purpose sslserver -verify_ip 127.0.0.1 -CAfile orig
 
 “随机生成”使用密码学安全随机源生成 64 位小写十六进制授权码。“从字符串生成”将非空输入原文编码为 UTF-8，再计算 SHA-256 并输出 64 位小写十六进制字符。相同输入始终得到相同结果，前后空格、换行、大小写和 Unicode 字符均参与计算，不执行去空格或规范化。源字符串不发送到服务端，也不写入浏览器存储，生成后清空。生成只填写第一步的授权码，必须完成第二步保存才能生效。
 
-第三步显示的授权码来自本次操作的页面内存，可以重复复制。点击完成、切换客户端或标签页、刷新页面、重新加载客户端列表或退出登录后，该临时值会清空。服务只保存摘要，之后无法从客户端详情找回原码。需要再次分发时，使用此前自行保存的原码，或替换为新授权码。
+第三步显示本次保存的授权码，可以重复复制。已保存客户端的详情也提供独立的显示、隐藏和复制操作，默认隐藏，点击时才读取单条原文。切换客户端或标签页、刷新、注销、删除或替换时清空页面原文，迟到的响应不会恢复它。无需为了再次复制而替换授权码。
 
 新增、更新和删除成功后立即影响后续请求，并在重启后保留。列表仅显示客户端 ID 和凭据来源，不返回授权码原文或摘要。更新已有客户端的授权码会保留其缓存身份，删除后重新创建同名客户端则使用新的身份，不能继承旧网页快照或 MCP 会话。删除最后一个业务客户端后，业务访问会被拒绝，管理员仍可登录设置页恢复授权。
 
-首次持久化授权变更时，程序将运行配置中的客户端完整迁移到 `settings.directory` 下的 `client-registry.json`，默认位置为 `bin/data/state/client-registry.json`。此后该注册表是客户端凭据的唯一来源，修改 `runtime.json` 的 `clients` 不会覆盖它。已有的文件或环境变量凭据来源在迁移时保留，手动保存的授权码只存储 SHA-256 摘要。备份时保留整个私有数据目录。
+首次持久化授权变更时，程序将运行配置中的客户端完整迁移到 `settings.directory` 下的 `client-registry.json`，默认位置为 `bin/data/state/client-registry.json`。此后该注册表是客户端凭据的唯一来源，修改 `runtime.json` 的 `clients` 不会覆盖它。已有文件和环境变量来源保留。新手动授权将原文和 SHA-256 摘要原子保存到受文件权限保护的注册表，支持管理员按需查看，认证仍使用摘要。注册表容量上限为 2 MiB。备份时保留整个私有数据目录并保护其访问权限，不将原文注册表提交到版本控制或诊断日志。
 
 CLI 也可生成或登记令牌。两条命令都会在标准错误输出中请求确认，需要输入 `y` 或 `yes`。设置令牌时，从标准输入读取 1 至 8192 个可见 ASCII 字符，并在交互式终端中隐藏输入，再在下一行确认。`--GenerateToken` 生成 64 个十六进制字符的随机业务令牌，并在保存后将新令牌写入标准输出。CLI 修改保留重启生效的方式。
 
@@ -195,12 +195,12 @@ qcopilots-websearch --ConfigPath FILE --SetToken [--ClientId ID]
 
 CLI 默认客户端 ID 为 `local`。对于新 ID，命令会添加条目。对于已有 ID，命令会替换凭据并保留其缓存身份。运行中的服务不会自动加载 CLI 写入，设置页会提示待重启的变更。重启后新授权生效，被替换的旧令牌失效。也可以在页面重新读取最新授权列表后执行保存，该次网页写入会一起应用此前待加载的 CLI 变更。
 
-将令牌原文存入私有凭据存储，并通过安全渠道交给客户端。配置中的摘要不能用于连接服务或恢复令牌。单独运行 `--GenerateToken` 时，命令只生成并输出令牌。
+通过安全渠道将令牌交给客户端。新网页和 CLI 保存的授权码可在本机管理页重新显示或复制。旧版本只有摘要的记录无法恢复原文，本版本不自动迁移或重置它们。文件或环境变量来源读取失败会明确提示，外部更新尚未进入运行快照时会标记未生效。单独运行 `--GenerateToken` 时，命令只生成并输出令牌。
 
 对于 DEB 安装，以管理员身份生成凭据，再用该版本的服务账号检查配置并重启服务。
 
 ```bash
-version=0.3.0
+version=0.3.1
 package=qcopilots-websearch-$version
 executable="/opt/$package/bin/qcopilots-websearch"
 config_path="/opt/$package/bin/data/runtime.json"
@@ -213,7 +213,7 @@ sudo systemctl restart "$package.service"
 对于 MSI 安装，将 `installRoot` 设为安装程序实际使用的目录，然后在以管理员身份打开的 PowerShell 中运行以下命令。便携版请指定其运行配置路径，并省略 `--ServiceName`。
 
 ```powershell
-$version = '0.3.0'
+$version = '0.3.1'
 $serviceName = "QCopilotsWebSearch-$version"
 $installRoot = Join-Path $env:ProgramFiles "QCopilots-WebSearch-$version"
 $executable = Join-Path $installRoot 'bin\qcopilots-websearch.exe'

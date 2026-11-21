@@ -413,6 +413,16 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "settings_error_detail": {
+                      "oneOf": [
+                        {
+                          "$ref": "#/components/schemas/ErrorDetail"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -916,6 +926,99 @@
         },
         "deprecated": true
       }
+    },
+    "/clients/reveal": {
+      "post": {
+        "summary": "Read one saved client credential on demand",
+        "description": "Requires the current revision, administration session, allowed Origin and CSRF. Returns no-store. Does not modify stored or active credentials.",
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-QCWS-CSRF",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "revision"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+                  },
+                  "revision": {
+                    "type": "string",
+                    "minLength": 64,
+                    "maxLength": 64
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One credential. Never cache the response.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientCredentialView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input, unrecoverable old digest, unreadable source or invalid registry."
+          },
+          "401": {
+            "description": "Missing or expired administration session."
+          },
+          "403": {
+            "description": "Origin or CSRF verification failed."
+          },
+          "404": {
+            "description": "The client no longer exists."
+          },
+          "409": {
+            "description": "The saved client list changed. Reload before retrying."
+          },
+          "default": {
+            "description": "Operation failed without changing authorization."
+          }
+        }
+      }
     }
   },
   "components": {
@@ -957,11 +1060,16 @@
                     "file",
                     "environment"
                   ]
+                },
+                "can_reveal": {
+                  "type": "boolean",
+                  "description": "The record has a recoverable source. An external source can still become unavailable."
                 }
               },
               "required": [
                 "id",
-                "source"
+                "source",
+                "can_reveal"
               ],
               "additionalProperties": false
             }
@@ -976,6 +1084,74 @@
           "clients",
           "pending_restart"
         ],
+        "additionalProperties": false
+      },
+      "ErrorDetail": {
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "retryable"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "reason": {
+            "$ref": "error-reasons.json"
+          },
+          "retry_after_seconds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "client_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "ClientCredentialView": {
+        "type": "object",
+        "required": [
+          "id",
+          "token",
+          "revision",
+          "active"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+          },
+          "token": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192,
+            "pattern": "^[!-~]+$"
+          },
+          "revision": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "active": {
+            "type": "boolean",
+            "description": "The returned credential and identity match the active authentication snapshot."
+          }
+        },
         "additionalProperties": false
       }
     }

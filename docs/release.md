@@ -33,7 +33,7 @@ GitHub Actions 在 Windows Server 2025 上构建 Windows x64 便携 ZIP 和 MSI 
 下载后可用 `SHA256SUMS` 校验文件。也可通过 GitHub CLI 验证安装包的构建来源。
 
 ```bash
-version=0.3.0
+version=0.3.1
 gh attestation verify "./qcopilots-websearch-${version}_${version}_amd64.deb" --repo xiaobing318/QCopilots-WebSearch
 ```
 

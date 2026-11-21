@@ -25,6 +25,7 @@ public:
   Json view() const;
   Json policy(const SettingsSnapshot &) const;
   std::string error() const;
+  Json errorDetails() const;
   Json update(const Json &patch, const std::string &expectedRevision);
   Json setKey(const std::string &id, const std::string &key);
   Json clearKey(const std::string &id);
@@ -39,6 +40,7 @@ private:
   std::shared_ptr<const SettingsSnapshot> active_;
   QByteArray settingsStamp_, secretsStamp_;
   std::string error_;
+  Json errorDetails_ = nullptr;
   Json view(const SettingsSnapshot &) const;
 };
 

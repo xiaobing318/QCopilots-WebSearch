@@ -1,8 +1,31 @@
+#include <QFile>
+#include <QResource>
 #include <QString>
 #include <QUuid>
 #include <algorithm>
 #include <qws/protocol.hpp>
+
+static void initializeBrandingResources() {
+  Q_INIT_RESOURCE(branding);
+}
+
 namespace qws {
+namespace {
+const Json &serverIcons() {
+  static const Json icons = [] {
+    // MCP metadata must also be available to stdio, without starting the admin listener.
+    initializeBrandingResources();
+    QFile icon(QStringLiteral(":/branding/websearch.svg"));
+    if (!icon.open(QIODevice::ReadOnly))
+      throw Error("internal_error", "The embedded server icon is unavailable.", 500);
+    return Json::array({{{"src", "data:image/svg+xml;base64," + icon.readAll().toBase64().toStdString()},
+                         {"mimeType", "image/svg+xml"},
+                         {"sizes", Json::array({"any"})}}});
+  }();
+  return icons;
+}
+} // namespace
+
 Protocol::Protocol(Service &s, std::string version, Now now, TransportPolicy transport)
     : service_(s), version_(std::move(version)), now_(std::move(now)), transport_(transport) {
   if (!now_)
@@ -147,6 +170,7 @@ ProtocolReply Protocol::handleRequest(const std::string &principal, const std::s
     const std::string negotiated =
         supportsVersion(requested) ? requested : std::string(SupportedVersions.front());
     const Json &instructions = toolCatalog()["instructions"];
+    const Json &icons = serverIcons();
     std::lock_guard lock(mutex_);
     expireLocked(now);
     if (closing_)
@@ -188,7 +212,7 @@ ProtocolReply Protocol::handleRequest(const std::string &principal, const std::s
                  {"result",
                   {{"protocolVersion", negotiated},
                    {"capabilities", {{"tools", Json::object()}}},
-                   {"serverInfo", {{"name", "qcopilots-websearch"}, {"version", version_}}},
+                   {"serverInfo", {{"name", "qcopilots-websearch"}, {"version", version_}, {"icons", icons}}},
                    {"instructions", instructions}}}},
             fresh};
   }

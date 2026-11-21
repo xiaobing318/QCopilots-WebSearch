@@ -16,7 +16,7 @@ const csrf = "client-session-csrf";
 const mcpUrl = "https://web-search.vastarmorai.com/mcp";
 const initial: ClientRegistryView = {
   revision: "clients-1",
-  clients: [{ id: "local", source: "file" }],
+  clients: [{ id: "local", source: "file", can_reveal: true }],
   pending_restart: false,
 };
 
@@ -27,13 +27,19 @@ function json(value: unknown, status = 200) {
   });
 }
 
-function service(value = initial) {
+function service(value = initial, { active = true } = {}) {
   let view = structuredClone(value);
+  const savedTokens = new Map(
+    value.clients.map((client) => [client.id, "stored-code-for-" + client.id]),
+  );
   let nextError: string | undefined;
   let nextPending: Promise<Response> | undefined;
   let revision = 1;
   const fetcher = vi.fn((path: string, options: RequestInit) => {
-    if (path !== "/admin/api/v1/clients")
+    if (
+      path !== "/admin/api/v1/clients" &&
+      path !== "/admin/api/v1/clients/reveal"
+    )
       return json({ error: { code: "not_found" } }, 404);
     if (options.method === "GET") return json(view);
     if (nextPending) {
@@ -54,16 +60,28 @@ function service(value = initial) {
       );
     }
     const body = JSON.parse(String(options.body));
+    if (path === "/admin/api/v1/clients/reveal")
+      return json({
+        id: body.id,
+        token: savedTokens.get(body.id),
+        revision: view.revision,
+        active,
+      });
     if (options.method === "POST") {
-      view.clients.push({ id: body.id, source: "manual" });
+      view.clients.push({ id: body.id, source: "manual", can_reveal: true });
+      savedTokens.set(body.id, body.token);
     } else {
       const id = body.id;
       if (options.method === "DELETE") {
         view.clients = view.clients.filter((client) => client.id !== id);
+        savedTokens.delete(id);
       } else {
         view.clients = view.clients.map((client) =>
-          client.id === id ? { id, source: "manual" } : client,
+          client.id === id
+            ? { id, source: "manual", can_reveal: true }
+            : client,
         );
+        savedTokens.set(id, body.token);
       }
     }
     view = {
@@ -690,3 +708,328 @@ it.each([".", ".."])(
     ).toBe(true);
   },
 );
+
+it("reads a saved code only on request, then clears it when hidden and fetches again", async () => {
+  const user = userEvent.setup();
+  const { fetcher } = service();
+  show();
+  const reveal = await screen.findByRole("button", { name: "Show saved code" });
+  const input = screen.getByLabelText("Saved Bearer authorization code");
+  expect(input).toHaveValue("");
+  expect(input).toHaveAttribute("type", "password");
+  expect(fetcher).toHaveBeenCalledTimes(1);
+
+  await user.click(reveal);
+  await waitFor(() => expect(input).toHaveValue("stored-code-for-local"));
+  expect(input).toHaveAttribute("type", "text");
+  expect(fetcher).toHaveBeenLastCalledWith(
+    "/admin/api/v1/clients/reveal",
+    expect.objectContaining({
+      method: "POST",
+      headers: expect.objectContaining({ "X-QCWS-CSRF": csrf }),
+      credentials: "same-origin",
+      cache: "no-store",
+      body: JSON.stringify({ revision: "clients-1", id: "local" }),
+    }),
+  );
+  expect(localStorage.length).toBe(0);
+  expect(sessionStorage.length).toBe(0);
+
+  await user.click(screen.getByRole("button", { name: "Hide saved code" }));
+  expect(input).toHaveValue("");
+  expect(input).toHaveAttribute("type", "password");
+  await user.click(screen.getByRole("button", { name: "Show saved code" }));
+  await waitFor(() => expect(input).toHaveValue("stored-code-for-local"));
+  expect(
+    fetcher.mock.calls.filter(([path]) => path.endsWith("/reveal")),
+  ).toHaveLength(2);
+});
+
+it("copies a saved code on demand without displaying it in plain text", async () => {
+  const user = userEvent.setup();
+  const clipboard = vi
+    .spyOn(navigator.clipboard, "writeText")
+    .mockResolvedValue();
+  const { fetcher } = service();
+  show();
+  await user.click(
+    await screen.findByRole("button", { name: "Copy saved Bearer" }),
+  );
+  await waitFor(() =>
+    expect(clipboard).toHaveBeenCalledWith("stored-code-for-local"),
+  );
+  expect(
+    screen.getByLabelText("Saved Bearer authorization code"),
+  ).toHaveAttribute("type", "password");
+  expect(document.body).not.toHaveTextContent("stored-code-for-local");
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(localStorage.length).toBe(0);
+  expect(sessionStorage.length).toBe(0);
+});
+
+it("keeps a saved code hidden when clipboard access fails and offers an explicit show action", async () => {
+  const user = userEvent.setup();
+  vi.spyOn(navigator.clipboard, "writeText").mockRejectedValue(
+    new Error("clipboard denied"),
+  );
+  service();
+  show();
+  await user.click(
+    await screen.findByRole("button", { name: "Copy saved Bearer" }),
+  );
+  expect(
+    await screen.findByText(
+      "Could not copy. Choose Show saved code to select and copy it manually.",
+    ),
+  ).toBeVisible();
+  expect(
+    screen.getByLabelText("Saved Bearer authorization code"),
+  ).toHaveAttribute("type", "password");
+  expect(screen.getByRole("button", { name: "Show saved code" })).toBeEnabled();
+  expect(document.body).not.toHaveTextContent("stored-code-for-local");
+});
+
+it("keeps a newly saved code hidden after clipboard failure until the user chooses to show it", async () => {
+  const user = userEvent.setup();
+  vi.spyOn(navigator.clipboard, "writeText").mockRejectedValue(
+    new Error("clipboard denied"),
+  );
+  service();
+  show();
+  await replaceManually(user, "fresh-copy-failure-code");
+  await reviewAndSave(user);
+  await user.click(await screen.findByRole("button", { name: "Copy Bearer" }));
+  expect(await screen.findByText(/Could not copy\./)).toBeVisible();
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Show code" })).toBeEnabled(),
+  );
+  expect(screen.getByLabelText("Bearer authorization code")).toHaveAttribute(
+    "type",
+    "password",
+  );
+  expect(document.body).not.toHaveTextContent("fresh-copy-failure-code");
+});
+
+it.each(["Show saved code", "Copy saved Bearer"])(
+  "describes a CLI-pending code as not active yet when using %s",
+  async (action) => {
+    const user = userEvent.setup();
+    vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    service({ ...initial, pending_restart: true }, { active: false });
+    show();
+    await user.click(await screen.findByRole("button", { name: action }));
+    expect(
+      await screen.findByText(
+        /saved code is not active yet\. Restart the service to apply it\./i,
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText("Saved and active")).toBeNull();
+    if (action === "Show saved code")
+      expect(
+        screen.getByLabelText("Saved Bearer authorization code"),
+      ).toHaveValue("stored-code-for-local");
+  },
+);
+
+it("keeps legacy digest-only credentials unavailable for reveal while allowing replacement", async () => {
+  const user = userEvent.setup();
+  const { fetcher } = service({
+    ...initial,
+    clients: [{ id: "local", source: "manual", can_reveal: false }],
+  });
+  show();
+  const replace = await screen.findByRole("button", {
+    name: "Replace code for local",
+  });
+  expect(screen.queryByRole("button", { name: "Show saved code" })).toBeNull();
+  expect(
+    screen.queryByRole("button", { name: "Copy saved Bearer" }),
+  ).toBeNull();
+  await user.click(replace);
+  expect(screen.getByLabelText("Bearer authorization code")).toHaveValue("");
+  expect(fetcher).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  "Refresh clients",
+  "Replace code for local",
+  "Revoke access for local",
+  "Select client second",
+])("clears a revealed saved code before %s", async (action) => {
+  const user = userEvent.setup();
+  service({
+    ...initial,
+    clients: [
+      ...initial.clients,
+      { id: "second", source: "manual", can_reveal: true },
+    ],
+  });
+  show();
+  await user.click(
+    await screen.findByRole("button", { name: "Show saved code" }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByLabelText("Saved Bearer authorization code"),
+    ).toHaveValue("stored-code-for-local"),
+  );
+  await user.click(screen.getByRole("button", { name: action }));
+  await waitFor(() =>
+    expect(screen.queryByDisplayValue("stored-code-for-local")).toBeNull(),
+  );
+});
+
+it.each([
+  "Refresh clients",
+  "Replace code for local",
+  "Revoke access for local",
+  "Select client second",
+])(
+  "ignores a late reveal after %s without locking navigation",
+  async (action) => {
+    const user = userEvent.setup();
+    let finish!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      finish = resolve;
+    });
+    const { deferNext, fetcher } = service({
+      ...initial,
+      clients: [
+        ...initial.clients,
+        { id: "second", source: "manual", can_reveal: true },
+      ],
+    });
+    const { onBusyChange } = show();
+    await screen.findByRole("button", { name: "Show saved code" });
+    deferNext(pending);
+    await user.click(screen.getByRole("button", { name: "Show saved code" }));
+    const request = fetcher.mock.calls.find(([path]) =>
+      path.endsWith("/reveal"),
+    )![1];
+    const actionButton = screen.getByRole("button", { name: action });
+    expect(actionButton).toBeEnabled();
+    expect(onBusyChange).not.toHaveBeenCalledWith(true);
+    await user.click(actionButton);
+    expect(request.signal?.aborted).toBe(true);
+    await act(async () => {
+      finish(
+        json({
+          id: "local",
+          token: "late-secret",
+          revision: "clients-1",
+          active: true,
+        }),
+      );
+      await pending;
+    });
+    expect(screen.queryByDisplayValue("late-secret")).toBeNull();
+    expect(document.body).not.toHaveTextContent("late-secret");
+  },
+);
+
+it("does not copy a late response after the selected client changes", async () => {
+  const user = userEvent.setup();
+  const clipboard = vi
+    .spyOn(navigator.clipboard, "writeText")
+    .mockResolvedValue();
+  let finish!: (response: Response) => void;
+  const pending = new Promise<Response>((resolve) => {
+    finish = resolve;
+  });
+  const { deferNext } = service({
+    ...initial,
+    clients: [
+      ...initial.clients,
+      { id: "second", source: "manual", can_reveal: true },
+    ],
+  });
+  show();
+  await screen.findByRole("button", { name: "Copy saved Bearer" });
+  deferNext(pending);
+  await user.click(screen.getByRole("button", { name: "Copy saved Bearer" }));
+  await user.click(
+    screen.getByRole("button", { name: "Select client second" }),
+  );
+  await act(async () => {
+    finish(
+      json({
+        id: "local",
+        token: "never-copy-late-secret",
+        revision: "clients-1",
+        active: true,
+      }),
+    );
+    await pending;
+  });
+  expect(clipboard).not.toHaveBeenCalled();
+  expect(screen.queryByDisplayValue("never-copy-late-secret")).toBeNull();
+});
+
+it("preserves structured duplicate-credential errors without displaying the server's raw message", async () => {
+  const user = userEvent.setup();
+  const { deferNext } = service();
+  show();
+  await replaceManually(user, "already-assigned-code");
+  deferNext(
+    Promise.resolve(
+      json(
+        {
+          error: {
+            code: "invalid_argument",
+            reason: "client_credential_duplicate",
+            parameters: {
+              client_id: "team-qgis",
+              token: "server-secret-value",
+            },
+            message: "raw-secret-from-server",
+          },
+        },
+        400,
+      ),
+    ),
+  );
+  await reviewAndSave(user);
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("Could not save the authorization code.");
+  expect(alert).toHaveTextContent(
+    "This code is already assigned to client “team-qgis”. Choose a different code.",
+  );
+  expect(document.body).not.toHaveTextContent("raw-secret-from-server");
+  expect(document.body).not.toHaveTextContent("server-secret-value");
+  expect(screen.queryByText("Saved and active")).toBeNull();
+});
+
+it("requires an explicit reload after a reveal revision conflict and retries using the current revision", async () => {
+  const user = userEvent.setup();
+  const { failNext, fetcher } = service();
+  show();
+  await screen.findByRole("button", { name: "Show saved code" });
+  failNext("revision_conflict");
+  await user.click(screen.getByRole("button", { name: "Show saved code" }));
+  await screen.findByRole("alert");
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(screen.getByLabelText("Saved Bearer authorization code")).toHaveValue(
+    "",
+  );
+  expect(
+    screen.getByRole("button", { name: "Show saved code" }),
+  ).toBeDisabled();
+  await user.click(screen.getByRole("button", { name: "Reload clients" }));
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Show saved code" }),
+    ).toBeEnabled(),
+  );
+  await user.click(screen.getByRole("button", { name: "Show saved code" }));
+  await waitFor(() =>
+    expect(
+      screen.getByLabelText("Saved Bearer authorization code"),
+    ).toHaveValue("stored-code-for-local"),
+  );
+  expect(fetcher).toHaveBeenLastCalledWith(
+    "/admin/api/v1/clients/reveal",
+    expect.objectContaining({
+      body: JSON.stringify({ revision: "clients-other-session", id: "local" }),
+    }),
+  );
+});

@@ -185,7 +185,7 @@ def verify_draft(fixture):
     require(fixture.command("--CheckConfig").returncode != 0, "The default token environment variable was unset")
     token = generated_token(fixture.command("--GenerateToken", user_input="y\n"))
     clients = [dict(entry) for entry in config["clients"]]
-    clients[0] = {"id": "local", "token_sha256": digest(token)}
+    clients[0] = {"id": "local", "token_sha256": digest(token), "token_value": token}
     require(fixture.registry_config() == {"schema_version": 1, "clients": clients} and
             fixture.runtime.read_bytes() == runtime and fixture.command("--CheckConfig").returncode == 0,
             "Default enrollment failed to replace the unset environment source")
@@ -208,8 +208,9 @@ def verify_draft(fixture):
     entry = enrolled["clients"][0]
     generation = entry.get("generation", "")
     require(re.fullmatch(r"[a-f0-9]{32}", generation) and
-            entry == {"id": "local", "token_sha256": digest(token), "generation": generation},
-            "Generation did not provision one hash with a new internal identity")
+            entry == {"id": "local", "token_sha256": digest(token), "token_value": token,
+                      "generation": generation},
+            "Generation did not provision one recoverable credential with a new internal identity")
     require(fixture.command("--CheckConfig").returncode == 0, "Provisioned runtime failed validation")
     committed = fixture.registry.read_bytes()
     result = fixture.command("--GenerateToken", "--ClientId", "invalid/client", user_input="yes\n")
@@ -217,10 +218,15 @@ def verify_draft(fixture):
             fixture.runtime.read_bytes() == runtime,
             "Failed generation published a token or changed persistent configuration")
 
-    for invalid in ({"token_sha256": "G" * 64}, {"token_env": "QCWS_TEST_ENROLLMENT_TOKEN"}):
+    for invalid in ({"token_sha256": "G" * 64}, {"token_env": "QCWS_TEST_ENROLLMENT_TOKEN"},
+                    {"token_value": "different-valid-value"}, {"token_value": "line\nbreak"}):
         fixture.write_registry(enrolled | {"clients": [entry | invalid]})
         require(fixture.command("--CheckConfig").returncode != 0,
-                "A malformed hash or conflicting credential source passed validation")
+                "A malformed, mismatched or conflicting credential source passed validation")
+    fixture.write_registry(enrolled | {"clients": [{"id": "local", "token_value": token,
+                                                     "token_file": "client.token"}]})
+    require(fixture.command("--CheckConfig").returncode != 0,
+            "A recoverable value without its authentication digest passed validation")
 
     config["clients"][0] = {"id": "local", "token_file": "client.token"}
     fixture.write(config)
@@ -300,13 +306,15 @@ def verify_rotation(fixture):
     browser = next(entry for entry in enrolled["clients"] if entry["id"] == "browser")
     generation = browser.get("generation", "")
     require(re.fullmatch(r"[a-f0-9]{32}", generation) and
-            browser == {"id": "browser", "token_sha256": digest(token), "generation": generation},
+            browser == {"id": "browser", "token_sha256": digest(token), "token_value": token,
+                        "generation": generation},
             "New enrollment needs a persistent internal identity")
     require(enrolled == {"schema_version": 1, "clients": original["clients"] + [browser]} and
             fixture.runtime.read_bytes() == runtime, "Named enrollment changed unrelated configuration")
     snapshot = fixture.registry.read_bytes()
     registry_access = runtime_access(fixture.registry)
-    require(token.encode("ascii") not in snapshot, "The generated Bearer token was persisted in plaintext")
+    require(browser["token_value"] == token and token.encode("ascii") not in runtime,
+            "The generated credential was not saved only in its protected registry")
 
     replacement = "qcopilots-websearch/xbyang"
     for answer in ("", "\n", "no\n"):
@@ -335,9 +343,11 @@ def verify_rotation(fixture):
                 "Rotation changed active credentials before restart")
 
     browser["token_sha256"] = digest(replacement)
+    browser["token_value"] = replacement
     require(fixture.registry_config() == enrolled and fixture.runtime.read_bytes() == runtime,
             "Rotation changed unrelated configuration or the client's internal identity")
-    require(replacement.encode("ascii") not in fixture.registry.read_bytes(), "Rotation persisted a raw token")
+    require(replacement.encode("ascii") not in fixture.runtime.read_bytes(),
+            "Rotation exposed a raw credential in the runtime configuration")
     require(runtime_access(fixture.runtime) == access, "Rotation changed runtime-file permissions")
     require(runtime_access(fixture.registry) == registry_access, "Rotation changed registry-file permissions")
     with fixture.running():
@@ -363,7 +373,7 @@ def verify_concurrent_enrollment(fixture):
     def enroll(client):
         gate.wait()
         token = generated_token(fixture.command("--GenerateToken", "--ClientId", client, user_input="yes\n"))
-        return {"id": client, "token_sha256": digest(token)}
+        return {"id": client, "token_sha256": digest(token), "token_value": token}
 
     original = fixture.registry_config()["clients"]
     runtime = fixture.runtime.read_bytes()

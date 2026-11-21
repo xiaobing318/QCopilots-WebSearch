@@ -12,6 +12,7 @@ class ClientRegistry {
 public:
   explicit ClientRegistry(Config config);
   Json view() const;
+  Json reveal(const std::string &id, const std::string &revision) const;
   Json create(const std::string &id, const QByteArray &token, const std::string &revision);
   Json replace(const std::string &id, const QByteArray &token, const std::string &revision);
   Json remove(const std::string &id, const std::string &revision);

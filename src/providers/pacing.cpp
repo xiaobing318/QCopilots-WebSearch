@@ -15,7 +15,8 @@ int secondsUntil(Clock::time_point end, Clock::time_point now) {
 }
 
 [[noreturn]] void limited(int seconds) {
-  throw Error("rate_limited", "Search source is cooling down.", 429, true, seconds);
+  throw Error("rate_limited", "Search source is cooling down.", 429, true, seconds)
+      .withReason("provider_rate_limited");
 }
 } // namespace
 
@@ -38,9 +39,9 @@ SearchPacer::Lease SearchPacer::acquire(const std::shared_ptr<CancelToken> &toke
   for (;;) {
     const auto now = Clock::now();
     if (token->cancelled.load())
-      throw Error("cancelled", "Search was cancelled.", 499);
+      throw Error("cancelled", "Search was cancelled.", 499).withReason("request_cancelled");
     if (now >= deadline)
-      throw Error("timeout", "Search deadline expired.", 504, true);
+      throw Error("timeout", "Search deadline expired.", 504, true).withReason("request_timeout");
     while (!starts_.empty() && starts_.front() + 60s <= now)
       starts_.pop_front();
     if (blockedUntil_ > now)

@@ -2,9 +2,13 @@
 #include "../../src/providers/providers_internal.hpp"
 
 #include <QCoreApplication>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QUrlQuery>
 #include <fstream>
+#include <future>
 #include <iostream>
+#include <thread>
 
 using namespace qws;
 using namespace std::chrono_literals;
@@ -23,6 +27,97 @@ SearchRequest query() {
 
 HttpResponse jsonResponse(Json body) {
   return {200, body.dump(), "application/json", {}, {}};
+}
+
+template <class Action>
+void requireReason(const char *code, const char *reason, int status, const Action &action) {
+  try {
+    action();
+  } catch (const Error &error) {
+    require(error.code == code && error.reason == reason && error.status == status,
+            "Incorrect error category, reason or HTTP status.");
+    const auto payload = errorPayload(error);
+    require(payload["error"]["reason"] == reason, "The public error payload lost its reason.");
+    require(payload.dump().find("upstream-secret-marker") == std::string::npos,
+            "An upstream response or credential leaked into the public error.");
+    return;
+  }
+  throw std::runtime_error("Expected a classified error.");
+}
+
+// The production provider transport requires public HTTPS endpoints. A configured
+// SearXNG backend may use loopback and exercises the same bounded curl transfer.
+// Keep raw response fixtures isolated on dynamically assigned ports.
+template <class Action>
+void withBackendReply(const QByteArray &response, const Action &action) {
+  std::promise<quint16> ready;
+  auto port = ready.get_future();
+  std::promise<bool> finished;
+  auto served = finished.get_future();
+  std::jthread server([&] {
+    QTcpServer listener;
+    if (!listener.listen(QHostAddress::LocalHost, 0)) {
+      ready.set_exception(std::make_exception_ptr(std::runtime_error("Cannot bind backend fixture.")));
+      return;
+    }
+    ready.set_value(listener.serverPort());
+    if (!listener.waitForNewConnection(3000)) {
+      finished.set_value(false);
+      return;
+    }
+    auto *socket = listener.nextPendingConnection();
+    if (!socket || (!socket->bytesAvailable() && !socket->waitForReadyRead(3000))) {
+      finished.set_value(false);
+      return;
+    }
+    (void)socket->readAll();
+    if (!response.isEmpty()) {
+      socket->write(response);
+      if (socket->bytesToWrite())
+        (void)socket->waitForBytesWritten(1000);
+    }
+    socket->disconnectFromHost();
+    if (socket->state() != QAbstractSocket::UnconnectedState)
+      (void)socket->waitForDisconnected(1000);
+    finished.set_value(true);
+  });
+  action(port.get());
+  server.join();
+  require(served.get(), "The isolated backend fixture did not receive its request.");
+}
+
+void classifiedTransportFailures() {
+  HttpClient client;
+  const auto request = [&](quint16 port, bool tls = false) {
+    return client.requestBackend(std::string(tls ? "https://" : "http://") + "127.0.0.1:" +
+                                     std::to_string(port) + "/search", {}, "upstream-secret-marker",
+                                 std::make_shared<CancelToken>());
+  };
+  withBackendReply({}, [&](quint16 port) {
+    requireReason("provider_unavailable", "network_connection_failed", 502, [&] { (void)request(port); });
+  });
+  withBackendReply("upstream-secret-marker\r\n", [&](quint16 port) {
+    requireReason("provider_unavailable", "network_response_invalid", 502, [&] { (void)request(port); });
+  });
+  withBackendReply("HTTP/1.1 200 OK\r\nContent-Length: 5242881\r\nConnection: close\r\n\r\n",
+                   [&](quint16 port) {
+    requireReason("response_too_large", "network_response_too_large", 502, [&] { (void)request(port); });
+  });
+  withBackendReply("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                   [&](quint16 port) {
+    requireReason("provider_unavailable", "network_tls_failed", 502, [&] { (void)request(port, true); });
+  });
+
+  const auto cancelled = std::make_shared<CancelToken>();
+  cancelled->cancelled = true;
+  requireReason("cancelled", "request_cancelled", 499, [&] {
+    (void)client.requestBackend("http://127.0.0.1:1/search", {}, {}, cancelled);
+  });
+  const auto expired = std::make_shared<CancelToken>();
+  expired->deadline = Clock::now() - 1s;
+  requireReason("timeout", "request_timeout", 504, [&] {
+    (void)client.requestBackend("http://127.0.0.1:1/search", {}, {}, expired);
+  });
 }
 
 void transportValidation() {
@@ -208,20 +303,76 @@ void keyedSearch() {
       (void)readProviderResults(HttpResponse{status, key, {}, {}, {{"retry-after", "90"}}});
       require(false, "Upstream error was treated as success.");
     } catch (const Error &error) {
-      require(std::string(error.what()).find(key) == std::string::npos, "Upstream body leaked.");
+      require(std::string(error.what()).find(key) == std::string::npos &&
+                  errorPayload(error).dump().find(key) == std::string::npos, "Upstream body leaked.");
       if (status == 429)
-        require(error.code == "rate_limited" && error.retryAfterSeconds == 90, "Rate limit hint was discarded.");
+        require(error.code == "rate_limited" && error.reason == "provider_rate_limited" &&
+                    error.status == 429 && error.retryAfterSeconds == 90,
+                "Rate limit reason or wait hint was discarded.");
       else
-        require(error.code == "provider_unavailable" && error.retryable == (status == 500),
+        require(error.code == "provider_unavailable" && error.status == 502 &&
+                    error.reason == (status == 500 ? "provider_http_error" : "provider_credentials_rejected") &&
+                    error.retryable == (status == 500),
                 "Incorrect upstream error mapping.");
     }
   }
-  requireError("provider_unavailable", [&] { (void)readProviderResults(HttpResponse{200, "bad JSON"}); });
+  requireReason("provider_unavailable", "provider_invalid_json", 502, [&] {
+    (void)readProviderResults(HttpResponse{200, "upstream-secret-marker"});
+  });
+  requireReason("provider_unavailable", "provider_invalid_response", 502, [&] {
+    (void)readProviderResults(jsonResponse({{"results", "upstream-secret-marker"}}));
+  });
+  requireReason("provider_unavailable", "provider_invalid_response", 502, [&] {
+    (void)readProviderResults(jsonResponse({{"web", Json::array()}}), "web");
+  });
   HttpClient client;
   ProviderRegistry registry;
   config.key.clear();
   auto missing = registry.create(config, client);
   requireError("provider_not_configured", [&] { missing->search(query(), token); });
+}
+
+void classifiedSearxngFailures() {
+  HttpClient client;
+  ProviderRegistry registry;
+  const ProviderConfig config{"searxng", "http://127.0.0.1:1/search", {}, "upstream-secret-marker", {"general"}};
+  const auto probe = [&](HttpResponse response) {
+    return registry.create(config, client, [response = std::move(response)](auto, auto, auto, const auto &) {
+      return response;
+    });
+  };
+  for (const int status : {401, 403, 429, 500}) {
+    auto provider = probe(HttpResponse{status, "upstream-secret-marker", {}, {}, {{"retry-after", "47"}}});
+    try {
+      (void)provider->search(query(), std::make_shared<CancelToken>());
+      require(false, "An unsuccessful SearXNG response was accepted.");
+    } catch (const Error &error) {
+      const auto expectedReason = status == 429 ? "provider_rate_limited" :
+                                  status == 500 ? "provider_http_error" : "provider_credentials_rejected";
+      require(error.reason == expectedReason && error.status == (status == 429 ? 429 : 502),
+              "SearXNG did not classify its upstream error.");
+      require(error.code == (status == 429 ? "rate_limited" : "provider_unavailable"),
+              "SearXNG changed its public error category.");
+      if (status == 429)
+        require(error.retryAfterSeconds == 47, "SearXNG discarded the rate limit wait hint.");
+      require(errorPayload(error).dump().find(config.key) == std::string::npos,
+              "SearXNG leaked an upstream response or credential.");
+    }
+  }
+  auto malformed = probe(HttpResponse{200, "upstream-secret-marker"});
+  requireReason("provider_unavailable", "provider_invalid_json", 502, [&] {
+    (void)malformed->search(query(), std::make_shared<CancelToken>());
+  });
+  auto unexpected = probe(jsonResponse({{"results", "upstream-secret-marker"}}));
+  requireReason("provider_unavailable", "provider_invalid_response", 502, [&] {
+    (void)unexpected->search(query(), std::make_shared<CancelToken>());
+  });
+  auto transportFailure = registry.create(config, client, [](auto, auto, auto, const auto &) -> HttpResponse {
+    throw Error("provider_unavailable", "TLS failed.", 502).withReason("network_tls_failed");
+  });
+  requireReason("provider_unavailable", "network_tls_failed", 502, [&] {
+    (void)transportFailure->search(query(), std::make_shared<CancelToken>());
+  });
 }
 
 void structuredSearchProviders() {
@@ -314,10 +465,12 @@ int main(int argc, char **argv) {
   try {
     require(argc == 2, "Expected a fixture directory.");
     transportValidation();
+    classifiedTransportFailures();
     serpFixtures(argv[1]);
     autoFallback(argv[1]);
     pacingLimits();
     keyedSearch();
+    classifiedSearxngFailures();
     structuredSearchProviders();
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';

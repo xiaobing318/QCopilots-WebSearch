@@ -47,6 +47,24 @@ def system_tool(name):
     return Path(os.environ['SystemRoot']) / 'System32' / name
 
 
+def check_private_registry(path, env):
+    script = r'''
+$ErrorActionPreference = 'Stop'
+$acl = Get-Acl -LiteralPath $env:QCWS_ACCEPTANCE_PRIVATE_FILE
+$current = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$allowed = @($current, 'S-1-5-18', 'S-1-5-32-544')
+$owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+$grants = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) |
+    Where-Object AccessControlType -eq ([Security.AccessControl.AccessControlType]::Allow))
+if (!$acl.AreAccessRulesProtected -or $owner -notin $allowed -or !$grants.Count -or
+    @($grants | Where-Object { $_.IdentityReference.Value -notin $allowed }).Count) { exit 1 }
+'''
+    result = subprocess.run([system_tool('WindowsPowerShell/v1.0/powershell.exe'), '-NoProfile', '-NonInteractive',
+                             '-Command', script], env=env | {'QCWS_ACCEPTANCE_PRIVATE_FILE': str(path)},
+                            capture_output=True, timeout=8, **hidden_console())
+    need(result.returncode == 0, 'Portable client registry permissions were not private')
+
+
 def fixture_openssl():
     openssl = shutil.which('openssl')
     if openssl:
@@ -272,13 +290,15 @@ def verify_portable(executable, folder, cwd, env):
         registry = data / 'state' / 'client-registry.json'
         entry = next(client for client in json.loads(registry.read_bytes())['clients'] if client['id'] == 'acceptance')
         need(entry['token_sha256'] == hashlib.sha256(rotated.encode('ascii')).hexdigest()
-             and rotated.encode('ascii') not in registry.read_bytes(),
-             'Portable token update did not store a digest only')
+             and entry.get('token_value') == rotated and generated.encode('ascii') not in registry.read_bytes(),
+             'Portable token update did not retain only the current matching credential and digest')
+        check_private_registry(registry, env)
         need(mcp_request(port, generated, INITIALIZE)[0] == 401, 'Old portable token survived restart')
         verify_mcp(port, rotated)
 
     need(subprocess.check_output(acl, env=env, timeout=8) == original_acl,
          'Portable token update changed effective runtime ACLs')
+    need(digest(runtime) == before, 'Portable token update changed the deployment configuration')
     need(all(digest(path) == value for path, value in token_hashes.items()), 'Portable restart replaced credential files')
     need(not any(program_data.iterdir()) and snapshot(cwd) == decoy_snapshot,
          'Portable startup wrote to ProgramData or used the working directory')

@@ -330,6 +330,7 @@ def verify_mcp(port, token):
 def check_token_rotation(installation, passed):
     port = installation.read_config()["business"]["port"]
     unchanged_files = installation.snapshots()
+    runtime_access = access_rules(installation.config)
     client = "deb-acceptance"
     args = [installation.exe, "--ConfigPath", installation.config, "--ClientId", client]
     # Credential output is captured here and is intentionally excluded from run() diagnostics.
@@ -356,15 +357,10 @@ def check_token_rotation(installation, passed):
     require(mcp_request(port, token, INITIALIZE)[0] == 401, "Previous token still works after rotation")
     verify_mcp(port, replacement)
 
-    registry = installation.state / "client-registry.json"
-    raw = registry.read_bytes()
-    entries = [entry for entry in json.loads(raw)["clients"] if entry["id"] == client]
-    require(len(entries) == 1 and entries[0]["token_sha256"] == hashlib.sha256(replacement.encode("ascii")).hexdigest()
-            and re.fullmatch(r"[a-f0-9]{32}", entries[0].get("generation", "")),
-            "The client registry did not retain the rotated digest and identity")
-    require(token.encode("ascii") not in raw and replacement.encode("ascii") not in raw,
-            "The client registry exposed a plaintext client credential")
+    check_stored_client(installation, client, replacement, retired=(token,))
     preserved(unchanged_files)
+    require(access_rules(installation.config) == runtime_access,
+            "Client rotation changed runtime ownership, permissions or ACL")
     passed("client-token-rotation")
 
 
@@ -375,6 +371,28 @@ def check_registry_ownership(installation):
     require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600
             and info.st_uid == account.pw_uid and info.st_gid == account.pw_gid,
             "The client registry must remain private and owned by the service account")
+
+
+def access_rules(path):
+    info = path.stat()
+    attribute = "system.posix_acl_access"
+    acl = os.getxattr(path, attribute) if attribute in os.listxattr(path) else None
+    return info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode), acl
+
+
+def check_stored_client(installation, client, token, *, retired=()):
+    check_registry_ownership(installation)
+    raw = (installation.state / "client-registry.json").read_bytes()
+    entries = [entry for entry in json.loads(raw)["clients"] if entry["id"] == client]
+    require(len(entries) == 1 and entries[0].get("token_value") == token
+            and entries[0]["token_sha256"] == hashlib.sha256(token.encode("ascii")).hexdigest()
+            and re.fullmatch(r"[a-f0-9]{32}", entries[0].get("generation", "")),
+            "The private client registry did not retain matching credential, digest and identity")
+    require(all(value.encode("ascii") not in raw for value in retired),
+            "The private client registry retained a rotated credential")
+    runtime = installation.config.read_bytes()
+    require(all(value.encode("ascii") not in runtime for value in (token, *retired)),
+            "A managed client credential leaked into runtime configuration")
 
 
 def leave_crashed_cli_lock(installation):
@@ -426,22 +444,44 @@ def check_client_registry(installation, passed):
     """Exercise writes through the actual sandboxed service after root CLI updates."""
     runtime = installation.read_config()
     runtime_hash = sha(installation.config)
+    runtime_access = access_rules(installation.config)
     previous_pid = installation.pid()
     port = runtime["admin"]["port"]
     origin = f"http://127.0.0.1:{port}"
     base = "/admin/api/v1"
+    credentials = [installation.token(), installation.tokens[1].read_text(encoding="ascii").strip()]
 
-    def exchange(method, path, body=None, headers=None):
+    def exchange(method, path, body=None, headers=None, *, expected_status=200):
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
         try:
             connection.request(method, base + path, json.dumps(body) if body is not None else None, headers or {})
             response = connection.getresponse()
             data = response.read(MIB + 1)
             require(len(data) <= MIB, "Installed client administration response exceeded its limit")
-            require(response.status == 200, "Installed client administration rejected the operation")
+            require(response.status == expected_status, "Installed client administration returned an unexpected status")
+            if path == "/clients/reveal":
+                require(response.headers.get("Cache-Control") == "no-store",
+                        "Installed credential reveal response could be cached")
+            if path != "/clients/reveal" or expected_status != 200:
+                require(all(token.encode("ascii") not in data for token in credentials),
+                        "Installed administration disclosed a credential outside successful reveal")
             return response.headers, json.loads(data)
         finally:
             connection.close()
+
+    def check_view(view):
+        require(set(view) == {"revision", "clients", "pending_restart"}
+                and all(set(client) == {"id", "source", "can_reveal"}
+                        and isinstance(client["can_reveal"], bool) for client in view["clients"]),
+                "Installed client list exposed credential or internal identity fields")
+
+    def reveal(client, token, revision):
+        _, shown = exchange("POST", "/clients/reveal", {"id": client, "revision": revision}, write)
+        require(shown == {"id": client, "token": token, "revision": revision, "active": True},
+                "Installed credential reveal did not return the active selected credential")
+        _, view = exchange("GET", "/clients", headers=cookie)
+        check_view(view)
+        require(view["revision"] == revision, "Viewing a credential changed the client registry")
 
     login = {"Origin": origin, "Content-Type": "application/json"}
     headers, session = exchange("POST", "/session",
@@ -450,30 +490,54 @@ def check_client_registry(installation, passed):
     write = login | cookie | {"X-QCWS-CSRF": session["csrf"]}
     try:
         _, view = exchange("GET", "/clients", headers=cookie)
+        check_view(view)
         require(any(client["id"] == "local" for client in view["clients"]),
                 "The initial local identity is missing from administration")
+        stale_revision = view["revision"]
         bearer = "web/" + secrets.token_hex(6)
+        credentials.append(bearer)
         _, view = exchange("POST", "/clients", {"revision": view["revision"], "id": "deb-web-acceptance",
                                                 "token": bearer}, write)
+        check_view(view)
         require(not view["pending_restart"] and bearer not in json.dumps(view),
                 "Web enrollment was pending or disclosed its credential")
-        check_registry_ownership(installation)
+        check_stored_client(installation, "deb-web-acceptance", bearer)
         require(not (installation.state / "client-registry.json.lock").exists(),
                 "The service could not recover a crashed root CLI transaction")
+        body = {"id": "deb-web-acceptance", "revision": view["revision"]}
+        exchange("POST", "/clients/reveal", body, login | cookie, expected_status=403)
+        _, error = exchange("POST", "/clients/reveal", body | {"revision": stale_revision},
+                            write, expected_status=409)
+        require(error["error"]["code"] == "revision_conflict", "Credential reveal ignored a stale revision")
+        reveal("deb-web-acceptance", bearer, view["revision"])
         business = runtime["business"]["port"]
         verify_mcp(business, bearer)
         replacement = "web/" + secrets.token_hex(6)
+        credentials.append(replacement)
         _, view = exchange("PUT", "/clients/deb-web-acceptance",
                            {"revision": view["revision"], "token": replacement}, write)
+        check_view(view)
         require(not view["pending_restart"] and mcp_request(business, bearer, INITIALIZE)[0] == 401,
                 "Web rotation did not immediately revoke the previous credential")
+        check_stored_client(installation, "deb-web-acceptance", replacement, retired=(bearer,))
+        reveal("deb-web-acceptance", replacement, view["revision"])
         verify_mcp(business, replacement)
         _, view = exchange("DELETE", "/clients/deb-web-acceptance", {"revision": view["revision"]}, write)
+        check_view(view)
         require(not view["pending_restart"] and mcp_request(business, replacement, INITIALIZE)[0] == 401,
                 "Web deletion did not immediately revoke its credential")
+        _, error = exchange("POST", "/clients/reveal", {"id": "deb-web-acceptance", "revision": view["revision"]},
+                            write, expected_status=404)
+        require(error["error"].get("reason") == "client_not_found", "Deleted client credential remained viewable")
         check_registry_ownership(installation)
-        require(installation.pid() == previous_pid and sha(installation.config) == runtime_hash,
-                "Web client changes restarted the service or rewrote deployment configuration")
+        raw = (installation.state / "client-registry.json").read_bytes()
+        require(all(token.encode("ascii") not in raw for token in (bearer, replacement)),
+                "Deleted client credentials remained in the private registry")
+        require(installation.pid() == previous_pid and sha(installation.config) == runtime_hash
+                and access_rules(installation.config) == runtime_access,
+                "Web client changes restarted the service or changed deployment configuration or ACL")
+        require(all(token not in "\n".join(LOG) for token in credentials),
+                "Installed client administration exposed a credential in acceptance diagnostics")
     finally:
         exchange("DELETE", "/session", {}, write)
     passed("client-registry-service-writes")

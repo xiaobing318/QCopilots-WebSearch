@@ -3,6 +3,7 @@
 #include "providers_internal.hpp"
 
 #include <algorithm>
+#include <optional>
 
 namespace qws {
 using namespace std::chrono_literals;
@@ -27,11 +28,13 @@ public:
     const auto now = Clock::now();
     const auto duckDeadline = now + (token->deadline - now) * 2 / 3;
     int duckRetry = 0;
+    std::optional<Error> lastFailure;
     try {
       return duckDuckGo(request, token, duckDeadline);
     } catch (const Error &error) {
       if (!reportableFailure(error))
         throw;
+      lastFailure.emplace(error);
       if (error.code == "rate_limited")
         duckRetry = error.retryAfterSeconds;
     }
@@ -44,12 +47,18 @@ public:
     } catch (const Error &error) {
       if (!reportableFailure(error))
         throw;
+      lastFailure.emplace(error);
       if (duckRetry > 0 && error.code == "rate_limited")
         throw Error("rate_limited", "All search sources are rate limited.", 429, true,
-                    std::min(duckRetry, error.retryAfterSeconds));
+                    std::min(duckRetry, error.retryAfterSeconds))
+            .withReason("provider_rate_limited");
     }
     checkSearchCancellation(token);
-    throw Error("provider_unavailable", "No search source returned a usable response.", 502, true);
+    throw Error("provider_unavailable", "No search source returned a usable response.", 502,
+                lastFailure ? lastFailure->retryable : true,
+                lastFailure ? lastFailure->retryAfterSeconds : 0)
+        .withReason(lastFailure && !lastFailure->reason.empty() ? lastFailure->reason :
+                    "provider_sources_unavailable");
   }
 
 private:
@@ -75,11 +84,12 @@ private:
 
   SearchOutcome page(HttpRequest request, SerpSource source, SearchPacer &pacer,
                      const std::shared_ptr<CancelToken> &token, Clock::time_point deadline) {
+    std::optional<Error> lastFailure;
     for (int attempt = 0; attempt < 2; ++attempt) {
       const auto lease = pacer.acquire(token, deadline);
       const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - Clock::now());
       if (remaining <= 0ms)
-        throw Error("timeout", "Search source deadline expired.", 504, true);
+        throw Error("timeout", "Search source deadline expired.", 504, true).withReason("request_timeout");
       request.timeout = std::min(remaining, 2500ms);
 
       HttpResponse response;
@@ -88,6 +98,7 @@ private:
       } catch (const Error &error) {
         if (error.code == "cancelled" || error.code == "internal_error" || error.code == "invalid_argument")
           throw;
+        lastFailure.emplace(error);
         if (error.code == "timeout" && attempt == 0)
           continue;
         break;
@@ -96,22 +107,35 @@ private:
         continue;
       if (denied(response.status))
         throw Error("rate_limited", "Search source refused the request.", 429, true,
-                    pacer.refused(retryAfterSeconds(response)));
-      if (response.status != 200)
+                    pacer.refused(retryAfterSeconds(response)))
+            .withReason("provider_rate_limited");
+      if (response.status != 200) {
+        lastFailure.emplace(Error("provider_unavailable", "Search source returned an HTTP error.", 502,
+                                  response.status == 408 || response.status >= 500)
+                                .withReason("provider_http_error"));
         break;
+      }
 
       const auto &url = response.url.empty() ? request.url : response.url;
       auto result = parseSerp(source, response.body, url);
       if (result.blocked)
         throw Error("rate_limited", "Search source refused the request.", 429, true,
-                    pacer.refused(retryAfterSeconds(response)));
-      if (!result.recognized)
+                    pacer.refused(retryAfterSeconds(response)))
+            .withReason("provider_rate_limited");
+      if (!result.recognized) {
+        lastFailure.emplace(Error("provider_unavailable", "Search source returned an unrecognized results page.",
+                                  502, true).withReason("provider_invalid_response"));
         break;
+      }
       pacer.accepted();
       return resultsPage(source == SerpSource::Bing ? "bing" : "duckduckgo", std::move(result.results));
     }
     checkSearchCancellation(token);
-    throw Error("provider_unavailable", "Search source did not return a usable results page.", 502, true);
+    throw Error("provider_unavailable", "Search source did not return a usable results page.", 502,
+                lastFailure ? lastFailure->retryable : true,
+                lastFailure ? lastFailure->retryAfterSeconds : 0)
+        .withReason(lastFailure && !lastFailure->reason.empty() ? lastFailure->reason :
+                    "provider_sources_unavailable");
   }
 };
 } // namespace

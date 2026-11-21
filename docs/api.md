@@ -158,7 +158,7 @@ REST 错误返回对应的 HTTP 状态码，以及以下格式的响应体。
 {"error":{"code":"busy","message":"Service capacity is exhausted.","retryable":true}}
 ```
 
-错误响应不包含成功结果的 `contract_version` 字段。客户端应先依据 HTTP 状态码或 MCP 错误类型判断请求是否成功，
+错误响应不包含成功结果的 `contract_version` 字段。可选的 `reason` 给出稳定的具体原因，`parameters` 仅包含经过限制的非秘密客户端标识 `client_id`。客户端应先依据 HTTP 状态码或 MCP 错误类型判断请求是否成功，
 再解析成功响应的内容。`retryable` 指示稍后重试同一调用是否可能成功。HTTP 429 响应还带有 `Retry-After`
 响应头。上游限流时，错误对象可以包含与该头对应的 `retry_after_seconds` 字段。
 
@@ -181,12 +181,13 @@ REST 错误返回对应的 HTTP 状态码，以及以下格式的响应体。
 | `upstream_http_error` | 502 | 上游返回 429、5xx 或连接失败时可重试 | 网页读取失败。消息包含 HTTP 状态码，或无法解析主机名等可公开的原因 |
 | `provider_not_configured` | 503 | 否 | 所选来源需要 API 密钥 |
 | `backend_unavailable` | 503 | 是 | 服务正在停止 |
-| `cache_unavailable` | 503 | 是 | 无法安全使用私有缓存 |
+| `cache_unavailable` | 503 | 依据具体原因 | 无法安全使用私有缓存，详见 `reason` |
 | `timeout` | 504 | 是 | 操作超出时限 |
 
 MCP HTTP 先进行初始化，随后在请求头中携带返回的会话 ID 和协商后的协议版本。
 `initialize` 会采用请求中的 `2025-11-25` 或 `2025-06-18`。请求其他版本时，响应使用 `2025-11-25`。
 初始化结果包含 `instructions`，说明搜索、网页读取和文本查找的使用流程。
+`serverInfo.icons` 包含内嵌 SVG data URI，HTTP 和 stdio 使用相同资源，不依赖管理监听器或额外图片请求。支持图标元数据的客户端可直接显示，不支持该字段的旧客户端可以忽略它。
 如果 `MCP-Protocol-Version` 头的值不受支持，服务会返回 HTTP 400 和 REST 错误响应体，便于较新的客户端回退到
 `initialize`。发送 `notifications/initialized` 后即可调用工具。DELETE 结束会话。
 GET 返回 405，因为服务没有用于推送消息的 SSE 流。取消请求会停止相应操作，并保留其他仍在等待同一次合并执行的请求。
@@ -223,7 +224,7 @@ Invalid Request 后继续处理请求。如果取消消息刚好在对应请求�
 安装版可能使用其部署配置中记录的其他端口。通过该版本的可执行文件运行 `--SettingsUrl`，可获取登录链接。
 管理员令牌和业务监听器使用的客户端 Bearer 凭据彼此独立。
 
-管理页分为“访问授权”“搜索设置”“服务状态”。授权的三步流程依次为填写与生成、保存并生效、复制连接资料。只有第二步提交成功后才进入连接资料复制步骤。该步骤可重复显示和复制本次提交的授权码，原文来自当前页面内存，不由读取接口返回。完成、切换客户端或标签页、刷新或退出登录后清空临时值，之后无法通过管理 API 找回。
+管理页分为“访问授权”“搜索设置”“服务状态”。授权的三步流程依次为填写与生成、保存并生效、复制连接资料。只有第二步提交成功后才进入连接资料复制步骤。已保存客户端的详情默认隐藏授权码，管理员可按需显示或复制。切换客户端或标签页、刷新、注销、删除或替换时清空页面原文，之后可通过受保护的单条读取接口再次取得。
 
 | `/admin/api/v1` 下的请求方法与路径 | 鉴权与行为 |
 | --- | --- |
@@ -231,7 +232,8 @@ Invalid Request 后继续处理请求。如果取消消息刚好在对应请求�
 | `POST /session` | 发送 `code` 或 `token`，二选一。设置会话 Cookie，并返回 `csrf`。 |
 | `GET /session`、`DELETE /session` | 读取会话的 CSRF 令牌或退出登录。 |
 | `GET /settings`、`PUT /settings` | 读取当前设置，或携带之前读取的修订号提交设置补丁。修订冲突时返回 409。 |
-| `GET /clients` | 返回客户端授权的 `revision`、`clients` 和 `pending_restart`。每个客户端仅包含 `id` 和 `source`。 |
+| `GET /clients` | 返回客户端授权的 `revision`、`clients` 和 `pending_restart`。每个客户端包含 `id`、`source` 和 `can_reveal`，不包含原文或摘要。 |
+| `POST /clients/reveal` | 发送 `id` 和 `revision`，要求管理会话及 CSRF。返回单条 `id`、`token`、`revision` 和 `active`，响应禁止缓存。 |
 | `POST /clients` | 发送 `revision`、`id` 和 `token`，添加客户端授权，立即生效。 |
 | `PUT /clients` | 发送 `revision`、`id` 和 `token`，替换已有客户端授权码并保留缓存身份。 |
 | `DELETE /clients` | 发送 `revision` 和 `id`，删除该客户端授权。重新创建同名客户端不会继承旧缓存身份。 |
@@ -245,6 +247,12 @@ Invalid Request 后继续处理请求。如果取消消息刚好在对应请求�
 登录码通过 URL 片段传递，管理界面使用后会清除该片段。
 
 客户端授权的写操作使用与设置相同的会话和 CSRF 校验，返回更新后的授权列表。列表的 `source` 为 `manual`、`file` 或 `environment`，不会返回原始令牌、令牌摘要或私有来源路径。手动授权码是 1 至 8192 个可见 ASCII 字符，客户端 ID 是 1 至 64 个英文字母、数字、点、下划线或连字符。修订不匹配时返回 409，避免覆盖并发修改。`pending_restart` 表示磁盘授权尚未加载，读取最新修订后再通过网页保存，会将该完整授权列表立即应用，包括先前 CLI 写入的变更，并清除此标记。网页成功响应表示持久化和运行时授权均已更新。
+
+`can_reveal` 表示记录具有可读取来源，不保证外部文件或环境变量当前可读。`active` 比较取得的授权码及客户端身份与运行快照，防止把 CLI 待重启的值或外部已改文件误认为当前生效值。回显失败使用明确原因，不修改授权状态。旧版本仅保存摘要的记录可继续认证，但没有可还原原文，回显会明确失败，本版本不自动迁移或重置它们。
+
+管理界面按受控原因和操作上下文显示中英文提示，不展示任意后端异常或上游响应正文。重复授权码保留 HTTP 400，原因及安全的冲突客户端标识说明应更换哪个输入。无结构化正文的 HTTP 409 不会被推断为修订冲突。网络连接失败、无效 JSON 和未知服务错误有各自提示，未知错误不推断服务没有运行。
+
+缓存的具体原因包括 `instance_already_running`、`cache_locked`、`cache_lock_permission_denied`、`cache_lock_failed`、`cache_path_unavailable`、`cache_capacity_exceeded`、`cache_database_open_failed`、`cache_database_corrupt`、`cache_database_incompatible`、`cache_database_busy`、`cache_storage_full`、`cache_database_error` 和 `cache_worker_unavailable`。临时锁占用或数据库忙可稍后重试，权限、损坏、容量及格式问题需要先修复。持锁 PID、绝对路径和本机诊断只写启动 stderr，不进入公共 REST/MCP 错误响应。
 
 新的客户端应使用请求体传递 `id` 的 `/clients` 接口，包括合法 ID `.` 和 `..`。浏览器会归一化 URL 中的点路径段，因此不能通过旧路径接口可靠地管理这两个 ID。
 

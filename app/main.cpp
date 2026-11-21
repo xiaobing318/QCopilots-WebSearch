@@ -418,7 +418,8 @@ int main(int argc, char **argv) {
     if (stdio) {
       QTemporaryDir temporary;
       if (!temporary.isValid())
-        throw qws::Error("cache_unavailable", "Cannot create private stdio state.", 503);
+        throw qws::Error("cache_unavailable", "Cannot create private stdio state.", 503)
+            .withReason("cache_path_unavailable");
       auto config = qws::Config::load(configPath);
       config.value["cache"]["directory"] = temporary.path().toStdString();
       qws::Service instance(config);
@@ -444,7 +445,9 @@ int main(int argc, char **argv) {
 #endif
     return serve();
   } catch (const qws::Error &e) {
-    std::cerr << e.code << ": " << e.what() << '\n';
+    std::cerr << (e.reason.empty() ? e.code : e.reason) << ": " << e.what() << '\n';
+    if (!e.localDiagnostic.empty())
+      std::cerr << e.localDiagnostic << '\n';
     if (implicitConfiguration)
       std::cerr << "Runtime configuration: " << configPath << '\n';
     return 1;

@@ -25,9 +25,9 @@ std::string now() {
 }
 void check(const std::shared_ptr<CancelToken> &t) {
   if (t->cancelled.load())
-    throw Error("cancelled", "Request cancelled.", 499);
+    throw Error("cancelled", "Request cancelled.", 499).withReason("request_cancelled");
   if (Clock::now() >= t->deadline)
-    throw Error("timeout", "Request deadline exceeded.", 504, true);
+    throw Error("timeout", "Request deadline exceeded.", 504, true).withReason("request_timeout");
 }
 struct Permit {
   std::atomic_int &count;
@@ -35,7 +35,8 @@ struct Permit {
     int value = count.load();
     do {
       if (value >= max)
-        throw Error("busy", "Business capacity is exhausted.", 429, true);
+        throw Error("busy", "Business capacity is exhausted.", 429, true)
+            .withReason("business_capacity_exhausted");
     } while (!count.compare_exchange_weak(value, value + 1));
   }
   ~Permit() {
@@ -158,7 +159,8 @@ void fit(Json &payload) {
     } else if (payload.contains("results") && !payload["results"].empty()) {
       payload["results"].erase(payload["results"].end() - 1);
     } else
-      throw Error("response_too_large", "Result exceeds the response budget.", 502);
+      throw Error("response_too_large", "Result exceeds the response budget.", 502)
+          .withReason("network_response_too_large");
   }
 }
 } // namespace
@@ -271,7 +273,7 @@ Json Service::call(std::string name, const Json &args, std::string principal,
       (name == "web_open" && !snapshot->value["tools"]["open"]["enabled"].get<bool>()))
     throw Error("tool_disabled", "The tool is disabled in settings.", 403);
   if (closing_)
-    throw Error("backend_unavailable", "Service is stopping.", 503, true);
+    throw Error("backend_unavailable", "Service is stopping.", 503, true).withReason("service_stopping");
   Permit permit(calls_, capacity_);
   reap();
   {
@@ -380,7 +382,7 @@ Json Service::search(const Json &args, const std::string &principal,
             // An expired deadline still returns partial results. Only abandonment
             // by every waiter (or shutdown) discards them.
             if (job->token->cancelled.load())
-              throw Error("cancelled", "Request cancelled.", 499);
+              throw Error("cancelled", "Request cancelled.", 499).withReason("request_cancelled");
           } catch (...) {
             error = std::current_exception();
           }
@@ -483,7 +485,8 @@ Json Service::fetchSearch(const Json &args, const std::shared_ptr<CancelToken> &
                                return failed.contains(e);
                              });
       if (allFailed && items.empty())
-        throw Error("provider_unavailable", "All requested search engines failed.", 502, true);
+        throw Error("provider_unavailable", "All requested search engines failed.", 502, true)
+            .withReason("provider_all_engines_failed");
       collectStrings(data, "corrections", corrections, seenCorrections);
       collectStrings(data, "suggestions", suggestions, seenSuggestions);
       if (items.empty())
@@ -545,12 +548,19 @@ Json Service::fetchSearch(const Json &args, const std::shared_ptr<CancelToken> &
       reportDependency(config, {{"state", failures.empty() ? "available" : "degraded"}, {"last_checked", now()}});
   } catch (const Error &e) {
     // Cancellation and invalid requests do not indicate provider health.
-    if (report && e.code != "cancelled" && e.code != "invalid_argument")
-      reportDependency(config, {{"state", results.empty() ? "unavailable" : "degraded"},
-                                {"last_checked", now()}, {"error", e.code}});
+    if (report && e.code != "cancelled" && e.code != "invalid_argument") {
+      Json dependency = {{"state", results.empty() ? "unavailable" : "degraded"},
+                         {"last_checked", now()}, {"error", e.code}};
+      if (!e.reason.empty())
+        dependency["error_detail"] = errorPayload(e)["error"];
+      reportDependency(config, std::move(dependency));
+    }
     if (results.empty())
       throw;
-    failures.push_back({{"engine", "provider"}, {"reason", e.code}});
+    Json failure = {{"engine", "provider"}, {"reason", e.code}};
+    if (!e.reason.empty())
+      failure["error_detail"] = errorPayload(e)["error"];
+    failures.push_back(std::move(failure));
   }
   if (timeRange != "any")
     warnings.push_back("Time range is an upstream hint, not a strict date filter.");
@@ -591,7 +601,7 @@ Json Service::listeningAddresses() const {
 Json Service::testProvider(const std::string &id) {
   if (id != "auto" && id != "searxng" && id != "brave" && id != "tavily" && id != "exa" &&
       id != "perplexity" && id != "deepseek")
-    throw Error("invalid_argument", "Unknown search provider.");
+    throw Error("invalid_argument", "Unknown search provider.").withReason("provider_unknown");
   const auto started = Clock::now();
   auto token = std::make_shared<CancelToken>();
   token->deadline = started + searchTimeout_;
@@ -604,7 +614,7 @@ Json Service::testProvider(const std::string &id) {
     {
       std::lock_guard lock(mutex_);
       if (closing_)
-        throw Error("backend_unavailable", "Service is stopping.", 503, true);
+        throw Error("backend_unavailable", "Service is stopping.", 503, true).withReason("service_stopping");
       callsTokens_.push_back(token);
     }
     const auto provider = settings_.provider(*settings_.current(), id);
@@ -640,7 +650,7 @@ Json Service::open(const Json &args, const std::string &principal,
     // Matches HttpClient::getPublic: page statuses never use search-provider codes.
     if (response.status < 200 || response.status >= 300)
       throw Error("upstream_http_error", "Remote resource returned HTTP " + std::to_string(response.status) + ".",
-                  502, response.status == 429 || response.status >= 500);
+                  502, response.status == 429 || response.status >= 500).withReason("network_http_error");
     auto parsed = parseHtml(response.body, response.url, response.contentType);
     // The snapshot keeps every extracted link with its 1-based text line.
     document = {{"contract_version", 1},

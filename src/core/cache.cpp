@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
@@ -9,6 +10,7 @@
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <QSysInfo>
 #include <QThread>
 #include <QUuid>
 #include <QVariant>
@@ -20,18 +22,74 @@
 #include <qws/cache.hpp>
 #include <type_traits>
 #include <vector>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#elif defined(__linux__)
+#include <signal.h>
+#include <sys/types.h>
+#endif
 namespace qws {
 namespace {
-[[noreturn]] void unavailable() {
-  throw Error("cache_unavailable", "Cache is unavailable.", 503, true);
+// Lock-file metadata and configured paths are local diagnostics, not public
+// error messages. Keep even unusual file names from injecting terminal lines.
+std::string diagnosticValue(const QString &value) {
+  QString safe = value.left(4096);
+  for (auto &character : safe)
+    if (!character.isPrint())
+      character = QChar('?');
+  return safe.toStdString();
 }
-struct SqlFull {};
-[[noreturn]] void sqlFailure(const QSqlError &error) {
-  bool numeric = false;
-  const auto code = error.nativeErrorCode().toInt(&numeric);
-  if (numeric && (code & 0xff) == 13) // SQLITE_FULL, including extended codes.
-    throw SqlFull();
-  unavailable();
+struct SqlFull {
+  std::string operation;
+};
+QString lockMachineName() {
+#ifdef _WIN32
+  // Match QLockFile's Windows metadata, which avoids DNS resolution here.
+  return qEnvironmentVariable("COMPUTERNAME");
+#else
+  return QSysInfo::machineHostName();
+#endif
+}
+bool sameProcessName(const QString &name) {
+  const QFileInfo executable(QCoreApplication::applicationFilePath());
+#ifdef _WIN32
+  // QLockFile records the executable name without its final extension.
+  return name.compare(executable.completeBaseName(), Qt::CaseInsensitive) == 0;
+#else
+  return name == executable.fileName();
+#endif
+}
+bool confirmedRunningApplication(qint64 pid) {
+  // A stale lock can survive tryLock when permissions prevent its removal.
+  // Its recorded PID and application name alone do not establish a live owner.
+#ifdef _WIN32
+  if (pid <= 0 || static_cast<quint64>(pid) > std::numeric_limits<DWORD>::max())
+    return false;
+  const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE,
+                                     static_cast<DWORD>(pid));
+  if (!process)
+    return false;
+  wchar_t executablePath[32768];
+  DWORD length = static_cast<DWORD>(sizeof(executablePath) / sizeof(executablePath[0]));
+  const bool confirmed = QueryFullProcessImageNameW(process, 0, executablePath, &length) &&
+                         sameProcessName(QFileInfo(QString::fromWCharArray(executablePath,
+                                                   static_cast<int>(length))).completeBaseName()) &&
+                         WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+  CloseHandle(process);
+  return confirmed;
+#elif defined(__linux__)
+  if (pid <= 0 || pid > std::numeric_limits<pid_t>::max())
+    return false;
+  const auto executable = QFileInfo(QStringLiteral("/proc/%1/exe").arg(pid)).symLinkTarget();
+  return !executable.isEmpty() && sameProcessName(QFileInfo(executable).fileName()) &&
+         kill(static_cast<pid_t>(pid), 0) == 0;
+#else
+  (void)pid;
+  return false;
+#endif
 }
 QString keyHash(const std::string &key) {
   if (key.size() > 8192)
@@ -62,37 +120,101 @@ struct Cache::Impl {
       clock = [] { return QDateTime::currentSecsSinceEpoch(); };
     lockFile.setStaleLockTime(0);
   }
+  std::string diagnostic(const std::string &context = {}) const {
+    const auto database = QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath());
+    const auto lock = QDir::toNativeSeparators(QFileInfo(lockFile.fileName()).absoluteFilePath());
+    return "Cache database: " + diagnosticValue(database) + "\nCache lock: " + diagnosticValue(lock) +
+           (context.empty() ? std::string() : "\n" + context);
+  }
+  [[noreturn]] void fail(const char *reason, const char *message, bool retryable = false,
+                         const std::string &context = {}) const {
+    throw Error("cache_unavailable", message, 503, retryable)
+        .withReason(reason).withLocalDiagnostic(diagnostic(context));
+  }
+  [[noreturn]] void sqlFailure(const QSqlError &error, const char *operation,
+                              bool opening = false) const {
+    bool numeric = false;
+    const auto code = error.nativeErrorCode().toInt(&numeric);
+    const auto primary = numeric ? (code & 0xff) : -1;
+    if (primary == 13) // SQLITE_FULL, including extended codes.
+      throw SqlFull{operation};
+    const auto context = std::string("SQLite operation: ") + operation + "\nSQLite error code: " +
+                         (numeric ? std::to_string(code) : "unavailable");
+    if (primary == 5 || primary == 6) // SQLITE_BUSY / SQLITE_LOCKED.
+      fail("cache_database_busy", "The cache database is busy. Retry after the current operation finishes.",
+           true, context);
+    if (primary == 11 || primary == 26) // SQLITE_CORRUPT / SQLITE_NOTADB.
+      fail("cache_database_corrupt", "The cache database is corrupt or is not a SQLite database.", false, context);
+    if (opening)
+      fail("cache_database_open_failed", "Cannot open the cache database. Check its path and permissions.",
+           false, context);
+    fail("cache_database_error", "A cache database operation failed.", false, context);
+  }
+  void acquireLock() {
+    if (lockFile.tryLock(0))
+      return;
+    auto cause = lockFile.error();
+    qint64 pid = 0;
+    QString host, application;
+    bool known = cause == QLockFile::LockFailedError && lockFile.getLockInfo(&pid, &host, &application);
+    // The owner may have released the file between tryLock and getLockInfo.
+    // One non-blocking retry resolves that race without force-removing a lock.
+    if (cause == QLockFile::LockFailedError && !known) {
+      if (lockFile.tryLock(0))
+        return;
+      cause = lockFile.error();
+      known = cause == QLockFile::LockFailedError && lockFile.getLockInfo(&pid, &host, &application);
+    }
+    if (cause == QLockFile::PermissionError)
+      fail("cache_lock_permission_denied", "Cannot create the cache lock. Check cache-directory permissions.");
+    if (cause != QLockFile::LockFailedError)
+      fail("cache_lock_failed", "Cannot create the cache lock. Check available disk space and the filesystem.");
+    const bool sameApplication = known && pid > 0 && !application.isEmpty() && sameProcessName(application) &&
+                                 !host.isEmpty() && host.compare(lockMachineName(), Qt::CaseInsensitive) == 0 &&
+                                 confirmedRunningApplication(pid);
+    const auto owner = "Lock owner PID: " + (known && pid > 0 ? std::to_string(pid) : "unknown") +
+                       "\nLock owner application: " +
+                       (known && !application.isEmpty() ? diagnosticValue(application) : "unknown") +
+                       "\nLock owner host: " +
+                       (known && !host.isEmpty() ? diagnosticValue(host) : "unknown");
+    if (sameApplication)
+      fail("instance_already_running", "Another instance is already running and using this cache.", true,
+           owner + "\nUse the running instance, or stop it before starting this configuration again.");
+    fail("cache_locked", "The cache lock cannot be acquired. Its owner could not be confirmed.", true,
+         owner + "\nCheck the lock owner's state and cache-directory permissions, or use a different cache directory.");
+  }
   template <class F> auto run(F &&fn) -> std::invoke_result_t<F> {
     if (QThread::currentThread() == &thread)
-      unavailable();
+      fail("cache_worker_unavailable", "The cache worker cannot accept a nested operation.");
     std::lock_guard guard(dispatchMutex);
     if (closed || !worker || !thread.isRunning())
-      unavailable();
+      fail("cache_worker_unavailable", "The cache worker is not running.");
     using R = std::invoke_result_t<F>;
     std::packaged_task<R()> task(std::forward<F>(fn));
     auto future = task.get_future();
     if (!QMetaObject::invokeMethod(worker, [&task] { task(); }, Qt::BlockingQueuedConnection))
-      unavailable();
+      fail("cache_worker_unavailable", "Cannot dispatch an operation to the cache worker.");
     try {
       return future.get();
-    } catch (const SqlFull &) {
-      unavailable();
+    } catch (const SqlFull &error) {
+      fail("cache_storage_full", "Cache storage is full after eviction. Free disk space or increase the cache budget.",
+           false, "SQLite operation: " + error.operation + "\nSQLite error code: 13");
     }
   }
   QSqlQuery query(const QString &sql, const QVariantList &values = {}) {
     QSqlQuery q(db);
     if (!q.prepare(sql))
-      sqlFailure(q.lastError());
+      sqlFailure(q.lastError(), "prepare cache statement");
     for (const auto &v : values)
       q.addBindValue(v);
     if (!q.exec())
-      sqlFailure(q.lastError());
+      sqlFailure(q.lastError(), "execute cache statement");
     return q;
   }
   qint64 scalar(const QString &sql, const QVariantList &values = {}) {
     auto q = query(sql, values);
     if (!q.next())
-      unavailable();
+      fail("cache_database_error", "The cache database did not return a required result.");
     return q.value(0).toLongLong();
   }
   qint64 storageBytes() const {
@@ -108,10 +230,10 @@ struct Cache::Impl {
     if (db.isOpen() && !pendingTouches.empty()) {
       try {
         if (!db.transaction())
-          unavailable();
+          sqlFailure(db.lastError(), "begin shutdown transaction");
         flushTouches();
         if (!db.commit())
-          unavailable();
+          sqlFailure(db.lastError(), "commit shutdown transaction");
       } catch (...) {
         db.rollback();
       }
@@ -131,12 +253,12 @@ struct Cache::Impl {
     // itself, so the statement holds no lock between executions.
     QSqlQuery q(db);
     if (!q.prepare("UPDATE entries SET accessed=? WHERE key=?"))
-      sqlFailure(q.lastError());
+      sqlFailure(q.lastError(), "prepare cache access update");
     for (const auto &[key, accessed] : pendingTouches) {
       q.bindValue(0, accessed);
       q.bindValue(1, key);
       if (!q.exec())
-        sqlFailure(q.lastError());
+        sqlFailure(q.lastError(), "update cache access order");
     }
   }
   bool evictPhysical(const QString &protectedKey, qint64 limit) {
@@ -155,52 +277,62 @@ struct Cache::Impl {
       std::nth_element(order.begin(), order.begin() + count, order.end());
     QSqlQuery remove(db);
     if (!remove.prepare("DELETE FROM entries WHERE key=?"))
-      sqlFailure(remove.lastError());
+      sqlFailure(remove.lastError(), "prepare cache eviction");
     for (std::size_t i = 0; i < count; ++i) {
       remove.bindValue(0, order[i].second);
       if (!remove.exec())
-        sqlFailure(remove.lastError());
+        sqlFailure(remove.lastError(), "evict cache entry");
     }
     return count == order.size();
   }
   void start() {
-    if (!QDir().mkpath(QFileInfo(path).absolutePath()) || QFileInfo(path).isSymLink())
-      unavailable();
+    if (!QDir().mkpath(QFileInfo(path).absolutePath()))
+      fail("cache_path_unavailable", "Cannot create the cache directory. Check its path and permissions.");
+    if (QFileInfo(path).isSymLink())
+      fail("cache_path_unavailable", "A symbolic link cannot be used as the cache database.");
     worker = new QObject;
     worker->moveToThread(&thread);
     QObject::connect(&thread, &QThread::finished, worker, &QObject::deleteLater);
     thread.start();
     try {
       run([&] {
-        if (!lockFile.tryLock(0) || storageBytes() > maxBytes)
-          unavailable();
+        acquireLock();
+        const auto physicalBytes = storageBytes();
+        if (physicalBytes > maxBytes)
+          fail("cache_capacity_exceeded", "Existing cache files exceed the configured storage limit.", false,
+               "Cache storage bytes: " + std::to_string(physicalBytes) +
+               "\nConfigured storage limit: " + std::to_string(maxBytes));
         db = QSqlDatabase::addDatabase("QSQLITE", name);
         db.setDatabaseName(path);
         db.setConnectOptions("QSQLITE_BUSY_TIMEOUT=250");
         if (!db.open())
-          unavailable();
+          sqlFailure(db.lastError(), "open database", true);
         auto integrity = query("PRAGMA quick_check");
         if (!integrity.next() || integrity.value(0).toString() != "ok")
-          unavailable();
+          fail("cache_database_corrupt", "The cache database failed its integrity check.");
         integrity.finish();
         query("PRAGMA page_size=4096");
         query("PRAGMA auto_vacuum=FULL");
         if (scalar("PRAGMA auto_vacuum") != 1)
-          unavailable();
+          fail("cache_database_incompatible", "The cache database has an unsupported vacuum mode.");
         auto mode = query("PRAGMA journal_mode=DELETE");
         if (!mode.next() || mode.value(0).toString().toLower() != "delete")
-          unavailable();
+          fail("cache_database_incompatible", "The cache database cannot use the required journal mode.");
         mode.finish();
         query("PRAGMA synchronous=FULL");
         query("PRAGMA temp_store=MEMORY");
         query("PRAGMA cache_size=-2048");
         const qint64 pages = ((maxBytes - 4 * 1024 * 1024) / 3) / scalar("PRAGMA page_size");
-        if (scalar(QString("PRAGMA max_page_count=%1").arg(pages)) > pages)
-          unavailable();
+        const auto actualPages = scalar(QString("PRAGMA max_page_count=%1").arg(pages));
+        if (actualPages > pages)
+          fail("cache_capacity_exceeded", "The cache database exceeds the configured page budget.", false,
+               "Cache page count: " + std::to_string(actualPages) +
+               "\nConfigured page limit: " + std::to_string(pages));
         payloadBudget = pages * scalar("PRAGMA page_size") * 3 / 4;
         const auto version = scalar("PRAGMA user_version");
         if (version != 0 && version != 1)
-          unavailable();
+          fail("cache_database_incompatible", "The cache database format version is not supported.", false,
+               "Cache format version: " + std::to_string(version));
         query("CREATE TABLE IF NOT EXISTS entries(key TEXT PRIMARY KEY,payload BLOB NOT NULL,size INTEGER "
               "NOT NULL CHECK(size>=0),expires INTEGER NOT NULL,accessed INTEGER NOT NULL)");
         query("CREATE INDEX IF NOT EXISTS entry_lru ON entries(accessed,key)");
@@ -223,7 +355,7 @@ struct Cache::Impl {
   }
   void close() {
     if (QThread::currentThread() == &thread)
-      unavailable();
+      fail("cache_worker_unavailable", "The cache worker cannot close itself.");
     std::lock_guard guard(dispatchMutex);
     if (closed)
       return;
@@ -285,12 +417,16 @@ void Cache::put(const std::string &key, const Json &value, std::int64_t ttl) {
     const qint64 now = d_->clock();
     if (ttl <= 0 || ttl > 30LL * 86400 || now > std::numeric_limits<qint64>::max() - ttl)
       throw Error("invalid_argument", "Invalid cache lifetime.");
-    if (data.size() > d_->payloadBudget || d_->storageBytes() > d_->maxBytes)
-      unavailable();
+    if (data.size() > d_->payloadBudget)
+      d_->fail("cache_capacity_exceeded", "The cache entry exceeds the configured payload limit.", false,
+               "Entry bytes: " + std::to_string(data.size()) +
+               "\nPayload limit: " + std::to_string(d_->payloadBudget));
+    if (d_->storageBytes() > d_->maxBytes)
+      d_->fail("cache_capacity_exceeded", "Existing cache files exceed the configured storage limit.");
     qint64 physicalEvictions = 0;
     for (;;) {
       if (!d_->db.transaction())
-        unavailable();
+        d_->sqlFailure(d_->db.lastError(), "begin cache write transaction");
       bool allEvicted = false;
       try {
         if (physicalEvictions)
@@ -305,7 +441,7 @@ void Cache::put(const std::string &key, const Json &value, std::int64_t ttl) {
         {
           auto totals = d_->query("SELECT COUNT(*),COALESCE(SUM(size),0) FROM entries");
           if (!totals.next())
-            unavailable();
+            d_->fail("cache_database_error", "The cache database did not return entry totals.");
           entries = totals.value(0).toLongLong();
           bytes = totals.value(1).toLongLong();
         }
@@ -324,7 +460,7 @@ void Cache::put(const std::string &key, const Json &value, std::int64_t ttl) {
         d_->query("INSERT INTO entries VALUES(?,?,?,?,?)",
                   {k, data, qint64(data.size()), now + ttl, ++d_->serial});
         if (!d_->db.commit())
-          sqlFailure(d_->db.lastError());
+          d_->sqlFailure(d_->db.lastError(), "commit cache write transaction");
         d_->pendingTouches.clear();
         break;
       } catch (const SqlFull &) {
@@ -341,7 +477,7 @@ void Cache::put(const std::string &key, const Json &value, std::int64_t ttl) {
       }
     }
     if (d_->storageBytes() > d_->maxBytes)
-      unavailable();
+      d_->fail("cache_capacity_exceeded", "Cache files exceed the configured storage limit after writing.");
   });
 }
 void Cache::erase(const std::string &key) {

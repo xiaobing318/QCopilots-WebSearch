@@ -9,5 +9,14 @@
   "internal_error": 500,
   "provider_unavailable": 502,
   "provider_not_configured": 503,
-  "timeout": 504
+  "timeout": 504,
+  "invalid_configuration": 400,
+  "busy": 429,
+  "cancelled": 499,
+  "backend_unavailable": 503,
+  "response_too_large": 502,
+  "upstream_http_error": 502,
+  "destination_blocked": 403,
+  "unsupported_content": 415,
+  "cache_unavailable": 503
 }

@@ -426,10 +426,10 @@ std::string businessMcpUrl(const Json &business, int boundPort) {
          (host.find(':') == std::string::npos ? host : "[" + host + "]") + ":" + std::to_string(port) + "/mcp";
 }
 
-std::string Config::path(const std::string &value) const {
-  if (value.empty())
+std::string Config::path(const std::string &pathValue) const {
+  if (pathValue.empty())
     return {};
-  return QFileInfo(QDir(QString::fromStdString(baseDirectory)), QString::fromStdString(value))
+  return QFileInfo(QDir(QString::fromStdString(baseDirectory)), QString::fromStdString(pathValue))
       .absoluteFilePath()
       .toStdString();
 }
@@ -464,17 +464,41 @@ std::string Config::secret(const Json &source, bool required, int minimumLength)
 std::vector<ClientIdentity> Config::clients() const {
   std::vector<ClientIdentity> result;
   std::set<std::string> ids;
-  std::set<QByteArray> hashes;
   for (const auto &c : value["clients"]) {
     const auto id = c["id"].get<std::string>();
-    const auto hash = c.contains("token_sha256")
-                          ? QByteArray::fromHex(QByteArray::fromStdString(c["token_sha256"].get<std::string>()))
-                          : QCryptographicHash::hash(QByteArray::fromStdString(secret(c, true, 1)),
-                                                     QCryptographicHash::Sha256);
+    QByteArray hash;
+    if (c.contains("token_sha256")) {
+      hash = QByteArray::fromHex(QByteArray::fromStdString(c["token_sha256"].get<std::string>()));
+    } else {
+      try {
+        hash = QCryptographicHash::hash(QByteArray::fromStdString(secret(c, true, 1)),
+                                       QCryptographicHash::Sha256);
+      } catch (const Error &error) {
+        throw error.withReason("credential_source_unavailable", {{"client_id", id}});
+      }
+    }
     if (hash.size() != 32)
-      throw Error("invalid_configuration", "Invalid client credential digest.");
-    if (!ids.insert(id).second || !hashes.insert(hash).second)
-      throw Error("invalid_configuration", "Client identities and credentials must be unique.");
+      throw Error("invalid_configuration", "Invalid client credential digest.")
+          .withReason("credential_digest_mismatch", {{"client_id", id}});
+    if (c.contains("token_value")) {
+      const auto token = QByteArray::fromStdString(c.at("token_value").get<std::string>());
+      try {
+        validateCredential(token, true, "invalid_configuration", 1);
+      } catch (const Error &error) {
+        throw error.withReason("client_credential_invalid", {{"client_id", id}});
+      }
+      if (QCryptographicHash::hash(token, QCryptographicHash::Sha256) != hash)
+        throw Error("invalid_configuration", "Stored credential and digest do not match.")
+            .withReason("credential_digest_mismatch", {{"client_id", id}});
+    }
+    if (!ids.insert(id).second)
+      throw Error("invalid_configuration", "Client ID already exists.")
+          .withReason("client_id_exists", {{"client_id", id}});
+    const auto duplicate = std::find_if(result.begin(), result.end(),
+                                        [&](const auto &identity) { return identity.tokenHash == hash; });
+    if (duplicate != result.end())
+      throw Error("invalid_configuration", "This credential is already assigned to another client.")
+          .withReason("client_credential_duplicate", {{"client_id", duplicate->id}});
     const auto generation = c.value("generation", std::string{});
     result.push_back({id, hash, generation.empty() ? id : id + ":" + generation});
   }

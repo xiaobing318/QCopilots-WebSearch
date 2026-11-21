@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import viewSchema from "../../../contracts/admin/v1/settings-view.schema.json";
 import updateSchema from "../../../contracts/admin/v1/settings-update.schema.json";
 import errors from "../../../contracts/admin/v1/error-codes.json";
+import reasonSchema from "../../../contracts/admin/v1/error-reasons.json";
 import { applyLanguage, getLanguage, translate } from "../i18n/i18n";
 import en from "../locales/en.json";
 import zhCN from "../locales/zh-CN.json";
@@ -59,6 +60,20 @@ describe("settings contracts", () => {
 });
 
 describe("settings localization", () => {
+  it("localizes every registered service error reason in both languages", () => {
+    for (const reason of reasonSchema.enum) {
+      const key = "errors.reason." + reason;
+      expect(Object.hasOwn(en, key), "Missing English reason: " + reason).toBe(
+        true,
+      );
+      expect(
+        Object.hasOwn(zhCN, key),
+        "Missing Chinese reason: " + reason,
+      ).toBe(true);
+      expect(translate("en", key)).not.toBe(key);
+      expect(translate("zh-CN", key)).not.toBe(key);
+    }
+  });
   it("keeps both language catalogs in sync with the management error contract", () => {
     expect(Object.keys(en).sort()).toEqual(Object.keys(zhCN).sort());
     for (const code of Object.keys(errors)) {
