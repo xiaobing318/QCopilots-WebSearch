@@ -171,7 +171,7 @@
   "errors.reason.cache_database_open_failed": "无法打开缓存，请检查缓存位置和服务诊断信息。",
   "errors.reason.cache_lock_failed": "无法获取缓存锁，请查看服务诊断信息。",
   "errors.reason.cache_lock_permission_denied": "服务无法访问缓存锁，请检查缓存目录权限。",
-  "errors.reason.cache_locked": "缓存被另一项操作锁定，请稍候重试。",
+  "errors.reason.cache_locked": "无法取得缓存锁，未能确认持有者。请在部署机器上检查持锁状态与目录权限。",
   "errors.reason.cache_path_unavailable": "配置的缓存位置不可用，请确认位置存在并且可以访问。",
   "errors.reason.cache_storage_full": "缓存存储空间已满，请检查磁盘可用空间。",
   "errors.reason.cache_worker_unavailable": "缓存工作进程当前不可用，请查看服务诊断信息。",

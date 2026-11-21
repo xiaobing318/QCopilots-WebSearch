@@ -171,7 +171,7 @@
   "errors.reason.cache_database_open_failed": "The cache could not be opened. Check the cache location and service diagnostics.",
   "errors.reason.cache_lock_failed": "The cache lock could not be acquired. Check the service diagnostics.",
   "errors.reason.cache_lock_permission_denied": "The service cannot access the cache lock. Check the cache directory permissions.",
-  "errors.reason.cache_locked": "The cache is locked by another operation. Wait a moment and retry.",
+  "errors.reason.cache_locked": "The cache lock could not be acquired and its owner could not be confirmed. Check the lock owner and directory permissions on the deployment machine.",
   "errors.reason.cache_path_unavailable": "The configured cache location is unavailable. Check that it exists and is accessible.",
   "errors.reason.cache_storage_full": "The cache storage is full. Check the available disk space.",
   "errors.reason.cache_worker_unavailable": "The cache worker is unavailable. Check the service diagnostics.",
