@@ -3,7 +3,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 import hashlib
-from http.client import HTTPConnection, HTTPSConnection
+from http.client import HTTPConnection, HTTPException, HTTPSConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -135,6 +135,29 @@ class Fixture:
     def probe(self, token, headers=None):
         return mcp_probe(self.proxy_port, self.headers(token) | (headers or {}))
 
+    def wait_for_control(self, service):
+        deadline = time.monotonic() + 8
+        attempts = 0
+        last = "not probed"
+        while service.poll() is None and time.monotonic() < deadline:
+            attempts += 1
+            try:
+                status, _, payload = request(self.control, "GET", "/health/live",
+                                             {"Authorization": f"Bearer {self.file_token}"})
+            except (OSError, HTTPException) as error:
+                last = f"{type(error).__name__} errno={getattr(error, 'errno', None)}"
+                time.sleep(0.05)
+                continue
+            except ValueError:
+                last = "invalid JSON response"
+                break
+            if status == 200 and isinstance(payload, dict) and payload.get("live") is True:
+                return
+            last = f"HTTP {status}" if status != 200 else "HTTP 200 without live=true"
+            break
+        raise AssertionError(f"Control /health/live failed after {attempts} probes: {last}; "
+                             f"service returncode={service.poll()}")
+
     @contextmanager
     def running(self, origin_tls=None):
         windows = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
@@ -149,19 +172,7 @@ class Fixture:
             proxy_thread = threading.Thread(target=proxy.serve_forever, kwargs={"poll_interval": 0.05})
             try:
                 proxy_thread.start()
-                deadline = time.monotonic() + 8
-                while time.monotonic() < deadline:
-                    require(service.poll() is None, "The temporary service failed to start")
-                    try:
-                        status = request(self.control, "GET", "/health/live",
-                                         {"Authorization": f"Bearer {self.file_token}"})[0]
-                        if status == 200:
-                            break
-                    except OSError:
-                        pass
-                    time.sleep(0.05)
-                else:
-                    raise AssertionError("The temporary service did not become ready")
+                self.wait_for_control(service)
                 yield
             finally:
                 if proxy_thread.ident is not None:

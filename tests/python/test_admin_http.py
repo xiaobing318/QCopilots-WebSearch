@@ -229,7 +229,8 @@ def verify_http(executable, public_url):
         base = [executable, "--ConfigPath", str(runtime)]
         subprocess.run([*base, "--InitializeConfig"], check=True, capture_output=True, timeout=5)
         config = json.loads(runtime.read_text(encoding="utf-8"))
-        assert config["business"]["public_url"] == "https://web-search.vastarmorai.com/mcp"
+        generated_url = config["business"]["public_url"]
+        assert generated_url == "https://web-search.vastarmorai.com/mcp"
         business, control, admin = ports()
         for label, port in (("business", business), ("control", control)):
             config[label].update(port=port, allowed_hosts=[f"127.0.0.1:{port}"])
@@ -243,7 +244,8 @@ def verify_http(executable, public_url):
         if public_url is None:
             verify_public_url_configuration(base, runtime, config)
         token = (root / "admin.token").read_text(encoding="ascii").strip()
-        assert subprocess.run([*base, "--SettingsUrl"], capture_output=True, timeout=6).returncode == 1
+        if public_url is GENERATED_PUBLIC_URL:
+            assert subprocess.run([*base, "--SettingsUrl"], capture_output=True, timeout=6).returncode == 1
         subprocess.run([*base, "--CheckConfig"], check=True, capture_output=True, timeout=5)
         windows = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
         with subprocess.Popen(base, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, **windows) as service:
@@ -258,16 +260,21 @@ def verify_http(executable, public_url):
                         time.sleep(0.1)
                 else:
                     raise RuntimeError("Administration listener did not start")
-                browser(admin, executable, runtime, token, advertised_url or f"http://127.0.0.1:{business}/mcp")
                 business_token = (root / "client.token").read_text(encoding="ascii").strip()
                 headers = {"Authorization": f"Bearer {business_token}"}
+                expected_url = advertised_url or f"http://127.0.0.1:{business}/mcp"
+                public_host = urlsplit(advertised_url or generated_url).netloc
+                assert mcp_probe(business, headers | {"Host": public_host})[0] == 403, \
+                    "Endpoint display metadata silently expanded the business Host allowlist"
+                if public_url is not GENERATED_PUBLIC_URL:
+                    assert read_admin_status(admin, token)["mcp_url"] == expected_url
+                    assert mcp_probe(business, headers)[0] == 200, "The configured local Host must remain usable"
+                    return
+                browser(admin, executable, runtime, token, expected_url)
                 session = start_session(business, headers)
                 try:
                     status = call_tool(business, headers, session, 2, "web_search_status", {})
                     assert not status["isError"] and status["structuredContent"]["settings"]["search_enabled"] is False
-                    if advertised_url is not None:
-                        assert mcp_probe(business, headers | {"Host": urlsplit(advertised_url).netloc})[0] == 403, \
-                            "Endpoint display metadata silently expanded the business Host allowlist"
                     for req_id, (tool, arguments) in enumerate((
                         ("web_search", {"query": "QGIS"}), ("web_open", {"page_id": "cached-id"}),
                     ), 3):
