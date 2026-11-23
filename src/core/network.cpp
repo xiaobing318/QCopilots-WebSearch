@@ -8,6 +8,7 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #endif
+#include <QByteArrayView>
 #include <QUrl>
 #include <algorithm>
 #include <cctype>
@@ -83,10 +84,13 @@ void checkCancellation(const std::shared_ptr<CancelToken> &c,
 QUrl normalizedUrl(const std::string &value) {
   if (value.empty() || value.size() > 8192)
     throw Error("invalid_argument", "Invalid HTTP URL.");
+  const QByteArrayView bytes(value.data(), qsizetype(value.size()));
+  if (!bytes.isValidUtf8())
+    throw Error("invalid_argument", "Invalid HTTP URL.");
   for (unsigned char c : value)
     if (c <= 0x20 || c == 0x7f || c == '\\')
       throw Error("invalid_argument", "Invalid HTTP URL.");
-  QUrl url(QString::fromUtf8(value.data(), qsizetype(value.size())), QUrl::StrictMode);
+  QUrl url(QString::fromUtf8(bytes), QUrl::StrictMode);
   QString host = url.host(QUrl::FullyDecoded);
   const auto scheme = url.scheme().toLower();
   if (!url.isValid() || url.isRelative() || (scheme != "http" && scheme != "https") || host.isEmpty() ||

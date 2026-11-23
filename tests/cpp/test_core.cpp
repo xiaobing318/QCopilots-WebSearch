@@ -112,6 +112,13 @@ ServiceTransport transport() {
       }};
 }
 void networkTests() {
+  const auto internationalUrl = normalizeHttpUrl("https://bücher.example/café/索引?q=茶");
+  const auto encodedUrl = internationalUrl.toEncoded(QUrl::FullyEncoded);
+  REQUIRE(encodedUrl == "https://xn--bcher-kva.example/caf%C3%A9/%E7%B4%A2%E5%BC%95?q=%E8%8C%B6");
+  REQUIRE(normalizeHttpUrl(encodedUrl.toStdString()) == internationalUrl);
+  const auto escapedUrl = normalizeHttpUrl("https://docs.example/a%2Fb/%FF");
+  REQUIRE(escapedUrl.toEncoded(QUrl::FullyEncoded) == "https://docs.example/a%2Fb/%FF");
+  error("invalid_argument", [] { normalizeHttpUrl("https://docs.example/\xC3"); });
   for (const auto *host : {"0.1.2.3",         "10.0.0.1",        "127.0.0.1",    "169.254.169.254",
                            "172.16.0.1",      "192.168.1.1",     "100.64.0.1",   "192.0.0.1",
                            "192.0.2.1",       "198.18.0.1",      "198.51.100.1", "203.0.113.1",
