@@ -26,7 +26,7 @@ def rejected_handshake(port, context, hostname):
     raise AssertionError(f"The TLS client accepted an invalid certificate for {hostname}")
 
 
-def verify_early_tls_response(fixture, trusted):
+def verify_early_tls_response(fixture, trusted, *, send_body):
     body = json.dumps(INITIALIZE).encode()
     with closing(http.client.HTTPSConnection("127.0.0.1", fixture.business, context=trusted, timeout=3)) as client:
         client.putrequest("POST", "/mcp", skip_host=True)
@@ -37,12 +37,14 @@ def verify_early_tls_response(fixture, trusted):
         for name, value in headers.items():
             client.putheader(name, value)
         client.endheaders()
-        # Send the normal MCP body in its own TLS record, while the rejection is in flight.
-        require(select.select([client.sock], [], [], 1)[0], "The origin waited for the body before rejecting headers")
-        client.send(body)
+        # Require the actual HTTP response before the listener's two-second request-body timeout.
+        client.sock.settimeout(1)
+        if send_body:
+            require(select.select([client.sock], [], [], 1)[0], "No TLS data arrived before the delayed body")
+            client.send(body)
         response = client.getresponse()
         require(response.status == 403 and json.loads(response.read())["error"]["code"] == "forbidden",
-                "The TLS client lost the early rejection while sending its request body")
+                "The origin did not return the complete HTTP rejection")
 
 
 def verify(executable, openssl, root):
@@ -85,7 +87,8 @@ def verify(executable, openssl, root):
             pass
         else:
             require(status == 400, "The TLS origin answered an ordinary plaintext business request")
-        verify_early_tls_response(fixture, trusted)
+        verify_early_tls_response(fixture, trusted, send_body=False)
+        verify_early_tls_response(fixture, trusted, send_body=True)
         verify_business(fixture, fixture.environment_token)
         with ThreadPoolExecutor(max_workers=4) as pool:
             pending = [pool.submit(fixture.probe, fixture.file_token) for _ in range(4)]
