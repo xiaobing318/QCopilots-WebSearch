@@ -90,7 +90,7 @@ class Fixture:
         require(self.command("--InitializeConfig").returncode == 0, "Fixture initialization failed")
         self.file_token = (root / "client.token").read_text(encoding="ascii").strip()
         config = self.config()
-        config["business"].update(port=self.business, allowed_hosts=[HOST], origins=[ORIGIN])
+        config["business"].update(port=self.business, allowed_hosts=[HOST])
         config["control"].update(port=self.control, allowed_hosts=[f"127.0.0.1:{self.control}"])
         config["admin"] = {"enabled": True, "port": admin}
         config["clients"].append({"id": "legacy-env", "token_env": "QCWS_TEST_ENROLLMENT_TOKEN"})
@@ -243,12 +243,25 @@ def verify_business(fixture, token):
     require(response_headers.get("Access-Control-Allow-Origin") == ORIGIN, "Allowed Origin was not echoed")
     for absent_or_invalid in (None, secrets.token_hex(32), digest(token)):
         status, response_headers, _ = fixture.public("GET", "/v1/status", absent_or_invalid)
-        require(status == 401 and response_headers.get("WWW-Authenticate") == "Bearer",
+        require(status == 401 and response_headers.get("WWW-Authenticate") == "Bearer" and
+                response_headers.get("Access-Control-Allow-Origin") == ORIGIN,
                 "The listener accepted a missing or invalid credential")
     require(fixture.public("GET", "/v1/status", token, {"Host": "wrong.example.test"})[0] == 403,
             "The business listener accepted an unconfigured public Host")
-    require(fixture.public("GET", "/v1/status", token, {"Origin": "https://wrong.example.test"})[0] == 403,
-            "The business listener accepted an unconfigured Origin")
+    for origin in ("https://another-product.example.test", "http://localhost:3000"):
+        status, response_headers, _ = fixture.public("GET", "/v1/status", token, {"Origin": origin})
+        require(status == 200 and response_headers.get("Access-Control-Allow-Origin") == origin and
+                response_headers.get("Vary") == "Origin" and
+                "Access-Control-Allow-Credentials" not in response_headers,
+                "An unregistered valid webpage could not read the business response")
+    for origin in ("", "null", "*", "https://chat.example.test/", "https://user@chat.example.test",
+                   "https://chat.example.test?", "https://chat.example.test#", "file://example.test",
+                   "https://chat.example.test:65536", "https://one.test https://two.test"):
+        require(fixture.public("GET", "/v1/status", token, {"Origin": origin})[0] == 403,
+                "The business listener accepted an invalid Origin")
+    require(request(fixture.control, "GET", "/health/live", {
+        "Authorization": f"Bearer {token}", "Origin": ORIGIN})[0] == 403,
+        "Opening business CORS also opened the control listener")
     for path in ("/health/live", "/health/ready", "/metrics", "/settings/", "/admin/api/v1/settings", "/mcp/"):
         require(fixture.public("GET", path, token)[0] == 404, "The proxy exposed a path outside the business allowlist")
     for path in ("/v1/search", "/v1/open", "/v1/find"):
@@ -256,16 +269,22 @@ def verify_business(fixture, token):
         require(status == 400 and value["error"]["code"] == "invalid_argument",
                 "The forwarded REST business route did not reach tool validation")
 
+    for origin in (ORIGIN, "https://another-product.example.test"):
+        verify_browser_mcp(fixture, token, origin)
+
+
+def verify_browser_mcp(fixture, token, origin):
     status, response_headers, _ = fixture.public("OPTIONS", "/mcp", headers={
+        "Origin": origin,
         "Access-Control-Request-Method": "POST",
         "Access-Control-Request-Headers": "authorization,content-type,mcp-session-id,mcp-protocol-version",
     })
     allowed = {item.strip().lower() for item in response_headers.get("Access-Control-Allow-Headers", "").split(",")}
-    require(status == 204 and response_headers.get("Access-Control-Allow-Origin") == ORIGIN and
+    require(status == 204 and response_headers.get("Access-Control-Allow-Origin") == origin and
             {"authorization", "content-type", "mcp-session-id", "mcp-protocol-version"} <= allowed,
             "Browser MCP preflight failed")
 
-    headers = {"Accept": "application/json, text/event-stream"}
+    headers = {"Origin": origin, "Accept": "application/json, text/event-stream"}
     init = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
         "protocolVersion": PROTOCOL_VERSION, "capabilities": {},
         "clientInfo": {"name": "proxy-fixture", "version": "1"},
@@ -406,6 +425,11 @@ def verify_release_config(executable, folder):
     value = json.loads(seed.read_text(encoding="utf-8"))
     require(value["project_version"] == version and value["schema_version"] == 1,
             "Initialized config should carry the native release and the independent schema version")
+    require(value["business"] == {
+        "host": "127.0.0.1", "port": 3181,
+        "allowed_hosts": ["127.0.0.1:3181", "web-search.vastarmorai.com"],
+        "public_url": "https://web-search.vastarmorai.com/mcp",
+    }, "Portable initialization did not generate the public business defaults")
 
     peer_version = "999.999.999" if version != "999.999.999" else "1.2.3"
     peer = folder / f"qcopilots-websearch-{peer_version}" / "runtime.json"
@@ -427,6 +451,11 @@ def verify_release_config(executable, folder):
     listeners = {actual[role]["port"] for role in ("business", "control", "admin")}
     known = {value["business"]["port"], value["control"]["port"], value.get("admin", {}).get("port", 8091)}
     require(len(listeners) == 3 and not (known & listeners), "An idle release's ports were reused")
+    require(actual["business"]["allowed_hosts"] == [
+        f"127.0.0.1:{actual['business']['port']}", "web-search.vastarmorai.com"] and
+        actual["business"]["public_url"] == value["business"]["public_url"] and
+        "origins" not in actual["business"],
+        "Automatic port selection lost the public business defaults")
     require(Path(actual["cache"]["directory"]) == state / "cache" and
             Path(actual["settings"]["directory"]) == state, "Managed state directory is wrong")
     managed_bytes = managed.read_bytes()

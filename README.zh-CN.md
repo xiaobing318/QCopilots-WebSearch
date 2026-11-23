@@ -28,6 +28,8 @@ QCopilots-WebSearch 是一个使用 C++20 和 Qt 6.12 的独立服务，提供�
 
 业务监听提供 REST 的 `/v1` 路由和 MCP HTTP 的 `/mcp`，两者均使用客户端 Bearer 令牌。健康和指标使用独立的控制监听。进程型 MCP 客户端通过 `--Stdio --ConfigPath FILE` 接入。[部署和 QGIS 接入说明](docs/deployment.md)
 
+任意 HTTP(S) 网页均可凭有效的业务 Bearer 调用业务接口，无需维护逐站的 `business.origins` 列表。原生或服务端客户端可以省略 `Origin`。新生成配置的业务 Host 默认包含 `127.0.0.1:3181` 和 `web-search.vastarmorai.com`，`business.public_url` 默认为 `https://web-search.vastarmorai.com/mcp`。初始化选用其他端口时，回环 Host 使用实际端口。公网 URL 仅用于展示连接资料，不会创建隧道或验证公网可达性。使用其他部署时，修改为实际 Host 和公网 URL。已有配置若包含 `business.origins`，需要先删除该字段，再通过 `--CheckConfig` 检查。控制接口和设置页仍受各自的访问限制。[业务配置说明](docs/deployment.md#business-addresses-and-browser-access)
+
 管理页顶部提供“访问授权”“搜索设置”“服务状态”三个标签页。“访问授权”左侧为客户端列表，右侧为所选客户端的操作。添加或替换授权码按三步完成：填写或生成授权码，确认“保存并生效”，再复制已生效的 Bearer 和服务地址。保存后立即生效，重启后继续保留。QCopilots 使用该 Bearer，保留已登记的服务地址。
 
 可手动输入包含 `/` 的授权码、随机生成令牌，或选择“从字符串生成”。字符串生成使用原文 UTF-8 字节的 SHA-256，输出 64 位小写十六进制字符，不去除空格或改变大小写。源字符串仅在页面中参与计算，生成后立即清空。保存后停留在“复制连接资料”步骤时，可以重复复制授权码。授权码仅临时保留在页面内存中，点击完成、切换客户端或标签页、刷新或退出登录后清空，之后无法从已保存的客户端列表找回。[令牌管理](docs/deployment.md#manage-client-tokens)

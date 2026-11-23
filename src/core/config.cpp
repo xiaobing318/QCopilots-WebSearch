@@ -290,9 +290,20 @@ void assignAvailableListenerPorts(Json &configuration, const QString &configPath
   };
   const auto setListener = [&](const char *name, QTcpServer &listener) {
     auto &options = configuration[name];
-    const auto port = reserve(listener, options["port"].get<int>());
+    const auto previousPort = options["port"].get<int>();
+    const auto port = reserve(listener, previousPort);
     options["port"] = port;
-    options["allowed_hosts"] = Json::array({"127.0.0.1:" + std::to_string(port)});
+    const auto previousHost = "127.0.0.1:" + std::to_string(previousPort);
+    const auto localHost = "127.0.0.1:" + std::to_string(port);
+    auto hosts = Json::array();
+    for (const auto &host : options["allowed_hosts"]) {
+      const auto updated = host == previousHost ? Json(localHost) : host;
+      if (std::find(hosts.begin(), hosts.end(), updated) == hosts.end())
+        hosts.push_back(updated);
+    }
+    if (std::find(hosts.begin(), hosts.end(), localHost) == hosts.end())
+      hosts.insert(hosts.begin(), localHost);
+    options["allowed_hosts"] = std::move(hosts);
   };
   setListener("business", business);
   setListener("control", control);

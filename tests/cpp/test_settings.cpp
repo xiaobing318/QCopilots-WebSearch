@@ -2,6 +2,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QTcpServer>
 #include <QTemporaryDir>
 #include <iostream>
 #include <qws/settings.hpp>
@@ -25,6 +26,18 @@ int main(int argc, char **argv) {
     require(temporary.isValid(), "Temporary directory required.");
     qws::Config config{qws::defaultConfiguration(), temporary.path().toStdString()};
     auto endpoint = config.value.at("business");
+    require(endpoint.at("allowed_hosts") ==
+                qws::Json::array({"127.0.0.1:3181", "web-search.vastarmorai.com"}),
+            "New configurations must accept the local and default public business Hosts.");
+    require(!endpoint.contains("origins"), "Business configuration must not contain an Origin allowlist.");
+    require(qws::businessMcpUrl(endpoint) == "https://web-search.vastarmorai.com/mcp",
+            "New configurations must advertise the default public MCP endpoint.");
+    qws::validateSchema(qws::readSchema("runtime"), config.value);
+    auto removedBusinessOption = config.value;
+    removedBusinessOption["business"]["origins"] = qws::Json::array();
+    requireError("invalid_argument",
+                 [&] { qws::validateSchema(qws::readSchema("runtime"), removedBusinessOption); });
+    endpoint.erase("public_url");
     require(qws::businessMcpUrl(endpoint) == "http://127.0.0.1:3181/mcp",
             "An unconfigured public endpoint must describe the local business listener.");
     endpoint["host"] = "::1";
@@ -37,6 +50,26 @@ int main(int argc, char **argv) {
     endpoint["public_url"] = "https://search.example.test:8443/mcp";
     require(qws::businessMcpUrl(endpoint, 53181) == "https://search.example.test:8443/mcp",
             "An explicit deployment URL must take precedence over the local listener.");
+    QTcpServer occupiedBusiness;
+    require(occupiedBusiness.listen(QHostAddress::LocalHost, 0), "Cannot occupy a business port for the fixture.");
+    auto assigned = config.value;
+    assigned["business"]["port"] = occupiedBusiness.serverPort();
+    assigned["business"]["allowed_hosts"][0] = "127.0.0.1:" + std::to_string(occupiedBusiness.serverPort());
+    assigned["business"]["allowed_hosts"].push_back("search.example.test:443");
+    qws::assignAvailableListenerPorts(assigned, QDir(temporary.path()).filePath("runtime.json"));
+    require(assigned["business"]["port"] != occupiedBusiness.serverPort(),
+            "An occupied business port must be replaced.");
+    require(assigned["business"]["allowed_hosts"] ==
+                qws::Json::array({"127.0.0.1:" + std::to_string(assigned["business"]["port"].get<int>()),
+                                  "web-search.vastarmorai.com", "search.example.test:443"}),
+            "Selecting an available port must update the local Host and preserve public Hosts.");
+    require(assigned["business"]["public_url"] == config.value["business"]["public_url"],
+            "Selecting a local port must preserve the public MCP endpoint.");
+    require(assigned["control"]["allowed_hosts"] ==
+                qws::Json::array({"127.0.0.1:" + std::to_string(assigned["control"]["port"].get<int>())}) &&
+                assigned["control"]["origins"].empty(),
+            "Control listener access must remain restricted to its local Host without browser Origins.");
+    qws::validateSchema(qws::readSchema("runtime"), assigned);
     require(qws::adminConfiguration(config, false).port == 3183,
             "New configurations must explicitly select administration port 3183.");
     auto legacy = config;

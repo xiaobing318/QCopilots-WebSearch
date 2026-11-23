@@ -12,6 +12,35 @@ MSI 和 DEB 安装包会为每个项目版本注册独立服务。新版本首�
 
 安装程序优先选择业务、控制和管理监听器的默认回环端口，依次为 3181、3182 和 3183。安装程序会跳过已被占用的端口，以及其他已安装版本配置中记录的端口，即使对应服务当前处于停止状态。选定的端口会写入该版本的运行配置，服务重启时继续使用这些端口。REST 和 MCP 使用 `business.port`，健康检查和指标使用 `control.port`，设置页使用 `admin.port`。连接时请使用同一版本的令牌。
 
+<a name="business-addresses-and-browser-access"></a>
+
+## 业务地址与网页接入
+
+业务接口供不同产品的网页、原生程序和服务端 API 客户端使用。任意合法 HTTP(S) 网页均可携带有效的客户端 Bearer 调用 `/v1` 和 `/mcp`，无需将每个产品的域名登记到服务配置。网页的 CORS 预检不要求 Bearer，实际业务请求始终要求有效 Bearer。业务接口不使用浏览器 Cookie 鉴权。原生程序和服务端客户端可以省略 `Origin`。
+
+| 配置或请求信息 | 作用 |
+| --- | --- |
+| `business.allowed_hosts` | 服务接受的目标地址，对应 HTTP `Host` 请求头。例如客户端访问 `https://web-search.vastarmorai.com/mcp` 时通常发送 `Host: web-search.vastarmorai.com`。这里填写服务自己的地址，不填写调用方网页的地址。 |
+| `Origin` 请求头 | 表示发起请求的网页来源，例如 `https://chat.vastarmorai.com`。业务服务检查它是否是合法的 HTTP(S) 来源，并返回所需 CORS 响应头，不再按网页域名维护允许列表。 |
+| `business.public_url` | 供设置页展示和复制的公网 MCP 地址。它不控制授权，不建立 Cloudflare 路由，也不证明公网已经连通。 |
+
+新生成的配置默认包含以下业务设置。安装或初始化选择其他端口时，`port` 和回环 Host 使用实际端口。
+
+```json
+{
+  "business": {
+    "host": "127.0.0.1",
+    "port": 3181,
+    "allowed_hosts": ["127.0.0.1:3181", "web-search.vastarmorai.com"],
+    "public_url": "https://web-search.vastarmorai.com/mcp"
+  }
+}
+```
+
+`business.host` 仍是本机监听地址，Cloudflare 或其他反向代理负责把公网流量送到它。使用自己的公网域名时，更新 `allowed_hosts` 和 `public_url`，同时配置对应的 DNS 与代理路由。Host 按请求中的实际值匹配，带显式端口的 Host 需要有对应条目。
+
+升级旧配置时，删除 `business.origins`，即使它是空数组也需要删除，然后运行 `--CheckConfig` 并重启服务。程序不会自动删除或迁移该字段。仅删除业务配置中的字段，保留控制和管理监听器原有的 Host、Origin、管理会话和 CSRF 限制。
+
 <a name="ubuntu-host"></a>
 
 ## Ubuntu 主机
@@ -19,7 +48,7 @@ MSI 和 DEB 安装包会为每个项目版本注册独立服务。新版本首�
 使用 apt 安装发布版 DEB，将 `version` 设为安装包文件名中的版本号。每个安装包都会创建该版本专用的非特权服务账号和 systemd 单元。DEB 要求 `/opt` 归 `root` 所有，且仅允许所有者写入。
 
 ```bash
-version=0.3.1
+version=0.4.0
 package=qcopilots-websearch-$version
 sudo apt install "./${package}_${version}_amd64.deb"
 sudo systemctl status "$package.service"
@@ -46,7 +75,7 @@ docker compose --env-file .env up -d
 
 仅 Caddy 使用主机网络，因此它能访问服务的回环监听器。SearXNG 映射至 `127.0.0.1:8888`，Valkey 只在 Compose 内部网络可访问。Caddy 对外提供 HTTPS API，它自身的存活检查使用回环端口 8090。自动申请证书需要公网 DNS 和入站 80、443 端口。服务自身的控制端点保持在本地。
 
-在管理页的“搜索设置”中选择 SearXNG，将端点设为 `http://127.0.0.1:8888/search`。在 `business.allowed_hosts` 中加入实际的外部主机名及所用端口，例如 `search.example.org` 和 `search.example.org:443`。使用 QCopilots WebUI 时，将准确的 `Origin` 值 `https://chat.vastarmorai.com` 加入 `business.origins`。保留回环绑定，以及本地客户端所需的准确主机和端口。源地址末尾省略斜杠。
+在管理页的“搜索设置”中选择 SearXNG，将端点设为 `http://127.0.0.1:8888/search`。在 `business.allowed_hosts` 中加入实际的外部主机名及所用端口，例如 `search.example.org` 和 `search.example.org:443`，将 `business.public_url` 设为 `https://search.example.org/mcp`。保留回环绑定，以及本地客户端所需的准确主机和端口。QCopilots 和其他网页均凭业务 Bearer 接入，无需单独登记网页域名。
 
 为每个集成方或团队成员分配独立的客户端身份及授权码。QGIS 在 MCP Servers 页面填写该业务 Bearer。修改监听配置后，使用目标版本的服务账号检查配置，再重启该版本。
 
@@ -56,7 +85,7 @@ sudo -u "$account" "/opt/$package/bin/qcopilots-websearch" --CheckConfig
 sudo systemctl restart "$package.service"
 ```
 
-Caddy 原样转发客户端的 `Authorization`、`Host` 和 `Origin`，由原生服务验证客户端凭据。保留上游请求的默认取消行为，避免添加会改变客户端断开时取消行为的 `flush_interval -1`。原生服务会拒绝配置中未允许的 `Origin` 和 `Host`。原生服务监听器、Caddy 健康检查监听器和 SearXNG 均应保持在外部主机无法直接访问的范围内。
+Caddy 原样转发客户端的 `Authorization`、`Host` 和 `Origin`，由原生服务验证客户端凭据。保留上游请求的默认取消行为，避免添加会改变客户端断开时取消行为的 `flush_interval -1`。原生服务会拒绝配置中未允许的 Host，以及格式不合法的 Origin。原生服务监听器、Caddy 健康检查监听器和 SearXNG 均应保持在外部主机无法直接访问的范围内。
 
 本私有后端模板关闭了 SearXNG 自带的限流器。SearXNG 作为内部服务运行。如需单独对外开放，应为其设计身份验证、限流和代理地址策略。`compose.yml` 固定了容器镜像摘要。更新镜像时应重新执行验收。
 
@@ -67,14 +96,14 @@ MSI 安装 `QCopilotsWebSearch-<version>` 系统服务，运行账号为虚拟�
 如需改用其他目录，请在以管理员身份打开的命令提示符中设置 `INSTALL_ROOT`。程序及其 `bin\data` 目录均位于指定位置。请为不同版本选择各自的安装目录。
 
 ```cmd
-msiexec.exe /i "C:\Downloads\QCopilots-WebSearch-0.3.1-win64.msi" INSTALL_ROOT="C:\Program Files\QCopilots-WebSearch-Custom-0.3.1"
+msiexec.exe /i "C:\Downloads\QCopilots-WebSearch-0.4.0-win64.msi" INSTALL_ROOT="C:\Program Files\QCopilots-WebSearch-Custom-0.4.0"
 ```
 
 本机交互式用户可以读取 `admin.token`，用于登录设置页并管理搜索设置。运行配置、客户端令牌和搜索源密钥各自受文件 ACL 保护。在目标版本安装目录的 `bin` 下运行 `qcopilots-websearch.exe --SettingsUrl`，即可为正在运行的服务生成一次性链接。
 
 请以管理员身份运行 MSI，并阅读安装程序显示的 Apache 许可条款和 Microsoft 运行库条款。安装包的签名状态以发布说明为准，未特别说明时为未签名。在 Windows 的“已安装的应用”中按版本选择要卸载的 MSI。卸载会移除该版本的程序文件和服务，并保留配置和数据。
 
-将便携 ZIP 解压到私有可写目录，每个便携实例使用独立的解压目录。例如，将 `QCopilots-WebSearch-0.3.1-win64.zip` 下载到 `C:\Softwares\QCopilots-WebSearch`，解压后确认 `C:\Softwares\QCopilots-WebSearch\QCopilots-WebSearch-0.3.1-win64\bin\qcopilots-websearch.exe` 存在，避免重复嵌套同名目录。在解压目录运行 `.\bin\qcopilots-websearch.exe`，即可在前台启动服务。
+将便携 ZIP 解压到私有可写目录，每个便携实例使用独立的解压目录。例如，将 `QCopilots-WebSearch-0.4.0-win64.zip` 下载到 `C:\Softwares\QCopilots-WebSearch`，解压后确认 `C:\Softwares\QCopilots-WebSearch\QCopilots-WebSearch-0.4.0-win64\bin\qcopilots-websearch.exe` 存在，避免重复嵌套同名目录。在解压目录运行 `.\bin\qcopilots-websearch.exe`，即可在前台启动服务。
 
 首次启动会创建 `bin\data\runtime.json`，并生成客户端令牌和管理令牌。监听器准备就绪后，终端显示实际的业务、MCP、控制、设置地址、配置和数据路径，以及登录方法。默认业务端口为 3181，控制端口为 3182，设置端口为 3183。若首次初始化选用了其他端口，以启动信息和运行配置为准。服务运行期间，从另一个终端执行 `.\bin\qcopilots-websearch.exe --SettingsUrl`，打开该实例的设置页。
 
@@ -102,7 +131,7 @@ Invoke-RestMethod -Uri 'https://search.example.org/v1/status' -Headers @{ Author
 
 在解压目录运行 `.\bin\qcopilots-websearch.exe --SettingsUrl --Open` 即可打开本机设置页。
 
-`business.public_url` 是可选的展示配置，修改后重启服务生效。只接受完整 HTTPS 地址和精确的 `/mcp` 路径，不接受用户信息、查询或片段。它不会自动添加 Host 白名单、设置浏览器 Origin 或创建隧道路由。未设置时，设置页显示实际本地业务地址，不能据此声称公网已可达。使用 HTTPS 回源时，也应明确设置相同的公网 MCP 地址。
+`business.public_url` 是展示配置，新生成文件默认写入 `https://web-search.vastarmorai.com/mcp`，修改后重启服务生效。只接受完整 HTTPS 地址和精确的 `/mcp` 路径，不接受用户信息、查询或片段。它不会自动添加 Host 白名单、放宽授权或创建隧道路由。省略该字段时，设置页显示实际本地业务地址。显示任何地址均不能证明公网已可达，仍须执行上面的连接检查。使用 HTTPS 回源时，也应设置实际的公网 MCP 地址。
 
 #### 可选的 HTTPS 回源
 
@@ -118,7 +147,7 @@ Invoke-RestMethod -Uri 'https://search.example.org/v1/status' -Headers @{ Author
     "host": "127.0.0.1",
     "port": 3181,
     "allowed_hosts": ["127.0.0.1:3181", "search.example.org", "search.example.org:443"],
-    "origins": [],
+    "public_url": "https://search.example.org/mcp",
     "tls": {
       "certificate_chain_file": "tls/origin-cert.pem",
       "private_key_file": "tls/origin-key.pem"
@@ -146,7 +175,7 @@ Invoke-RestMethod -Uri 'https://search.example.org/v1/status' -Headers @{ Author
   Select-Object contract_version,service
 ```
 
-公网出现 502 时，先在报错副本上运行源站检查，核对监听端口、HTTP 或 HTTPS、证书有效期、SAN 和 CA 文件访问权限。401 表示需要核对该实例的业务令牌，403 时检查实际的 Host 和浏览器 Origin。仅访问公网根路径无法验收业务接口。设置页面使用独立的管理监听器。在源站另开终端运行 `.\bin\qcopilots-websearch.exe --SettingsUrl --Open` 可直接打开设置页。单独使用 `--SettingsUrl` 会打印链接，将输出粘贴到浏览器地址栏，两分钟内可登录一次。
+公网出现 502 时，先在报错副本上运行源站检查，核对监听端口、HTTP 或 HTTPS、证书有效期、SAN 和 CA 文件访问权限。401 表示需要核对该实例的业务令牌，403 时检查实际 Host 是否在允许列表中，以及浏览器 Origin 是否为合法的单一 HTTP(S) 来源。仅访问公网根路径无法验收业务接口。设置页面使用独立的管理监听器。在源站另开终端运行 `.\bin\qcopilots-websearch.exe --SettingsUrl --Open` 可直接打开设置页。单独使用 `--SettingsUrl` 会打印链接，将输出粘贴到浏览器地址栏，两分钟内可登录一次。
 
 ##### 为测试源站签发证书
 
@@ -200,7 +229,7 @@ CLI 默认客户端 ID 为 `local`。对于新 ID，命令会添加条目。对�
 对于 DEB 安装，以管理员身份生成凭据，再用该版本的服务账号检查配置并重启服务。
 
 ```bash
-version=0.3.1
+version=0.4.0
 package=qcopilots-websearch-$version
 executable="/opt/$package/bin/qcopilots-websearch"
 config_path="/opt/$package/bin/data/runtime.json"
@@ -213,7 +242,7 @@ sudo systemctl restart "$package.service"
 对于 MSI 安装，将 `installRoot` 设为安装程序实际使用的目录，然后在以管理员身份打开的 PowerShell 中运行以下命令。便携版请指定其运行配置路径，并省略 `--ServiceName`。
 
 ```powershell
-$version = '0.3.1'
+$version = '0.4.0'
 $serviceName = "QCopilotsWebSearch-$version"
 $installRoot = Join-Path $env:ProgramFiles "QCopilots-WebSearch-$version"
 $executable = Join-Path $installRoot 'bin\qcopilots-websearch.exe'
@@ -227,7 +256,7 @@ Restart-Service -Name $serviceName
 
 ## 连接远程客户端
 
-使用目标版本业务监听器对应的 HTTPS 端点。在 `business.allowed_hosts` 中加入该端点准确的主机和端口。客户端从浏览器直接连接时，还要将页面的准确源地址加入 `business.origins`。HTTPS 端点负责将客户端的 Bearer 凭据转发给 QCopilots-WebSearch。
+使用目标版本业务监听器对应的 HTTPS 端点。在 `business.allowed_hosts` 中加入该端点准确的主机和端口。客户端从任意合法 HTTP(S) 网页直接连接时，无需登记页面源地址。HTTPS 端点负责将客户端的 Bearer 凭据转发给 QCopilots-WebSearch，服务对实际业务请求进行鉴权。
 
 在客户端的 MCP 服务器设置中输入 `https://search.example.org/mcp`，并将示例主机名替换为服务的实际主机名。启用 **Authorization**，在 **Bearer** 字段中粘贴授权码。确认客户端可列出四个工具，并能调用 `web_search_status`。[QGIS 接入](#qgis) 使用相同的公网 MCP 地址和授权码。
 
@@ -258,13 +287,15 @@ Restart-Service -Name $serviceName
 
 插件默认将这些请求转发到 `https://web-search.vastarmorai.com/mcp`。初始化、工具列表、工具调用、取消和会话关闭均使用远端 MCP 接口，客户端 Bearer 随请求传递。正常使用不需要 `QCOPILOTS_WEBSEARCH_BACKEND_TOKEN`、令牌文件、额外后端配置文件或搜索审批。客户端应保管授权码，插件不会用本机管理凭据替代它。
 
+也可以在页面中新增自定义 Server URL，直接填写公网 `https://web-search.vastarmorai.com/mcp` 并启用业务 Bearer。此时浏览器直接发出请求，由公网服务处理 CORS。使用 Manager 虚拟地址时，请求经 QGIS 原生桥和本机插件转发，插件不把页面的 Origin 发送到公网。两种路径均要求公网 Host 被允许且 Bearer 有效，`business.public_url` 只影响设置页展示，不决定实际请求发往哪里。
+
 部署者使用其他公网域名时，可以通过已有的 `QCOPILOTS_WEBSEARCH_CONFIG` 或 `<QCOPILOTS_HOME>/web_search/config.json` 将 `backend_url` 指向实际的 HTTPS `/mcp` 地址。旧配置中没有路径的 HTTPS 源地址会在内存中补上 `/mcp`，无需修改旧文件。默认公网地址不需要这一额外配置。
 
 <a name="start-and-troubleshoot"></a>
 
 ### 外部浏览器与故障排查
 
-使用外部浏览器测试时，在启动 QGIS 前设置 `QCOPILOTS_EXTERNAL_BROWSER_ACCESS=ON`。页面使用本机插件的 MCP 地址 `http://127.0.0.1:48218/mcp` 和业务 Bearer，请求仍由插件转发到公网 HTTPS 地址。这一回环地址属于 QGIS 插件，与原生 WebSearch 的 3181 业务端口不同。
+使用外部浏览器测试时，在启动 QGIS 前设置 `QCOPILOTS_EXTERNAL_BROWSER_ACCESS=ON`。页面使用本机插件的 MCP 地址 `http://127.0.0.1:48218/mcp` 和业务 Bearer，请求仍由插件转发到公网 HTTPS 地址。这一回环地址属于 QGIS 插件，与原生 WebSearch 的 3181 业务端口不同。本机插件仍只接受 Manager 允许的网页来源，公网业务接口的开放 CORS 不改变该本机限制。
 
 Manager 的本机健康检查使用独立的内部凭据，只表示插件 relay 是否运行。公网 WebSearch 离线时，本机健康检查仍可成功，但初始化、工具发现或调用会报告远端故障。原生服务的 `/health/live` 和 `/health/ready` 位于其独立控制监听器，不通过公网业务路由暴露。
 
@@ -273,7 +304,7 @@ Manager 的本机健康检查使用独立的内部凭据，只表示插件 relay
 | 现象 | 检查内容 |
 | --- | --- |
 | 401 或 `unauthorized` | 页面是否开启 Authorization，业务授权码是否存在、已轮换或被删除。CLI 修改需要重启后生效。 |
-| 403 或 `forbidden` | 公网请求的 Host 是否被原生服务允许，浏览器直连时 Origin 是否匹配。 |
+| 403 或 `forbidden` | 公网 Host 是否在允许列表中，公网直连的 Origin 是否为合法 HTTP(S) 来源。连接本机插件时，页面来源仍须被 Manager 允许。 |
 | `backend_unavailable` | 原生服务和 Cloudflared 是否运行，隧道是否指向该实例实际的业务端口。 |
 | 会话或页面不存在 | 请求是否被多个独立源站分流，客户端身份是否被删除重建。 |
 | `timeout` | 原生服务、搜索来源或公网连接是否超时。 |

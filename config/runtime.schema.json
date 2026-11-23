@@ -34,7 +34,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 4096,
-          "description": "Optional public HTTPS MCP endpoint ending exactly in /mcp, without credentials, query or fragment. Management display metadata only. Does not change listener bindings, allowed Hosts or Origins. Restart to apply."
+          "description": "Optional public HTTPS MCP endpoint ending exactly in /mcp, without credentials, query or fragment. New configurations use https://web-search.vastarmorai.com/mcp. Management display metadata only. Does not change listener bindings, allowed Hosts or browser access. Restart to apply."
         },
         "tls": {
           "type": "object",
@@ -68,29 +68,15 @@
           "minItems": 1,
           "maxItems": 20,
           "uniqueItems": true
-        },
-        "origins": {
-          "type": "array",
-          "description": "Browser origins. Accepts exact scheme://host[:port] strings, or an empty list. Empty rejects all browser Origin headers but permits native clients without Origin.",
-          "items": {
-            "type": "string",
-            "description": "Allowed Origin. Accepts one exact HTTP or HTTPS origin without a trailing slash. Only this origin receives CORS access.",
-            "minLength": 1,
-            "maxLength": 300
-          },
-          "maxItems": 20,
-          "uniqueItems": true,
-          "default": []
         }
       },
       "required": [
         "host",
         "port",
-        "allowed_hosts",
-        "origins"
+        "allowed_hosts"
       ],
       "additionalProperties": false,
-      "description": "Business listener for REST and MCP. The optional TLS configuration applies to this listener only."
+      "description": "Business listener for REST and MCP. Browser clients from any valid HTTP or HTTPS origin may connect with their own Bearer credential. There is no business origins allowlist. The optional TLS configuration applies to this listener only."
     },
     "control": {
       "type": "object",

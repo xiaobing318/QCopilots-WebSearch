@@ -3,6 +3,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QStringList>
+#include <QUrl>
 #include <QUuid>
 #include <httplib.h>
 #include <iostream>
@@ -53,6 +54,38 @@ bool contains(const Json &array, const std::string &value, bool insensitive = fa
                                  .compare(QString::fromStdString(value), Qt::CaseInsensitive) == 0
                        : v == value;
   });
+}
+bool validBusinessOrigin(const std::string &origin) {
+  // Browser origins are single ASCII HTTP(S) authorities, not general URLs.
+  // Check the wire value before QUrl can normalize whitespace or escapes.
+  if (origin.empty() || origin.size() > 300 ||
+      std::any_of(origin.begin(), origin.end(), [](unsigned char ch) {
+        return ch <= 0x20 || ch >= 0x7f || ch == '\\' || ch == ',' || ch == '%' || ch == '@';
+      }))
+    return false;
+  const QUrl url(QString::fromStdString(origin), QUrl::StrictMode);
+  if (!url.isValid() || (url.scheme() != "http" && url.scheme() != "https") || url.host().isEmpty() ||
+      !url.userInfo().isEmpty() || !url.path().isEmpty() || url.hasQuery() || url.hasFragment())
+    return false;
+  const auto separator = origin.find("://");
+  if (separator == std::string::npos)
+    return false;
+  const auto colon = origin.rfind(':');
+  const auto bracket = origin.rfind(']');
+  if (colon > separator && (bracket == std::string::npos || colon > bracket)) {
+    if (colon + 1 == origin.size())
+      return false;
+    unsigned int port = 0;
+    for (auto i = colon + 1; i < origin.size(); ++i) {
+      const auto ch = origin[i];
+      if (ch < '0' || ch > '9')
+        return false;
+      port = port * 10 + static_cast<unsigned int>(ch - '0');
+      if (port > 65535)
+        return false;
+    }
+  }
+  return true;
 }
 bool accepts(const std::string &header, const char *mime) {
   for (const auto &part : QString::fromStdString(header).split(',')) {
@@ -235,7 +268,7 @@ struct HttpServer::Impl {
               throw Error("forbidden", "Origin is not allowed.", 403);
             if (req.has_header("Origin")) {
               const auto origin = req.get_header_value("Origin");
-              if (!contains(listener["origins"], origin))
+              if (controls ? !contains(listener["origins"], origin) : !validBusinessOrigin(origin))
                 throw Error("forbidden", "Origin is not allowed.", 403);
               res.set_header("Access-Control-Allow-Origin", origin);
               res.set_header("Vary", "Origin");

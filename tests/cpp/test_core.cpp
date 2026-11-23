@@ -68,8 +68,7 @@ Config config(const QTemporaryDir &dir) {
            {"business",
             {{"host", "127.0.0.1"},
              {"port", 0},
-             {"allowed_hosts", Json::array({"test.local"})},
-             {"origins", Json::array({"https://client.example"})}}},
+             {"allowed_hosts", Json::array({"test.local"})}}},
            {"control",
             {{"host", "127.0.0.1"},
              {"port", 0},
@@ -1503,8 +1502,10 @@ void mcpContractTests() {
 void httpTests() {
   qputenv("QCWS_TEST_CREDENTIAL", QByteArray(64, 'a'));
   QTemporaryDir dir;
-  Service service(config(dir), transport());
-  HttpServer server(service, config(dir));
+  auto httpConfig = config(dir);
+  httpConfig.value["control"]["origins"] = Json::array({"https://control.example"});
+  Service service(httpConfig, transport());
+  HttpServer server(service, httpConfig);
   server.start();
   httplib::Client client("127.0.0.1", server.businessPort());
   client.set_connection_timeout(2);
@@ -1513,16 +1514,73 @@ void httpTests() {
   auto r = client.Get("/v1/status", headers);
   REQUIRE(r && r->status == 200);
   REQUIRE(Json::parse(r->body)["contract_version"] == 1);
+  REQUIRE(!r->has_header("Access-Control-Allow-Origin"));
   r = client.Get("/v1/status", httplib::Headers{{"Host", "test.local"}});
   REQUIRE(r && r->status == 401);
-  auto evil = headers;
-  evil.emplace("Origin", "https://evil.example");
-  r = client.Get("/v1/status", evil);
+  for (const auto *origin : {"https://client.example", "https://another.example:8443", "http://localhost:3000",
+                             "http://127.0.0.1:0", "https://[::1]:8443", "https://xn--bcher-kva.example"}) {
+    auto browser = headers;
+    browser.emplace("Origin", origin);
+    r = client.Get("/v1/status", browser);
+    REQUIRE(r && r->status == 200);
+    REQUIRE(r->get_header_value("Access-Control-Allow-Origin") == origin);
+    REQUIRE(r->get_header_value("Vary") == "Origin");
+    REQUIRE(r->get_header_value("Access-Control-Expose-Headers") == "Mcp-Session-Id");
+    REQUIRE(!r->has_header("Access-Control-Allow-Credentials"));
+    browser.erase("Authorization");
+    r = client.Get("/v1/status", browser);
+    REQUIRE(r && r->status == 401);
+    REQUIRE(r->get_header_value("Access-Control-Allow-Origin") == origin);
+    REQUIRE(r->get_header_value("WWW-Authenticate") == "Bearer");
+    REQUIRE(Json::parse(r->body)["error"]["code"] == "unauthorized");
+    browser.emplace("Authorization", "Bearer invalid");
+    r = client.Get("/v1/status", browser);
+    REQUIRE(r && r->status == 401);
+    REQUIRE(r->get_header_value("Access-Control-Allow-Origin") == origin);
+  }
+  for (const auto *origin : {"", "null", "*", "https://", "https://client.example/", "https://client.example/path",
+                             "https://user@client.example", "https://@client.example", "https://client.example?",
+                             "https://client.example#", "ftp://client.example", "file://client.example",
+                             "https://client.example:", "https://client.example:abc", "https://client.example:-1",
+                             "https://client.example:65536", "https://client.example:99999999999999999999",
+                             "https://[::1]:", "https://[::1]:65536", "https://client.example,https://other.example",
+                             "https://client.example https://other.example", "https://client.\texample",
+                             "https://client.example\\path", "https://%63lient.example"}) {
+    auto browser = headers;
+    browser.emplace("Origin", origin);
+    r = client.Get("/v1/status", browser);
+    REQUIRE(r && r->status == 403);
+    REQUIRE(Json::parse(r->body)["error"]["code"] == "forbidden");
+    REQUIRE(!r->has_header("Access-Control-Allow-Origin"));
+  }
+  auto duplicateOrigin = headers;
+  duplicateOrigin.emplace("Origin", "https://client.example");
+  duplicateOrigin.emplace("Origin", "https://client.example");
+  r = client.Get("/v1/status", duplicateOrigin);
   REQUIRE(r && r->status == 403);
+  REQUIRE(!r->has_header("Access-Control-Allow-Origin"));
+  auto wrongHost = headers;
+  wrongHost.erase("Host");
+  wrongHost.emplace("Host", "other.example");
+  wrongHost.emplace("Origin", "https://client.example");
+  r = client.Get("/v1/status", wrongHost);
+  REQUIRE(r && r->status == 403);
+  REQUIRE(!r->has_header("Access-Control-Allow-Origin"));
   r = client.Options("/mcp", {{"Host", "test.local"},
                               {"Origin", "https://client.example"},
                               {"Access-Control-Request-Method", "POST"}});
   REQUIRE(r && r->status == 204);
+  REQUIRE(r->get_header_value("Access-Control-Allow-Origin") == "https://client.example");
+  REQUIRE(r->get_header_value("Access-Control-Allow-Headers").find("Authorization") != std::string::npos);
+  r = client.Options("/mcp", {{"Host", "test.local"}, {"Origin", "https://another.example"},
+                             {"Access-Control-Request-Method", "DELETE"}});
+  REQUIRE(r && r->status == 204);
+  REQUIRE(r->get_header_value("Access-Control-Allow-Origin") == "https://another.example");
+  r = client.Options("/mcp", {{"Host", "test.local"}, {"Origin", "null"},
+                             {"Access-Control-Request-Method", "POST"}});
+  REQUIRE(r && r->status == 403);
+  r = client.Options("/mcp", {{"Host", "test.local"}});
+  REQUIRE(r && r->status == 403);
   r = client.Post("/v1/search", headers, "{\"query\":\"hello\"}", "application/json");
   REQUIRE(r && r->status == 200);
   r = client.Get("/mcp", headers);
@@ -1572,6 +1630,19 @@ void httpTests() {
   httplib::Client control("127.0.0.1", server.controlPort());
   r = control.Get("/health/live", headers);
   REQUIRE(r && r->status == 200);
+  auto controlBrowser = headers;
+  controlBrowser.emplace("Origin", "https://client.example");
+  r = control.Get("/health/live", controlBrowser);
+  REQUIRE(r && r->status == 403);
+  REQUIRE(!r->has_header("Access-Control-Allow-Origin"));
+  r = control.Options("/health/live", {{"Host", "test.local"}, {"Origin", "https://client.example"},
+                                       {"Access-Control-Request-Method", "GET"}});
+  REQUIRE(r && r->status == 403);
+  controlBrowser.erase("Origin");
+  controlBrowser.emplace("Origin", "https://control.example");
+  r = control.Get("/health/live", controlBrowser);
+  REQUIRE(r && r->status == 200);
+  REQUIRE(r->get_header_value("Access-Control-Allow-Origin") == "https://control.example");
   server.stop();
   qunsetenv("QCWS_TEST_CREDENTIAL");
 }

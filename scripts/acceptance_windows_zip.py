@@ -249,6 +249,9 @@ def verify_portable(executable, folder, cwd, env):
              'Portable startup changed the fixed default ports')
         need(all(config[role]['host'] == '127.0.0.1' for role in ('business', 'control')),
              'Portable service is not restricted to loopback')
+        need(config['business']['allowed_hosts'] == ['127.0.0.1:3181', 'web-search.vastarmorai.com']
+             and config['business']['public_url'] == 'https://web-search.vastarmorai.com/mcp'
+             and 'origins' not in config['business'], 'Portable business defaults are incorrect')
         need((data / 'state').is_dir() and re.fullmatch(r'[a-f0-9]{64}', local),
              'Portable startup did not initialize executable-relative data')
         token_hashes = {data / name: digest(data / name) for name in ('admin.token', 'client.token')}

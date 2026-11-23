@@ -44,6 +44,7 @@ def verify(executable, openssl, root):
 
     config["business"]["tls"] = {"certificate_chain_file": str(chain.relative_to(root)),
                                  "private_key_file": str(key.relative_to(root))}
+    config["business"].pop("public_url", None)
     fixture.write(config)
     require(fixture.command("--CheckConfig").returncode == 0, "Valid TLS configuration was rejected")
     trusted = ssl.create_default_context(cafile=str(root / "ca.pem"))

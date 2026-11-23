@@ -134,7 +134,7 @@ def main():
             authority,origin = f'{hostname}:{hp}','https://client-'+secrets.token_hex(8)+'.test'
             tls,ca = certificates(args.OpenSSL,folder,hostname)
             config = json.loads((ROOT/'config/runtime.json').read_text('utf-8'))
-            config['business'] = {'host':'127.0.0.1','port':bp,'allowed_hosts':[authority],'origins':[origin]}
+            config['business'] = {'host':'127.0.0.1','port':bp,'allowed_hosts':[authority]}
             config['control'] = {'host':'127.0.0.1','port':cp,'allowed_hosts':[f'127.0.0.1:{cp}'],'origins':[]}
             config["admin"] = {"enabled": True, "port": ap, "token_env": "QCWS_CADDY_ADMIN_TOKEN"}
             config['clients'] = [{'id':'caddy-contract','token_env':'QCWS_CADDY_TEST_TOKEN'}]
@@ -214,7 +214,7 @@ def main():
             for credential in (None,secrets.token_hex(32)):
                 status,headers,_ = remote('/v1/search',bearer=credential,payload=payload)
                 require(status == 401 and headers.get('www-authenticate') == 'Bearer','authentication')
-            status,headers,_ = remote('/v1/search',bearer=bearer,payload=payload,headers={'Origin':origin+'.invalid'})
+            status,headers,_ = remote('/v1/search',bearer=bearer,payload=payload,headers={'Origin':origin+'/invalid'})
             require(status == 403 and 'access-control-allow-origin' not in headers,'bad_origin')
             require(remote(bearer=bearer,headers={'Host':f'{hostname}:{cp}'})[0] == 403,'host_validation')
             require(fixture.calls == 0,'rejected_request_reached_provider')
@@ -224,7 +224,7 @@ def main():
             status,headers,_ = remote('/v1/search',method='OPTIONS',headers={'Origin':origin,
                 'Access-Control-Request-Method':'POST','Access-Control-Request-Headers':'authorization,content-type'})
             require(status == 204 and headers.get('access-control-allow-origin') == origin,'allowed_preflight')
-            require(remote('/v1/search',method='OPTIONS',headers={'Origin':origin+'.invalid',
+            require(remote('/v1/search',method='OPTIONS',headers={'Origin':origin+'/invalid',
                 'Access-Control-Request-Method':'POST'})[0] == 403,'bad_preflight')
             status,_,raw = remote('/v1/search',bearer=bearer,payload={'query':'success-'+secrets.token_hex(8),'limit':1})
             value = json.loads(raw)

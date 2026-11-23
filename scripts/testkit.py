@@ -170,8 +170,10 @@ def start_process(executable, template, folder, fixture, tokens, ttl):
             ports = [sock.getsockname()[1] for sock in sockets]
             config = copy.deepcopy(template)
             for name, port in zip(("business", "control"), ports):
-                config[name] = {"host": "127.0.0.1", "port": port, "origins": [],
+                config[name] = {"host": "127.0.0.1", "port": port,
                                 "allowed_hosts": [f"127.0.0.1:{port}"]}
+                if name == "control":
+                    config[name]["origins"] = []
             config["clients"] = [{"id": f"fixture-{i}", "token_env": f"QCWS_FIXTURE_TOKEN_{i}"}
                                  for i in range(5)]
             config["admin"] = {"enabled": True, "port": ports[2], "token_env": "QCWS_FIXTURE_ADMIN_TOKEN"}

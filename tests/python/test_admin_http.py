@@ -11,6 +11,9 @@ import time
 from urllib.parse import urlsplit
 
 
+GENERATED_PUBLIC_URL = object()
+
+
 def ports():
     sockets = [socket.socket() for _ in range(3)]
     try:
@@ -251,12 +254,16 @@ def verify_http(executable, public_url):
         base = [executable, "--ConfigPath", str(runtime)]
         subprocess.run([*base, "--InitializeConfig"], check=True, capture_output=True, timeout=5)
         config = json.loads(runtime.read_text(encoding="utf-8"))
+        assert config["business"]["public_url"] == "https://web-search.vastarmorai.com/mcp"
         business, control, admin = ports()
         for label, port in (("business", business), ("control", control)):
             config[label].update(port=port, allowed_hosts=[f"127.0.0.1:{port}"])
         config["admin"] = {"enabled": True, "port": admin}
-        if public_url is not None:
+        if public_url is None:
+            config["business"].pop("public_url")
+        elif public_url is not GENERATED_PUBLIC_URL:
             config["business"]["public_url"] = public_url
+        advertised_url = config["business"].get("public_url")
         runtime.write_text(json.dumps(config), encoding="utf-8")
         if public_url is None:
             verify_public_url_configuration(base, runtime, config)
@@ -276,13 +283,13 @@ def verify_http(executable, public_url):
                         time.sleep(0.1)
                 else:
                     raise RuntimeError("Administration listener did not start")
-                browser(admin, executable, runtime, token, public_url or f"http://127.0.0.1:{business}/mcp")
+                browser(admin, executable, runtime, token, advertised_url or f"http://127.0.0.1:{business}/mcp")
                 business_token = (root / "client.token").read_text(encoding="ascii").strip()
                 headers = {"Authorization": f"Bearer {business_token}", "Content-Type": "application/json"}
                 assert request(business, "GET", "/v1/status", headers)[2]["settings"]["search_enabled"] is False
-                if public_url is not None:
+                if advertised_url is not None:
                     assert request(business, "GET", "/v1/status",
-                                   headers | {"Host": urlsplit(public_url).netloc})[0] == 403, \
+                                   headers | {"Host": urlsplit(advertised_url).netloc})[0] == 403, \
                         "Endpoint display metadata silently expanded the business Host allowlist"
                 status, _, body = request(business, "POST", "/v1/search", headers, {"query": "QGIS"})
                 assert status == 403 and body["error"]["code"] == "tool_disabled"
@@ -302,7 +309,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--Executable", required=True)
     args = parser.parse_args()
-    for public_url in (None, "https://search.example.test/mcp"):
+    for public_url in (GENERATED_PUBLIC_URL, None, "https://search.example.test/mcp"):
         verify_http(args.Executable, public_url)
 
 

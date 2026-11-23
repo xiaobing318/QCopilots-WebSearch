@@ -2,9 +2,11 @@
 
 # 版本 1 接口
 
-所有业务端点均要求提供 `Authorization: Bearer <client-token>`。
-`Bearer` 鉴权方案名不区分大小写。每个客户端都有独立身份。请求的 Host 和浏览器的 Origin 必须与配置项完全匹配。
-原生客户端可以省略 Origin。凭据通过请求头传递。远程客户端使用 HTTPS 并验证服务端证书。
+所有实际业务请求均要求提供 `Authorization: Bearer <client-token>`。
+`Bearer` 鉴权方案名不区分大小写。每个客户端都有独立身份。请求的 Host 必须与 `business.allowed_hosts` 中的条目匹配。
+任意合法 HTTP(S) 网页均可携带业务 Bearer 接入，不再提供 `business.origins` 配置。带 Origin 的请求必须提供单一合法的 HTTP(S) 来源，不能是 `null`、多值或重复头，也不能包含用户信息、路径、查询或片段。原生和服务端客户端可以省略 Origin。远程客户端使用 HTTPS 并验证服务端证书。
+
+浏览器 CORS 预检不要求 Bearer，预检成功不代表取得业务授权。服务为合法网页来源返回对应的 `Access-Control-Allow-Origin` 和 `Vary: Origin`，允许业务接口所需的请求方法和头，并暴露 MCP 会话等响应头。实际业务请求仍验证 Bearer，业务接口不使用 Cookie 凭据，也不返回 `Access-Control-Allow-Credentials`。控制和管理监听器保留各自的 Origin 及鉴权限制。
 
 | 接口 | 请求 |
 | --- | --- |
@@ -18,8 +20,7 @@
 输入 JSON Schema 位于 `contracts/v1`。`contracts/v1/tools.json` 包含各工具的标题、描述和注解，以及 MCP
 `instructions` 文本。MCP `tools/list` 直接发布这些文件定义的内容。为兼容会拒绝顶层
 `oneOf`、`anyOf`、`allOf` 或 `not` 的模型 API，输入 Schema 使用普通的 Draft 7 对象。
-QGIS 适配器内置这五个文件的相同副本，自行检查 `web_open` 的 `url` 和 `page_id` 是否恰好提供一项，并在向指定的
-REST 后端发送请求前校验输入。
+QGIS 插件通过 MCP 转发初始化、工具发现和工具调用，工具定义及输入校验由远端服务负责。
 
 <a name="search"></a>
 
@@ -166,7 +167,7 @@ REST 错误返回对应的 HTTP 状态码，以及以下格式的响应体。
 | --- | --- | --- | --- |
 | `invalid_argument` | 400 | 否 | 输入违反对应版本的 Schema，或未在 `url` 与 `page_id` 之间恰好选择一项 |
 | `unauthorized` | 401 | 否 | 缺少客户端的独立凭据，或提供的凭据无效 |
-| `forbidden` | 403 | 否 | 请求的 Host 或 Origin 不在配置的允许列表中 |
+| `forbidden` | 403 | 否 | 业务 Host 不在允许列表中，或请求带有不合法的 Origin |
 | `tool_disabled` | 403 | 否 | 搜索或网页读取开关已关闭 |
 | `destination_blocked` | 403 | 否 | 公开资源的获取策略拒绝了目标，包括从 HTTPS 重定向到 HTTP |
 | `page_unavailable` | 404 | 否 | 当前客户端身份无法访问该快照 |
@@ -258,4 +259,4 @@ Invalid Request 后继续处理请求。如果取消消息刚好在对应请求�
 
 请求与响应的 JSON Schema 及错误码见 [contracts/admin/v1](../contracts/admin/v1)。
 
-`mcp_url` 优先使用部署者在运行配置中明确设置的 `business.public_url`。该字段必须是 HTTPS 地址，路径恰为 `/mcp`，不能包含用户信息、查询或片段。未设置时返回实际业务监听器的 HTTP 或 HTTPS 地址，包括绑定端口和 IPv6 方括号。该值只是连接地址元数据，不会根据 Host 白名单推断公网地址，也不会进行网络探测或改变授权、Host 和 Origin 校验。
+`mcp_url` 优先使用运行配置中的 `business.public_url`，新生成配置默认写入 `https://web-search.vastarmorai.com/mcp`。该字段必须是 HTTPS 地址，路径恰为 `/mcp`，不能包含用户信息、查询或片段。省略时返回实际业务监听器的 HTTP 或 HTTPS 地址，包括绑定端口和 IPv6 方括号。该值只是连接地址元数据，不会根据 Host 白名单推断公网地址，也不会进行网络探测、创建路由或改变授权、Host 和 Origin 格式校验。显示公网地址不代表该实例已经部署在公网。
