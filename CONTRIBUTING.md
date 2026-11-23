@@ -10,7 +10,7 @@ or machine-specific build paths. Keep generated reports and review archives out
 of version control. Keep dependency versions and verification hashes
 together. Changes to dependency versions require both platform builds.
 
-Inputs and outputs shared by REST, MCP and the QGIS adapter are a versioned
+Inputs and outputs shared by the MCP transports and the QGIS adapter are a versioned
 contract. Update canonical schemas, adapter copies, interface documentation and
 contract tests and SHA256SUMS together. Do not add test-only bypasses to public-fetch protections.
 Prefer injected transports, temporary directories, dynamic ports and controllable

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Process tests, including stdout pipes that the parent deliberately never drains."""
 import argparse
+from contextlib import contextmanager, ExitStack
 import http.client
 import json
 import os
@@ -9,13 +10,110 @@ import secrets
 import socket
 import subprocess
 import tempfile
+import threading
 import time
+
+
+VERSIONS = ("2025-06-18", "2025-11-25")
+LEGACY_STDIO_VERSION = "2024-11-05"
+CONTRACTS = Path(__file__).resolve().parents[2] / "contracts" / "v1"
 
 
 def require(condition, message):
     # Explicit checks keep working under python -O, unlike assert.
     if not condition:
         raise RuntimeError(message)
+
+
+def initialize(version):
+    return {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": version, "capabilities": {},
+        "clientInfo": {"name": "wire-contract", "version": "1"}}}
+
+
+@contextmanager
+def stdio_peer(executable, runtime):
+    with tempfile.TemporaryFile() as errors, subprocess.Popen(
+            [str(Path(executable).resolve(strict=True)), "--ConfigPath", str(runtime), "--Stdio"], cwd=runtime.parent,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0) as process:
+        # A blocking readline has no portable pipe timeout on Windows.
+        deadline = threading.Timer(20, process.kill)
+        deadline.start()
+        try:
+            def exchange(message):
+                process.stdin.write((json.dumps(message) + "\n").encode("utf-8"))
+                process.stdin.flush()
+                if "id" not in message:
+                    return None
+                line = process.stdout.readline(1024 * 1024 + 1)
+                require(line.endswith(b"\n") and len(line) <= 1024 * 1024, "Invalid or missing stdio frame")
+                reply = json.loads(line)
+                require(reply.get("jsonrpc") == "2.0" and reply.get("id") == message["id"],
+                        "Stdio reply did not match its request")
+                return reply
+
+            yield exchange
+            process.stdin.close()
+            require(process.wait(timeout=5) == 0, "Stdio failed to exit normally after EOF")
+            require(not process.stdout.read(), "Stdio emitted unexpected output after its last reply")
+        finally:
+            deadline.cancel()
+            if process.poll() is None:
+                process.kill()
+            deadline.join()
+
+
+def check_tool_wire(exchange, version):
+    legacy = version == LEGACY_STDIO_VERSION
+    exchange({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    listing = exchange({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]
+    expected = []
+    for metadata in json.loads((CONTRACTS / "tools.json").read_text("utf-8"))["tools"]:
+        entry = {key: metadata[key] for key in ("name", "description")} if legacy else dict(metadata)
+        entry["inputSchema"] = json.loads((CONTRACTS / (entry["name"] + ".schema.json")).read_text("utf-8"))
+        expected.append(entry)
+    require(listing == {"tools": expected}, f"Incorrect tool inventory or metadata for {version}")
+
+    for request_id, name, failed in ((3, "web_search_status", False), (4, "web_search", True)):
+        result = exchange({"jsonrpc": "2.0", "id": request_id, "method": "tools/call",
+                           "params": {"name": name, "arguments": {}}})["result"]
+        keys = {"content", "isError"} if legacy else {"content", "isError", "structuredContent"}
+        require(set(result) == keys and result["isError"] is failed, f"Incorrect {version} {name} result")
+        content = result["content"]
+        require(len(content) == 1 and set(content[0]) == {"type", "text"} and content[0]["type"] == "text",
+                f"Missing {version} JSON text for {name}")
+        payload = json.loads(content[0]["text"])
+        if failed:
+            require(payload["error"]["code"] == "invalid_argument", "The tool error lost its business code")
+        else:
+            require(payload["contract_version"] == 1 and payload["service"] == "ready", "Status payload changed")
+        if not legacy:
+            require(result["structuredContent"] == payload, f"Text and structured results differ for {version}")
+
+
+def protocol_versions(executable, template):
+    with tempfile.TemporaryDirectory(prefix="qcws stdio versions ") as temporary, ExitStack() as stack:
+        root = Path(temporary)
+        runtime = root / "runtime.json"
+        config = json.loads(Path(template).read_text(encoding="utf-8"))
+        config["settings"] = {"directory": str(root / "state")}
+        runtime.write_text(json.dumps(config), encoding="utf-8")
+        peers = {}
+        instructions = json.loads((CONTRACTS / "tools.json").read_text("utf-8"))["instructions"]
+        for version in (LEGACY_STDIO_VERSION, *VERSIONS):
+            exchange = stack.enter_context(stdio_peer(executable, runtime))
+            peers[version] = exchange
+            result = exchange(initialize(version))["result"]
+            require(set(result) == {"protocolVersion", "capabilities", "serverInfo", "instructions"} and
+                    result["protocolVersion"] == version and result["capabilities"] == {"tools": {}} and
+                    result["instructions"] == instructions, f"Incorrect stdio initialization for {version}")
+            info = result["serverInfo"]
+            fields = {"name", "version"} if version == LEGACY_STDIO_VERSION else {"name", "version", "icons"}
+            require(set(info) == fields and info["name"] == "qcopilots-websearch" and bool(info["version"]),
+                    f"Incorrect stdio server metadata for {version}")
+        for version, exchange in peers.items():
+            check_tool_wire(exchange, version)
 
 
 def pressure(executable, template, close_reader):
@@ -183,7 +281,8 @@ if __name__ == "__main__":
     parser.add_argument("--Template", required=True)
     args = parser.parse_args()
     subprocess.run([args.CppTests, args.Executable, args.Template], check=True, timeout=70)
+    protocol_versions(args.Executable, args.Template)
     pressure(args.Executable, args.Template, False)
     pressure(args.Executable, args.Template, True)
     startup_summary(args.Executable)
-    print("PASS stdio isolation, shutdown, fixed defaults, startup summary and listener conflicts")
+    print("PASS stdio protocol versions, isolation, shutdown, fixed defaults, startup summary and listener conflicts")

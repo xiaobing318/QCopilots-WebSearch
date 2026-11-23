@@ -17,6 +17,8 @@ struct SearchOutcome {
   Json page;
   std::string source;
   Json warnings = Json::array();
+  // Static source-specific advice returned only when a time range was requested.
+  std::string_view timeRangeWarning = "Time range is an upstream hint, not a strict date filter.";
 };
 
 class SearchProvider {

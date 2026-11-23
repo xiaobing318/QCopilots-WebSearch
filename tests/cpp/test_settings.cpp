@@ -3,10 +3,75 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QLockFile>
 #include <QTcpServer>
 #include <QTemporaryDir>
+#ifndef _WIN32
+#include <QScopeGuard>
+#include <unistd.h>
+#endif
+#include <future>
 #include <iostream>
+#include <qws/client_registry.hpp>
 #include <qws/settings.hpp>
+
+namespace {
+void testAuthorizationDuringRotation() {
+  using namespace std::chrono_literals;
+  QTemporaryDir directory;
+  require(directory.isValid(), "Cannot create temporary registry directory.");
+  auto runtime = qws::defaultConfiguration();
+  runtime["settings"] = {{"directory", directory.path().toStdString()}};
+  qputenv("QCWS_TEST_ROTATION_TOKEN", "old-rotation-token");
+  runtime["clients"] = qws::Json::array({{{"id", "client"}, {"token_env", "QCWS_TEST_ROTATION_TOKEN"}}});
+  QFile file(directory.filePath("runtime.json"));
+  const auto bytes = QByteArray::fromStdString(runtime.dump());
+  require(file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size(), "Cannot write test runtime.");
+  file.close();
+  const auto config = qws::Config::load(file.fileName().toStdString());
+  qws::ClientRegistry clients(config);
+  const auto revision = clients.view().at("revision").get<std::string>();
+  QLockFile external(QString::fromStdString(qws::clientRegistryPath(config)) + ".lock");
+  require(external.tryLock(), "Cannot hold external registry lock.");
+  std::promise<void> starting;
+  auto started = starting.get_future();
+  auto write = std::async(std::launch::async, [&] {
+    starting.set_value();
+    return clients.replace("client", "new-rotation-token", revision);
+  });
+  started.wait();
+  require(write.wait_for(100ms) == std::future_status::timeout, "Rotation must wait for the external writer.");
+  auto read = std::async(std::launch::async, [&] { return clients.authorize("Bearer old-rotation-token"); });
+  const auto readStatus = read.wait_for(1s);
+  external.unlock();
+  require(readStatus == std::future_status::ready && read.get() == "client",
+          "An in-progress registry write must leave current credentials available.");
+  write.get();
+  require(clients.authorize("Bearer new-rotation-token") == "client", "The completed rotation must publish its snapshot.");
+  requireError("unauthorized", [&] { clients.authorize("Bearer old-rotation-token"); });
+}
+#ifndef _WIN32
+void testUnreadableSettingsDirectory() {
+  if (::geteuid() == 0)
+    return; // Root may traverse a directory regardless of its permission bits.
+  QTemporaryDir directory;
+  require(directory.isValid(), "Cannot create settings permission fixture.");
+  qws::Config config{qws::defaultConfiguration(), directory.path().toStdString()};
+  const auto state = directory.filePath("private-state");
+  config.value["settings"]["directory"] = state.toStdString();
+  qws::SettingsStore running(config);
+  running.update({{"tools", {{"search", {{"enabled", false}}}}}}, running.current()->revision);
+  const auto permissions = QFile::permissions(state);
+  require(QFile::setPermissions(state, {}), "Cannot restrict the settings directory.");
+  const auto restore = qScopeGuard([&] { QFile::setPermissions(state, permissions); });
+  requireError("invalid_configuration", [&] { qws::SettingsStore cold(config); });
+  running.reloadIfChanged();
+  require(running.errorDetails()["reason"] == "settings_read_failed" &&
+              running.policy(*running.current())["search_enabled"] == false,
+          "Loss of directory access must preserve the last valid search policy.");
+}
+#endif
+} // namespace
 
 int main(int argc, char **argv) {
   QCoreApplication app(argc, argv);
@@ -153,9 +218,30 @@ int main(int argc, char **argv) {
     qws::SettingsStore reopened(config);
     require(reopened.provider(*reopened.current()).key == "example-provider-key", "The key must persist.");
     require(reopened.clearKey("brave")["providers"]["brave"]["key_set"] == false, "Keys can be cleared.");
+    settings.setKey("perplexity", "changed-in-another-instance");
+    view = reopened.setKey("deepseek", "new-local-key");
+    require(view["providers"]["perplexity"]["key_set"] == true && view["providers"]["brave"]["key_set"] == false,
+            "Updating one provider key must preserve other on-disk changes before the next poll.");
+    reopened.clearKey("perplexity");
+    reopened.clearKey("deepseek");
+    const auto beforeEdit = reopened.current();
+    settings.update({{"tools", {{"open", {{"enabled", false}}}}}}, beforeEdit->revision);
+    requireReason("revision_conflict", "settings_revision_conflict", [&] {
+      reopened.update({{"search_without_asking", true}}, beforeEdit->revision);
+    });
+    reopened.reloadIfChanged();
+    require(reopened.current()->value["tools"]["open"]["enabled"] == false,
+            "Saving before the next poll must preserve a valid external edit.");
+    QLockFile competingWriter(QDir(temporary.path()).filePath("state/settings.json.lock"));
+    require(competingWriter.tryLock(), "Cannot hold another settings writer's lock.");
+    requireReason("revision_conflict", "settings_revision_conflict", [&] {
+      reopened.update(qws::Json::object(), reopened.current()->revision);
+    });
+    competingWriter.unlock();
     QFile invalid(QDir(temporary.path()).filePath("state/settings.json"));
     require(invalid.open(QIODevice::WriteOnly) && invalid.write("{") == 1, "Cannot write fixture.");
     invalid.close();
+    requireReason("invalid_configuration", "settings_json_invalid", [&] { qws::SettingsStore initialLoad(config); });
     reopened.reloadIfChanged();
     require(reopened.error() == "settings_error", "Invalid external edits must be reported.");
     require(reopened.errorDetails()["reason"] == "settings_json_invalid",
@@ -215,6 +301,7 @@ int main(int argc, char **argv) {
     require(invalidSecrets.open(QIODevice::WriteOnly) && invalidSecrets.write("{") == 1,
             "Cannot write invalid secrets fixture.");
     invalidSecrets.close();
+    requireReason("invalid_configuration", "secrets_json_invalid", [&] { qws::SettingsStore initialLoad(config); });
     reopened.reloadIfChanged();
     require(reopened.errorDetails()["reason"] == "secrets_json_invalid",
             "Secret JSON errors must identify the secret store without exposing its contents.");
@@ -255,17 +342,24 @@ int main(int argc, char **argv) {
 
     QTemporaryDir blockedDirectory;
     require(blockedDirectory.isValid(), "Temporary directory required.");
+    qws::Config blockedConfig{qws::defaultConfiguration(), blockedDirectory.path().toStdString()};
+    qws::SettingsStore blocked(blockedConfig);
     QFile blocker(QDir(blockedDirectory.path()).filePath("state"));
     require(blocker.open(QIODevice::WriteOnly) && blocker.write("occupied") == 8,
             "Cannot prepare a blocked settings directory.");
     blocker.close();
-    qws::SettingsStore blocked({qws::defaultConfiguration(), blockedDirectory.path().toStdString()});
+    requireReason("invalid_configuration", "settings_directory_unavailable",
+                  [&] { qws::SettingsStore initialLoad(blockedConfig); });
     requireReason("internal_error", "settings_directory_unavailable", [&] {
       blocked.update(qws::Json::object(), blocked.current()->revision);
     });
     requireReason("internal_error", "secrets_directory_unavailable", [&] {
       blocked.setKey("brave", "example-provider-key");
     });
+    testAuthorizationDuringRotation();
+#ifndef _WIN32
+    testUnreadableSettingsDirectory();
+#endif
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';
     return 1;

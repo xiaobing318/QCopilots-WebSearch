@@ -16,13 +16,11 @@ import tempfile
 import threading
 import time
 
-from test_admin_http import ports, request
+from mcp_http_fixture import INITIALIZE, PROTOCOL_VERSION, mcp_probe, ports, request
 
 
 HOST = "search.example.test"
 ORIGIN = "https://chat.example.test"
-PROTOCOL_VERSION = "2025-06-18"
-PUBLIC_PATH = re.compile(r"^/(mcp|v1/(status|search|open|find))$")
 
 
 def require(condition, message):
@@ -52,7 +50,7 @@ def runtime_access(path):
 
 class BusinessProxy(BaseHTTPRequestHandler):
     def forward(self):
-        if not PUBLIC_PATH.fullmatch(self.path.partition("?")[0]):
+        if self.path.partition("?")[0] != "/mcp":
             self.send_error(404)
             return
         payload = self.rfile.read(int(self.headers.get("Content-Length", "0"))) or None
@@ -122,13 +120,20 @@ class Fixture:
         return subprocess.run([*base, *options], input=user_input, capture_output=True,
                               text=True, encoding="utf-8", env=self.env, timeout=8)
 
-    def public(self, method, path, token=None, headers=None, body=None):
+    def headers(self, token=None):
         forwarded = {"Host": HOST, "Origin": ORIGIN}
-        if body is not None:
-            forwarded["Content-Type"] = "application/json"
         if token is not None:
             forwarded["Authorization"] = f"Bearer {token}"
+        return forwarded
+
+    def public(self, method, path, token=None, headers=None, body=None):
+        forwarded = self.headers(token)
+        if body is not None:
+            forwarded["Content-Type"] = "application/json"
         return request(self.proxy_port, method, path, forwarded | (headers or {}), body)
+
+    def probe(self, token, headers=None):
+        return mcp_probe(self.proxy_port, self.headers(token) | (headers or {}))
 
     @contextmanager
     def running(self, origin_tls=None):
@@ -238,18 +243,18 @@ def verify_draft(fixture):
 
 
 def verify_business(fixture, token):
-    status, response_headers, value = fixture.public("GET", "/v1/status", token)
-    require(status == 200 and value["contract_version"] == 1, "Bearer REST status failed")
+    status, response_headers, value = fixture.probe(token)
+    require(status == 200 and value["result"]["protocolVersion"] == PROTOCOL_VERSION, "Bearer MCP negotiation failed")
     require(response_headers.get("Access-Control-Allow-Origin") == ORIGIN, "Allowed Origin was not echoed")
     for absent_or_invalid in (None, secrets.token_hex(32), digest(token)):
-        status, response_headers, _ = fixture.public("GET", "/v1/status", absent_or_invalid)
+        status, response_headers, _ = fixture.probe(absent_or_invalid)
         require(status == 401 and response_headers.get("WWW-Authenticate") == "Bearer" and
                 response_headers.get("Access-Control-Allow-Origin") == ORIGIN,
                 "The listener accepted a missing or invalid credential")
-    require(fixture.public("GET", "/v1/status", token, {"Host": "wrong.example.test"})[0] == 403,
+    require(fixture.probe(token, {"Host": "wrong.example.test"})[0] == 403,
             "The business listener accepted an unconfigured public Host")
     for origin in ("https://another-product.example.test", "http://localhost:3000"):
-        status, response_headers, _ = fixture.public("GET", "/v1/status", token, {"Origin": origin})
+        status, response_headers, _ = fixture.probe(token, {"Origin": origin})
         require(status == 200 and response_headers.get("Access-Control-Allow-Origin") == origin and
                 response_headers.get("Vary") == "Origin" and
                 "Access-Control-Allow-Credentials" not in response_headers,
@@ -257,17 +262,13 @@ def verify_business(fixture, token):
     for origin in ("", "null", "*", "https://chat.example.test/", "https://user@chat.example.test",
                    "https://chat.example.test?", "https://chat.example.test#", "file://example.test",
                    "https://chat.example.test:65536", "https://one.test https://two.test"):
-        require(fixture.public("GET", "/v1/status", token, {"Origin": origin})[0] == 403,
+        require(fixture.probe(token, {"Origin": origin})[0] == 403,
                 "The business listener accepted an invalid Origin")
     require(request(fixture.control, "GET", "/health/live", {
         "Authorization": f"Bearer {token}", "Origin": ORIGIN})[0] == 403,
         "Opening business CORS also opened the control listener")
     for path in ("/health/live", "/health/ready", "/metrics", "/settings/", "/admin/api/v1/settings", "/mcp/"):
         require(fixture.public("GET", path, token)[0] == 404, "The proxy exposed a path outside the business allowlist")
-    for path in ("/v1/search", "/v1/open", "/v1/find"):
-        status, _, value = fixture.public("POST", path, token, body={"unexpected": True})
-        require(status == 400 and value["error"]["code"] == "invalid_argument",
-                "The forwarded REST business route did not reach tool validation")
 
     for origin in (ORIGIN, "https://another-product.example.test"):
         verify_browser_mcp(fixture, token, origin)
@@ -285,13 +286,9 @@ def verify_browser_mcp(fixture, token, origin):
             "Browser MCP preflight failed")
 
     headers = {"Origin": origin, "Accept": "application/json, text/event-stream"}
-    init = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-        "protocolVersion": PROTOCOL_VERSION, "capabilities": {},
-        "clientInfo": {"name": "proxy-fixture", "version": "1"},
-    }}
-    require(fixture.public("POST", "/mcp", headers=headers, body=init)[0] == 401,
+    require(fixture.public("POST", "/mcp", headers=headers, body=INITIALIZE)[0] == 401,
             "MCP initialization did not require a Bearer credential")
-    status, response_headers, value = fixture.public("POST", "/mcp", token, headers, init)
+    status, response_headers, value = fixture.public("POST", "/mcp", token, headers, INITIALIZE)
     session = response_headers.get("Mcp-Session-Id")
     require(status == 200 and session and value["result"]["protocolVersion"] == PROTOCOL_VERSION and
             response_headers.get("Access-Control-Expose-Headers", "").lower() == "mcp-session-id",
@@ -313,6 +310,14 @@ def verify_browser_mcp(fixture, token, origin):
     })
     require(status == 200 and value["result"]["structuredContent"]["contract_version"] == 1,
             "Browser MCP status call failed")
+    for req_id, tool in enumerate(("web_search", "web_open", "web_find"), 4):
+        status, _, value = fixture.public("POST", "/mcp", token, headers, {
+            "jsonrpc": "2.0", "id": req_id, "method": "tools/call",
+            "params": {"name": tool, "arguments": {"unexpected": True}},
+        })
+        result = value["result"]
+        require(status == 200 and result["isError"] and result["structuredContent"]["error"]["code"] == "invalid_argument",
+                f"{tool} did not return an MCP input validation error")
     require(fixture.public("DELETE", "/mcp", token, headers)[0] == 204, "MCP session cleanup failed")
 
 
@@ -352,13 +357,13 @@ def verify_rotation(fixture):
 
     with fixture.running():
         verify_business(fixture, token)
-        require(fixture.public("GET", "/v1/status", fixture.environment_token)[0] == 200,
+        require(fixture.probe(fixture.environment_token)[0] == 200,
                 "An environment credential stopped working alongside hash credentials")
         result = fixture.command("--SetToken", "--ClientId", "browser", user_input="\ufeff" + replacement + "\n Y \n")
         require(result.returncode == 0 and replacement not in result.stdout + result.stderr,
                 "Accepted rotation failed or exposed the operator's token")
-        require(fixture.public("GET", "/v1/status", token)[0] == 200 and
-                fixture.public("GET", "/v1/status", replacement)[0] == 401,
+        require(fixture.probe(token)[0] == 200 and
+                fixture.probe(replacement)[0] == 401,
                 "Rotation changed active credentials before restart")
 
     browser["token_sha256"] = digest(replacement)
@@ -370,8 +375,8 @@ def verify_rotation(fixture):
     require(runtime_access(fixture.runtime) == access, "Rotation changed runtime-file permissions")
     require(runtime_access(fixture.registry) == registry_access, "Rotation changed registry-file permissions")
     with fixture.running():
-        require(fixture.public("GET", "/v1/status", token)[0] == 401 and
-                fixture.public("GET", "/v1/status", replacement)[0] == 200,
+        require(fixture.probe(token)[0] == 401 and
+                fixture.probe(replacement)[0] == 200,
                 "Restart did not apply the credential rotation")
 
     custom_tokens = {"short-one": "a", "short-name": "xbyang", "short-project": "qcopilots-websearch",
@@ -382,7 +387,7 @@ def verify_rotation(fixture):
                 "A custom credential was rejected or exposed in output")
     with fixture.running():
         for custom_token in custom_tokens.values():
-            require(fixture.public("GET", "/v1/status", custom_token)[0] == 200,
+            require(fixture.probe(custom_token)[0] == 200,
                     "A valid custom credential could not authenticate after restart")
 
 

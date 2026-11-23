@@ -1,5 +1,6 @@
 #include <QCryptographicHash>
 #include <QDateTime>
+#include <QScopeGuard>
 #include <QStringDecoder>
 #include <QStringList>
 #include <QTimeZone>
@@ -7,6 +8,7 @@
 #include <QUrlQuery>
 #include <QUuid>
 #include <algorithm>
+#include <map>
 #include <qws/html.hpp>
 #include <qws/service.hpp>
 #include <set>
@@ -100,7 +102,9 @@ Json publishedAt(const Json &item) {
 std::string dedupKey(const QUrl &url) {
   QUrl base = url.adjusted(QUrl::RemoveScheme | QUrl::RemoveFragment | QUrl::RemoveQuery |
                            QUrl::StripTrailingSlash);
-  if (base.port() == 80 || base.port() == 443)
+  const int port = url.port();
+  if ((port == 80 && url.scheme() == QLatin1StringView("http")) ||
+      (port == 443 && url.scheme() == QLatin1StringView("https")))
     base.setPort(-1);
   QString key = base.toString(QUrl::FullyEncoded);
   if (key.endsWith('/')) // StripTrailingSlash keeps a root path "/"
@@ -243,12 +247,6 @@ Json Service::tools() const {
 }
 Json Service::status() const {
   std::lock_guard lock(mutex_);
-  std::size_t waiters = 0;
-  for (const auto &[key, job] : jobs_) {
-    (void)key;
-    std::lock_guard jobLock(job->mutex);
-    waiters += job->waiters;
-  }
   const auto settings = settings_.current();
   const auto fingerprint = settings_.provider(*settings).fingerprint();
   const auto dependency = fingerprint == dependencyFingerprint_
@@ -257,7 +255,7 @@ Json Service::status() const {
   return {{"contract_version", 1},         {"service", closing_ ? "stopping" : "ready"},
           {"provider", dependency},       {"capacity", capacity_},
           {"active_calls", calls_.load()}, {"active_upstream", upstream_.load()},
-          {"search_waiters", waiters}, {"settings", settings_.policy(*settings)}};
+          {"search_waiters", searchWaiters_.load()}, {"settings", settings_.policy(*settings)}};
 }
 Json Service::call(std::string name, const Json &args, std::string principal,
                    std::shared_ptr<CancelToken> token) {
@@ -296,9 +294,12 @@ Json Service::call(std::string name, const Json &args, std::string principal,
 }
 std::string Service::key(const std::string &type, const std::string &principal,
                          const std::string &value, const std::string &fingerprint) const {
+  // Search format 4 corrects result filtering, URL identities and date notices.
+  // Existing page snapshots continue to use their original identity.
+  const bool page = type == "page";
+  const auto parts = Json::array({page ? 3 : 4, page ? "page" : fingerprint, type, principal, value});
   return QCryptographicHash::hash(
-             QByteArray::fromStdString(Json::array({3, type == "page" ? "page" : fingerprint, type, principal, value}).dump()),
-             QCryptographicHash::Sha256)
+             QByteArray::fromStdString(parts.dump()), QCryptographicHash::Sha256)
       .toHex()
       .toStdString();
 }
@@ -397,7 +398,7 @@ Json Service::search(const Json &args, const std::string &principal,
           // Waiters already have the result. The cache write is off their path,
           // and the job stays visible until the write ends so it is not repeated.
           if (!error)
-            storeSearch(cacheKey, job->value);
+            storeSearch(cacheKey, *job);
           {
             std::lock_guard lock(mutex_);
             auto it = jobs_.find(cacheKey);
@@ -412,29 +413,43 @@ Json Service::search(const Json &args, const std::string &principal,
         throw;
       }
     }
+    // Count the caller even if a newer generation later replaces its job in jobs_.
+    ++searchWaiters_;
   }
-  std::unique_lock lock(job->mutex);
-  while (!job->done && !token->stopped())
-    job->cv.wait_for(lock, std::min<Clock::duration>(std::chrono::milliseconds(50),
-                                                     token->deadline - Clock::now()));
-  if (--job->waiters == 0 && !job->done)
-    job->token->cancelled = true;
-  check(token);
-  if (job->error)
-    std::rethrow_exception(job->error);
-  lock.unlock();
+  {
+    std::unique_lock lock(job->mutex);
+    const auto leave = qScopeGuard([&] {
+      --searchWaiters_;
+      if (--job->waiters == 0 && !job->done)
+        job->token->cancelled = true;
+    });
+    while (!job->done && !token->stopped())
+      job->cv.wait_for(lock, std::min<Clock::duration>(std::chrono::milliseconds(50),
+                                                       token->deadline - Clock::now()));
+    check(token);
+    if (job->error)
+      std::rethrow_exception(job->error);
+  }
   Json value = job->value; // immutable once done
   if (finishedJob)
     value["cache"]["hit"] = true;
   return value;
 }
-void Service::storeSearch(const std::string &cacheKey, const Json &value) {
+void Service::storeSearch(const std::string &cacheKey, const Job &job) {
   // ttl_seconds is 0 for an uncacheable result (a partial result without hits).
-  const auto ttl = searchTtl(value);
+  const auto ttl = searchTtl(job.value);
   if (ttl <= 0)
     return;
+  {
+    std::lock_guard lock(mutex_);
+    // New callers join a finished cacheable job until this write returns, so
+    // the generation check remains valid while the service mutex is released.
+    const auto current = jobs_.find(cacheKey);
+    if (current == jobs_.end() || current->second.get() != &job)
+      return;
+  }
   try {
-    cache_.put(cacheKey, value, ttl);
+    cache_.put(cacheKey, job.value, ttl);
   } catch (...) {
     // The search cache is an optimization. Results already delivered remain
     // valid, and this runs on the worker thread after its error handling.
@@ -447,9 +462,10 @@ Json Service::fetchSearch(const Json &args, const std::shared_ptr<CancelToken> &
   Json warnings = Json::array();
   Json results = Json::array(), failures = Json::array(), corrections = Json::array(),
        suggestions = Json::array();
-  // seen holds the duplicate identity of every URL already scanned, including
-  // ones a domain filter rejected. reported holds engines already listed.
-  std::set<std::string> seen, reported, seenCorrections, seenSuggestions;
+  // A scanned identity counts toward paging progress. Only an accepted URL
+  // claims that identity for output, since equivalent URLs can have different hosts.
+  std::map<std::string, bool> returnedByIdentity;
+  std::set<std::string> reported, seenCorrections, seenSuggestions;
   const int limit = args["limit"];
   const auto &domains = args["domains"];
   const auto timeRange = args["time_range"].get<std::string>();
@@ -461,6 +477,8 @@ Json Service::fetchSearch(const Json &args, const std::shared_ptr<CancelToken> &
       actualProvider = outcome.source;
       const auto &data = outcome.page;
       warnings.insert(warnings.end(), outcome.warnings.begin(), outcome.warnings.end());
+      if (pageNumber == 1 && timeRange != "any")
+        warnings.push_back(outcome.timeRangeWarning);
       // SearXNG reports [engine, translated reason] pairs. Every name counts
       // toward allFailed; the output lists each engine once across pages.
       std::set<std::string> failed;
@@ -491,7 +509,8 @@ Json Service::fetchSearch(const Json &args, const std::shared_ptr<CancelToken> &
       collectStrings(data, "suggestions", suggestions, seenSuggestions);
       if (items.empty())
         break;
-      std::size_t fresh = 0;
+      const auto previouslyScanned = returnedByIdentity.size();
+      const auto previouslyReturned = results.size();
       for (const auto &item : items) {
         if (!item.is_object())
           continue;
@@ -505,9 +524,9 @@ Json Service::fetchSearch(const Json &args, const std::shared_ptr<CancelToken> &
         if (!url.isValid() || url.host().isEmpty() || !url.userInfo().isEmpty() ||
             (url.scheme() != "http" && url.scheme() != "https"))
           continue;
-        if (!seen.insert(dedupKey(url)).second)
+        bool &alreadyReturned = returnedByIdentity[dedupKey(url)];
+        if (alreadyReturned)
           continue;
-        ++fresh;
         if (!domains.empty()) {
           // Strict hostname validation is needed only to match a domain filter.
           std::string host;
@@ -526,6 +545,7 @@ Json Service::fetchSearch(const Json &args, const std::shared_ptr<CancelToken> &
         auto canonical = url.toString(QUrl::FullyEncoded).toStdString();
         if (canonical.size() > 4096)
           continue;
+        alreadyReturned = true;
         Json sources = Json::array();
         if (const auto engines = item.find("engines"); engines != item.end() && engines->is_array())
           for (const auto &e : *engines)
@@ -539,9 +559,8 @@ Json Service::fetchSearch(const Json &args, const std::shared_ptr<CancelToken> &
         if (int(results.size()) >= limit)
           break;
       }
-      // A page with no URL unseen on earlier pages means the engines are not
-      // paginating further. Another full metasearch would only add load.
-      if (fresh == 0)
+      // A newly accepted variant of a previously scanned URL also advances the search.
+      if (returnedByIdentity.size() == previouslyScanned && results.size() == previouslyReturned)
         break;
     }
     if (report)
@@ -562,8 +581,6 @@ Json Service::fetchSearch(const Json &args, const std::shared_ptr<CancelToken> &
       failure["error_detail"] = errorPayload(e)["error"];
     failures.push_back(std::move(failure));
   }
-  if (timeRange != "any")
-    warnings.push_back("Time range is an upstream hint, not a strict date filter.");
   // Partial results are cached briefly, and not at all without results.
   const bool partial = !failures.empty();
   const std::int64_t ttl = !partial ? searchTtl_ : results.empty() ? 0 : std::min(searchTtl_, PartialTtlSeconds);

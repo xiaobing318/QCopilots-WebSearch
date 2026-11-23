@@ -264,20 +264,21 @@ struct AdminServer::Impl {
     else
       server.Delete(path, guarded);
   }
-  void start(int businessPort) {
+  void start(int businessPort, std::function<void()> onExit) {
     if (!config.enabled)
       return;
     mcpUrl = businessMcpUrl(business, businessPort);
     if (!server.bind_to_port(config.host, config.port))
       throw Error("invalid_configuration", "Cannot bind administration listener.");
-    thread = std::thread([this] { server.listen_after_bind(); });
+    thread = std::thread([this, onExit = std::move(onExit)] { runListener(server, onExit); });
     server.wait_until_ready();
+    if (!server.is_running())
+      throw Error("service_error", "Administration listener stopped during startup.", 503);
   }
   void stop() {
-    if (thread.joinable()) {
-      server.stop();
+    server.stop();
+    if (thread.joinable())
       thread.join();
-    }
   }
 };
 
@@ -286,8 +287,8 @@ AdminServer::AdminServer(Service &service, const Config &runtime, ClientRegistry
 AdminServer::~AdminServer() {
   stop();
 }
-void AdminServer::start(int businessPort) {
-  impl_->start(businessPort);
+void AdminServer::start(int businessPort, std::function<void()> onExit) {
+  impl_->start(businessPort, std::move(onExit));
 }
 void AdminServer::stop() {
   impl_->stop();

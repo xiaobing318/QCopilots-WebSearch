@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <qws/service.hpp>
 
 namespace qws {
@@ -7,7 +8,7 @@ class AdminServer {
 public:
   AdminServer(Service &, const Config &, ClientRegistry &);
   ~AdminServer();
-  void start(int businessPort);
+  void start(int businessPort, std::function<void()> onExit = {});
   void stop();
 
 private:

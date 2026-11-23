@@ -104,7 +104,7 @@ endforeach()
 qcws_dependency(httplib "https://codeload.github.com/yhirose/cpp-httplib/tar.gz/refs/tags/v0.66.0"
   "537a77cdb96d3b4ad64d0b7103971de52eac75cd4ee03a2fdb84417b0d742459")
 file(SHA256 "${httplib_SOURCE_DIR}/httplib.h" _httplib_sha)
-if(NOT _httplib_sha STREQUAL "533bd907cfb5e018a11bcc1bf0f87983015c0a8b8ee6677d1540265535f02414")
+if(NOT _httplib_sha STREQUAL "7afc70a85b832786527b1af933c1b17b24027bda59682633920d2dd61ce69599")
   message(FATAL_ERROR "Use the build pipeline to prepare the reviewed cpp-httplib input/shutdown patch")
 endif()
 set(LEXBOR_BUILD_STATIC ON CACHE BOOL "" FORCE)

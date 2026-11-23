@@ -32,6 +32,6 @@ Linux 的入站和出站 HTTPS 使用由发行版管理的 OpenSSL 共享库。D
 
 Windows 软件包包含 Visual Studio 授权再分发目录中允许分发的 Microsoft Visual C++ 运行库 DLL。这些 DLL 属于 Microsoft 的专有组件，适用 Microsoft 的再分发条款。软件包的 `NOTICE` 对其单独列明。Windows 系统 DLL 由本机操作系统提供。
 
-在团队部署中，SearXNG（AGPL-3.0-or-later）、Caddy（Apache-2.0）和 Valkey（BSD-3-Clause）作为独立服务运行。部署清单列出这些服务所用的容器镜像及许可证。部署经修改的 SearXNG 时，须满足其许可证规定的源码共享要求。
+自行部署的 SearXNG 是独立服务，采用 AGPL-3.0-or-later 许可证。
 
 官方 WiX 7 软件包对符合条件的用途设有维护费条款。所需许可证应按适用条件另行取得。WiX 仅用于构建，已安装的服务运行时无需 WiX。使用此发行版构建前，请查阅[官方软件包条款](https://www.nuget.org/packages/wix/7.0.1)。

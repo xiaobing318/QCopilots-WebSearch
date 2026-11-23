@@ -580,6 +580,35 @@ function Assert-Snapshot([hashtable]$snapshot) {
         Assert ((Get-Acl -LiteralPath $path).Sddl -eq $snapshot[$path].Acl) "Changed ACL: $path"
     }
 }
+function Assert-InstalledColdStartValidation([hashtable]$metadata) {
+    $checked = @()
+    foreach ($file in @('settings.json', 'secrets.json')) {
+        Write-Host "Verify SCM startup rejects invalid $file and recovers after restoration"
+        $path = Join-Path (Join-Path $metadata.DataRoot 'state') $file
+        $original = [IO.File]::ReadAllBytes($path)
+        $before = Snapshot @($path)
+        [void](Stop-OwnedService $metadata)
+        try {
+            # Truncate the test-owned file in place so its protected ACL stays intact.
+            [IO.File]::WriteAllBytes($path, [byte[]]@(0x7b))
+            Start-Service -Name $metadata.ServiceName -ErrorAction SilentlyContinue
+            Wait-Service $metadata 'Stopped' 10
+            $failed = Owned-Service $metadata
+            Assert ($failed.ProcessId -eq 0 -and $failed.ExitCode -eq 1066 -and $failed.ServiceSpecificExitCode -eq 1) "SCM did not report a startup failure for invalid $file."
+        } finally {
+            try {
+                if ((Owned-Service $metadata).State -ne 'Stopped') { [void](Stop-OwnedService $metadata) }
+            } finally {
+                [IO.File]::WriteAllBytes($path, $original)
+                Assert-Snapshot $before
+                Start-Service -Name $metadata.ServiceName
+                Assert-Running $metadata
+            }
+        }
+        $checked += $file
+    }
+    $metadata.ColdStartChecks = $checked
+}
 function Remove-OwnedTree([hashtable]$metadata, [string]$root) {
     $absolute = [IO.Path]::GetFullPath($root).TrimEnd('\')
     Assert ($ownedProducts.Contains($metadata.ProductCode) -and $trackedRoots.Contains($absolute) -and
@@ -686,6 +715,7 @@ try {
     Assert-BaselineUnchanged $baseline $baselinePid $baselineFiles
     Assert-SeparateInstances $baseline $candidate
     Assert-Administration $candidate
+    Assert-InstalledColdStartValidation $candidate
     Assert-InstalledClientRegistry $candidate
     Assert-InstalledTokenRotation $candidate
     Assert-InstalledClientRegistry $candidate

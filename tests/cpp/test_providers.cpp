@@ -205,6 +205,8 @@ void autoFallback(const std::string &directory) {
   });
   result = autoProvider->search(query(), token);
   require(result.source == "bing" && result.warnings == Json::array({"DuckDuckGo was busy, results come from Bing."}), "Bing fallback must be visible.");
+  require(result.timeRangeWarning == "Bing did not apply the requested time range.",
+          "Bing must disclose that it did not use the requested week filter.");
   require(visited.size() == 2 && state->status()["duckduckgo"]["retry_after_seconds"] == 100,
           "DDG challenge did not set shared cooldown.");
   visited.clear();
@@ -416,6 +418,8 @@ void structuredSearchProviders() {
   require(deepseekResult.source == "deepseek" && deepseekResult.page["results"] == Json::array({
       resultItem("deepseek", "https://example.com/deepseek", "Search", "DeepSeek snippet", "2026-06-01T00:00:00+00:00"),
       resultItem("deepseek", "https://example.net/no-snippet", "", "Summary")}), "Incorrect DeepSeek results.");
+  require(deepseekResult.timeRangeWarning == "Time range is an upstream hint, not a strict date filter.",
+          "DeepSeek should report the time range as a hint when it was sent.");
 
   const auto globe = QString::fromUcs4(U"\U0001F310");
   deepseekRequest.arguments["query"] = globe.repeated(128).toStdString();
@@ -426,8 +430,11 @@ void structuredSearchProviders() {
             "DeepSeek must preserve a query of 128 Unicode code points even if optional hints do not fit.");
     return jsonResponse({{"results", Json::array()}});
   };
-  require(searchDeepSeek(deepseekRequest, deepseek, sendBoundary, token).page["results"].empty(),
-          "DeepSeek empty results must succeed.");
+  const auto boundary = searchDeepSeek(deepseekRequest, deepseek, sendBoundary, token);
+  require(boundary.page["results"].empty(), "DeepSeek empty results must succeed.");
+  require(boundary.timeRangeWarning ==
+              "The requested time range was omitted from the DeepSeek query to stay within 128 Unicode code points.",
+          "DeepSeek must disclose when the query limit prevents sending the date hint.");
   deepseekRequest.arguments["query"] = globe.repeated(129).toStdString();
   requireError("invalid_argument", [&] { (void)searchDeepSeek(deepseekRequest, deepseek, sendBoundary, token); });
   require(sends == 1, "Too-long DeepSeek query must be rejected before network traffic.");

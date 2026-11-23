@@ -12,7 +12,7 @@ GitHub Actions 在 Windows Server 2025 上构建 Windows x64 便携 ZIP 和 MSI 
 - 可复用工作流 `build.yml` 使用 `.nvmrc` 指定的 Node 版本构建一次 TypeScript 前端。各平台的原生构建任务共用该 `web-dist` 和仓库中的 CI 构建配置，并使用缓存加速构建。
 - 每项原生构建任务都配置、编译、测试、安装并打包服务。SDK 测试及 ZIP 或 DEB 的冒烟测试使用已安装的程序。任务失败时会上传可用的 CTest 结果和诊断信息。
 - 推送主分支或手动运行时，还会在 Ubuntu 26.04 上执行 ASan、UBSan、clang-tidy 和限时模糊测试。
-- 手动运行和发布运行还会验收安装包生命周期及 Caddy 部署。验收使用两个基线。基于当前源码构建的 0.0.1 用于验证多版本并装时的配置、凭据和监听端口隔离。基于固定历史提交构建的 0.2.0 使用旧版系统目录布局，用于验证新安装包与旧版部署并存。
+- 手动运行和发布运行还会验证 MSI 和 DEB 的多版本并装、配置和凭据隔离、卸载及回退。两套基线分别使用按固定 SHA-256 校验的官方 v0.4.0 安装包，以及从提交 `91e528f` 构建的旧系统目录布局 0.2.0 安装包。
 
 功能分支可直接运行常规工作流。CI 和本地构建流程的 `publish` 阶段只生成构建产物。MSI 验收需要具备管理员权限且可丢弃的 Windows 运行环境。
 
@@ -20,7 +20,7 @@ GitHub Actions 在 Windows Server 2025 上构建 Windows x64 便携 ZIP 和 MSI 
 
 ## 通过版本标签发布
 
-标准路径为：提交并推送 main，等待该提交的 main push CI 成功，再推送对应版本标签。Release 工作流随后执行发布构建、安装包生命周期和 Caddy 验收，全部成功后才发布。可以先在功能分支验证后合入 main，也可以按仓库权限直接在 main 提交。下面以直接在 main 发布 `v0.4.0` 为例。
+标准路径为：提交并推送 main，等待该提交的 main push CI 成功，再推送对应版本标签。Release 工作流随后执行发布构建、安装包生命周期验收，全部成功后才发布。可以先在功能分支验证后合入 main，也可以按仓库权限直接在 main 提交。下面以直接在 main 发布 `v0.5.0` 为例。
 
 `release.yml` 要求标签与根目录 `CMakeLists.txt` 的 `QCWS_VERSION` 一致。`scripts/release_gate.py` 检查标签提交已属于 main，且同一 SHA 最新一次 main push `ci.yml` 运行已成功。缺少记录、仍在运行、失败或取消都会阻止发布。手动 CI 成功不能替代这条 main push 记录，不能把尚未验收的 main 提交和版本标签同时推送。
 
@@ -31,7 +31,7 @@ GitHub Actions 在 Windows Server 2025 上构建 Windows x64 便携 ZIP 和 MSI 
 ```powershell
 Set-Location C:\Dev\github-repos\QCopilots-WebSearch
 $repo = 'xiaobing318/QCopilots-WebSearch'
-$version = '0.4.0'
+$version = '0.5.0'
 $tag = "v$version"
 gh auth status
 if ($LASTEXITCODE -ne 0) { throw '请先运行 gh auth login 完成登录。' }
@@ -44,7 +44,7 @@ git merge --ff-only origin/main
 if ($LASTEXITCODE -ne 0) { throw 'main 无法快进，请先处理分支差异。' }
 ```
 
-完成本次功能与版本更新，使 `CMakeLists.txt` 中的 `QCWS_VERSION` 为 `0.4.0`，同步相关版本说明并完成本地验证。确认 `git status` 中的修改都属于本次发布，且没有凭据或临时文件，再暂存和审查提交。
+完成本次功能与版本更新，使 `CMakeLists.txt` 中的 `QCWS_VERSION` 为 `0.5.0`，同步相关版本说明并完成本地验证。确认 `git status` 中的修改都属于本次发布，且没有凭据或临时文件，再暂存和审查提交。
 
 ```powershell
 git diff --check
@@ -87,7 +87,7 @@ if ($pushResult.headSha -ne $releaseSha -or $pushResult.status -ne 'completed' -
 
 这次 main push CI 已包含 ASan、UBSan、clang-tidy 和限时模糊测试。通常下一步即可打标签，Release 会自动执行完整的安装和部署验收。
 
-如需在打标签前提前检查安装生命周期、Caddy 部署或下载包进行桌面联调，可在上述 push CI 完成后选择运行一次手动 CI。不要并行触发，同一分支的 push 和手动 CI 共用 `cancel-in-progress` 并发组，新运行会取消旧运行。验收期间不要推送新提交。[手动触发](https://cli.github.com/manual/gh_workflow_run)
+如需在打标签前提前检查安装生命周期或下载包进行桌面联调，可在上述 push CI 完成后选择运行一次手动 CI。不要并行触发，同一分支的 push 和手动 CI 共用 `cancel-in-progress` 并发组，新运行会取消旧运行。验收期间不要推送新提交。[手动触发](https://cli.github.com/manual/gh_workflow_run)
 
 ```powershell
 git fetch origin main

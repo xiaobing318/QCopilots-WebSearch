@@ -1,42 +1,17 @@
 """Exercise the installed listener contract with real local HTTP."""
 import argparse
-import http.client
 import json
 import os
 from pathlib import Path
-import socket
 import subprocess
 import tempfile
 import time
 from urllib.parse import urlsplit
 
+from mcp_http_fixture import call_tool, mcp_probe, mcp_request, ports, request, start_session
+
 
 GENERATED_PUBLIC_URL = object()
-
-
-def ports():
-    sockets = [socket.socket() for _ in range(3)]
-    try:
-        for server in sockets:
-            server.bind(("127.0.0.1", 0))
-        return [server.getsockname()[1] for server in sockets]
-    finally:
-        for server in sockets:
-            server.close()
-
-
-def request(port, method, path, headers=None, body=None):
-    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
-    try:
-        data = json.dumps(body).encode("utf-8") if body is not None else None
-        connection.request(method, path, body=data, headers=headers or {})
-        response = connection.getresponse()
-        content = response.read()
-        if response.getheader("Content-Type", "").startswith("application/json"):
-            content = json.loads(content)
-        return response.status, response.headers, content
-    finally:
-        connection.close()
 
 
 def require_error(response, status, code, reason=None):
@@ -285,16 +260,31 @@ def verify_http(executable, public_url):
                     raise RuntimeError("Administration listener did not start")
                 browser(admin, executable, runtime, token, advertised_url or f"http://127.0.0.1:{business}/mcp")
                 business_token = (root / "client.token").read_text(encoding="ascii").strip()
-                headers = {"Authorization": f"Bearer {business_token}", "Content-Type": "application/json"}
-                assert request(business, "GET", "/v1/status", headers)[2]["settings"]["search_enabled"] is False
-                if advertised_url is not None:
-                    assert request(business, "GET", "/v1/status",
-                                   headers | {"Host": urlsplit(advertised_url).netloc})[0] == 403, \
-                        "Endpoint display metadata silently expanded the business Host allowlist"
-                status, _, body = request(business, "POST", "/v1/search", headers, {"query": "QGIS"})
-                assert status == 403 and body["error"]["code"] == "tool_disabled"
-                status, _, body = request(business, "POST", "/v1/open", headers, {"page_id": "cached-id"})
-                assert status == 403 and body["error"]["code"] == "tool_disabled"
+                headers = {"Authorization": f"Bearer {business_token}"}
+                session = start_session(business, headers)
+                try:
+                    status = call_tool(business, headers, session, 2, "web_search_status", {})
+                    assert not status["isError"] and status["structuredContent"]["settings"]["search_enabled"] is False
+                    if advertised_url is not None:
+                        assert mcp_probe(business, headers | {"Host": urlsplit(advertised_url).netloc})[0] == 403, \
+                            "Endpoint display metadata silently expanded the business Host allowlist"
+                    for req_id, (tool, arguments) in enumerate((
+                        ("web_search", {"query": "QGIS"}), ("web_open", {"page_id": "cached-id"}),
+                    ), 3):
+                        result = call_tool(business, headers, session, req_id, tool, arguments)
+                        assert result["isError"] and result["structuredContent"]["error"]["code"] == "tool_disabled"
+                finally:
+                    assert mcp_request(business, headers, session=session)[0] == 204
+
+                # Probe the actual business listener. A proxy allowlist could hide a surviving REST route.
+                origin = headers | {"Origin": "https://client.example.test", "Content-Type": "application/json"}
+                for path in ("/v1/status", "/v1/search", "/v1/open", "/v1/find"):
+                    method = "GET" if path == "/v1/status" else "POST"
+                    assert request(business, method, path, origin, {} if method == "POST" else None)[0] == 404
+                    assert request(business, "OPTIONS", path, {
+                        "Origin": origin["Origin"], "Access-Control-Request-Method": method,
+                        "Access-Control-Request-Headers": "authorization,content-type",
+                    })[0] == 404
             finally:
                 if service.poll() is None:
                     service.terminate()

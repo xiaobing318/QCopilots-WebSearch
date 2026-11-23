@@ -1,30 +1,24 @@
-#include "stdio_output.hpp"
 #include "listener_options.hpp"
 #include <QFile>
 #include <QFileInfo>
 #include <QStringList>
 #include <QUrl>
-#include <QUuid>
+#include <algorithm>
+#include <condition_variable>
 #include <httplib.h>
-#include <iostream>
-#include <qws/server.hpp>
+#include <mutex>
+#include <new>
+#include <optional>
 #include <qws/admin.hpp>
 #include <qws/client_registry.hpp>
-#ifdef _WIN32
-#include <fcntl.h>
-#include <io.h>
+#include <qws/server.hpp>
+#if defined(_WIN32) && defined(CPPHTTPLIB_MBEDTLS_SUPPORT)
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
-#ifdef CPPHTTPLIB_MBEDTLS_SUPPORT
 #include <mbedtls/threading.h>
 #include <psa/crypto.h>
-#endif
-#else
-#include <cerrno>
-#include <poll.h>
-#include <unistd.h>
 #endif
 namespace qws {
 namespace {
@@ -93,7 +87,7 @@ bool accepts(const std::string &header, const char *mime) {
       continue;
     bool enabled = true;
     for (const auto &parameter : part.split(';').mid(1))
-      if (parameter.section('=', 0, 0).trimmed() == "q") {
+      if (parameter.section('=', 0, 0).trimmed().compare(QLatin1StringView("q"), Qt::CaseInsensitive) == 0) {
         bool valid = false;
         const auto q = parameter.section('=', 1).trimmed().toDouble(&valid);
         if (!valid || q <= 0)
@@ -104,26 +98,36 @@ bool accepts(const std::string &header, const char *mime) {
   }
   return false;
 }
+bool acceptsResponseType(const httplib::Request &req, const char *mime) {
+  const auto [first, last] = req.headers.equal_range("Accept");
+  return std::any_of(first, last, [mime](const auto &header) { return accepts(header.second, mime); });
+}
+bool needsDisconnectMonitor(const Json &message) {
+  if (!message.is_object() || !message.contains("id") || !Protocol::validId(message.at("id")) ||
+      message.value("method", Json()) != "tools/call")
+    return false;
+  const auto params = message.find("params");
+  if (params == message.end() || !params->is_object())
+    return false;
+  const auto name = params->find("name");
+  return name != params->end() && (*name == "web_search" || *name == "web_open");
+}
 struct DisconnectMonitor {
+  std::mutex mutex;
+  std::condition_variable_any wake;
   std::jthread thread;
   DisconnectMonitor(const httplib::Request &request, const std::shared_ptr<CancelToken> &token)
-      : thread([&request, token](std::stop_token stop) {
+      : thread([this, &request, token](std::stop_token stop) {
+          std::unique_lock lock(mutex);
           while (!stop.stop_requested()) {
             if (request.is_connection_closed()) {
               token->cancelled = true;
               return;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            wake.wait_for(lock, stop, std::chrono::milliseconds(25), [] { return false; });
           }
         }) {}
 };
-Json parse(const std::string &body) {
-  auto j = parseBoundedJson(body);
-  if (j.is_discarded())
-    throw Error("invalid_argument", "Request must contain valid UTF-8 JSON.");
-  return j;
-}
-
 QByteArray readTlsPem(const Config &config, const Json &tls, const char *field) {
   constexpr qint64 maxBytes = 1024 * 1024;
   const auto &path = tls.at(field).get_ref<const std::string &>();
@@ -223,11 +227,15 @@ struct HttpServer::Impl {
   std::thread businessThread, controlThread;
   int bp = 0, cp = 0;
   bool started = false;
+  enum class ListenerState { Active, Stopping, Failed };
+  std::atomic<ListenerState> listenerState{ListenerState::Active};
   Impl(Service &s, Config c)
       : service(s), config(std::move(c)), protocol(s), clients(config), admin(s, config, clients),
         business(businessListener(config)) {
-    setup(*business, config.value["business"], false);
-    setup(control, config.value["control"], true);
+    configureListener(*business, config.value.at("business"), false);
+    configureListener(control, config.value.at("control"), true);
+    registerMcpRoutes(*business);
+    registerControlRoutes(control);
   }
   std::string authorize(const httplib::Request &request) const {
     if (request.get_header_value_count("Authorization") != 1)
@@ -240,7 +248,7 @@ struct HttpServer::Impl {
       throw Error("unauthorized", "A bearer credential is required.", 401);
     return *value;
   }
-  void setup(httplib::Server &server, Json listener, bool controls) {
+  void configureListener(httplib::Server &server, Json listener, bool controls) {
     server.set_socket_options(listenerSocketOptions);
     const auto threads = controls ? 4 : config.value["limits"]["max_concurrent"].get<int>() + 4;
     server.new_task_queue = [threads] { return new httplib::ThreadPool(threads, threads, 16); };
@@ -270,17 +278,23 @@ struct HttpServer::Impl {
               const auto origin = req.get_header_value("Origin");
               if (controls ? !contains(listener["origins"], origin) : !validBusinessOrigin(origin))
                 throw Error("forbidden", "Origin is not allowed.", 403);
-              res.set_header("Access-Control-Allow-Origin", origin);
-              res.set_header("Vary", "Origin");
-              res.set_header("Access-Control-Expose-Headers", "Mcp-Session-Id");
+              if (controls || req.path == "/mcp") {
+                res.set_header("Access-Control-Allow-Origin", origin);
+                res.set_header("Vary", "Origin");
+                res.set_header("Access-Control-Expose-Headers", "Mcp-Session-Id");
+              }
             }
             if (req.method == "OPTIONS") {
+              if (!controls && req.path != "/mcp")
+                throw Error("http_error", "HTTP request could not be handled.", 404);
               if (!req.has_header("Origin"))
                 throw Error("forbidden", "Browser preflight requires an allowed Origin.", 403);
               res.status = 204;
               res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-              res.set_header("Access-Control-Allow-Headers",
-                             "Authorization, Content-Type, Accept, Mcp-Session-Id, MCP-Protocol-Version");
+              std::string headers = "Authorization, Content-Type, Accept, Mcp-Session-Id, MCP-Protocol-Version";
+              if (!controls)
+                headers += ", Mcp-Method, Mcp-Name";
+              res.set_header("Access-Control-Allow-Headers", headers);
               res.set_header("Access-Control-Max-Age", "600");
               return httplib::Server::HandlerResponse::Handled;
             }
@@ -302,38 +316,35 @@ struct HttpServer::Impl {
     server.set_exception_handler([](const httplib::Request &, httplib::Response &res, std::exception_ptr) {
       sendError(res, Error("internal_error", "Internal server error.", 500));
     });
-    if (controls) {
-      server.Get("/health/live",
-                 [](const auto &, auto &res) { sendJson(res, {{"contract_version", 1}, {"live", true}}); });
-      server.Get("/health/ready", [this](const auto &, auto &res) {
-        auto s = service.status();
-        sendJson(res, s, s["service"] == "ready" ? 200 : 503);
-      });
-      server.Get("/metrics", [this](const auto &, auto &res) {
-        const auto s = service.status();
-        res.set_content("# TYPE qcws_active_calls gauge\nqcws_active_calls " + s["active_calls"].dump() +
-                            "\n# TYPE qcws_active_upstream gauge\nqcws_active_upstream " +
-                            s["active_upstream"].dump() + "\n",
-                        "text/plain; version=0.0.4");
-      });
-      return;
-    }
-    server.Get("/v1/status", [this](const auto &, auto &res) { sendJson(res, service.status()); });
-    for (const auto &name : {"search", "open", "find"})
-      server.Post(std::string("/v1/") + name, [this, name](const auto &req, auto &res) {
-        try {
-          if (req.get_header_value_count("Content-Type") != 1 ||
-              !accepts(req.get_header_value("Content-Type"), "application/json"))
-            throw Error("invalid_argument", "Content-Type application/json is required.", 415);
-          auto token = std::make_shared<CancelToken>();
-          token->deadline = Clock::now() + std::chrono::seconds(60);
-          DisconnectMonitor monitor(req, token);
-          sendJson(res, service.call(std::string("web_") + name, parse(req.body), principal(res), token));
-        } catch (const Error &e) {
-          sendError(res, e);
+  }
+  void registerControlRoutes(httplib::Server &server) {
+    server.Get("/health/live",
+               [](const auto &, auto &res) { sendJson(res, {{"contract_version", 1}, {"live", true}}); });
+    server.Get("/health/ready", [this](const auto &, auto &res) {
+      auto status = service.status();
+      if (listenerState.load() == ListenerState::Failed)
+        status["service"] = "stopping";
+      sendJson(res, status, status["service"] == "ready" ? 200 : 503);
+    });
+    server.Get("/metrics", [this](const auto &, auto &res) {
+      const auto s = service.status();
+      res.set_content("# TYPE qcws_active_calls gauge\nqcws_active_calls " + s["active_calls"].dump() +
+                          "\n# TYPE qcws_active_upstream gauge\nqcws_active_upstream " +
+                          s["active_upstream"].dump() + "\n",
+                      "text/plain; version=0.0.4");
+    });
+  }
+  void registerMcpRoutes(httplib::Server &server) {
+    server.Get("/mcp", [this](const auto &req, auto &res) {
+      if (!protocolHeaders(req, res))
+        return;
+      if (req.has_header("Mcp-Session-Id")) {
+        const int status = protocol.sessionStatus(principal(res), req.get_header_value("Mcp-Session-Id"));
+        if (status != 200) {
+          res.status = status;
+          return;
         }
-      });
-    server.Get("/mcp", [](const auto &, auto &res) {
+      }
       res.status = 405;
       res.set_header("Allow", "POST, DELETE");
     });
@@ -344,19 +355,18 @@ struct HttpServer::Impl {
       res.status = reply.httpStatus;
     });
     server.Post("/mcp", [this](const auto &req, auto &res) {
+      if (!protocolHeaders(req, res))
+        return;
       if (req.get_header_value_count("Content-Type") != 1 ||
           !accepts(req.get_header_value("Content-Type"), "application/json")) {
         sendError(res, Error("invalid_argument", "Content-Type application/json is required.", 415));
         return;
       }
-      if (!accepts(req.get_header_value("Accept"), "application/json") ||
-          !accepts(req.get_header_value("Accept"), "text/event-stream")) {
+      if (!acceptsResponseType(req, "application/json") || !acceptsResponseType(req, "text/event-stream")) {
         sendError(res, Error("invalid_argument",
                              "Accept must include application/json and text/event-stream.", 406));
         return;
       }
-      if (!protocolHeaders(req, res))
-        return;
       auto message = parseBoundedJson(req.body);
       if (message.is_discarded()) {
         sendJson(
@@ -367,7 +377,9 @@ struct HttpServer::Impl {
       }
       auto token = std::make_shared<CancelToken>();
       token->deadline = Clock::now() + std::chrono::seconds(60);
-      DisconnectMonitor monitor(req, token);
+      std::optional<DisconnectMonitor> monitor;
+      if (needsDisconnectMonitor(message))
+        monitor.emplace(req, token);
       const auto reply =
           protocol.handle(principal(res), req.get_header_value("Mcp-Session-Id"), message, token);
       if (!reply.sessionId.empty())
@@ -389,6 +401,11 @@ struct HttpServer::Impl {
     }
     return true;
   }
+  void listenerExited() {
+    auto expected = ListenerState::Active;
+    if (listenerState.compare_exchange_strong(expected, ListenerState::Failed))
+      service.shutdown();
+  }
   void start() {
     auto bind = [](httplib::Server &s, const Json &c) {
       const int p = c["port"];
@@ -400,18 +417,27 @@ struct HttpServer::Impl {
     bp = bind(*business, config.value["business"]);
     if (bp < 0)
       throw Error("invalid_configuration", "Cannot bind business listener.");
-    cp = bind(control, config.value["control"]);
-    if (cp < 0) {
-      business->stop();
-      throw Error("invalid_configuration", "Cannot bind control listener.");
-    }
-    businessThread = std::thread([this] { business->listen_after_bind(); });
-    controlThread = std::thread([this] { control.listen_after_bind(); });
-    started = true;
-    business->wait_until_ready();
-    control.wait_until_ready();
     try {
-      admin.start(bp);
+      cp = bind(control, config.value["control"]);
+      if (cp < 0)
+        throw Error("invalid_configuration", "Cannot bind control listener.");
+    } catch (...) {
+      business->stop();
+      control.stop();
+      throw;
+    }
+    started = true;
+    try {
+      const auto onExit = [this] { listenerExited(); };
+      businessThread = std::thread([this, onExit] { runListener(*business, onExit); });
+      controlThread = std::thread([this, onExit] { runListener(control, onExit); });
+      business->wait_until_ready();
+      control.wait_until_ready();
+      if (!business->is_running() || !control.is_running())
+        throw Error("service_error", "HTTP listener stopped during startup.", 503);
+      admin.start(bp, onExit);
+      if (listenerState.load() == ListenerState::Failed)
+        throw Error("service_error", "HTTP listener stopped during startup.", 503);
     } catch (...) {
       stop();
       throw;
@@ -420,6 +446,8 @@ struct HttpServer::Impl {
   void stop() {
     if (!started)
       return;
+    auto expected = ListenerState::Active;
+    listenerState.compare_exchange_strong(expected, ListenerState::Stopping);
     protocol.shutdown();
     service.shutdown();
     admin.stop();
@@ -442,206 +470,25 @@ void HttpServer::start() {
 void HttpServer::stop() {
   d_->stop();
 }
+bool HttpServer::listenerFailed() const {
+  return d_->listenerState.load() == Impl::ListenerState::Failed;
+}
+#ifdef QCWS_TEST_LISTENER_ACCESS
+void failBusinessAcceptForTest(HttpServer &server) {
+  class FailingQueue final : public httplib::TaskQueue {
+  public:
+    bool enqueue(std::function<void()>) override { throw std::bad_alloc(); }
+    void shutdown() override {}
+  };
+  // The first accepted connection fails dispatch. httplib closes the socket
+  // and returns false from the actual accept loop with no HttpServer::stop().
+  server.d_->business->new_task_queue = [] { return new FailingQueue; };
+}
+#endif
 int HttpServer::businessPort() const {
   return d_->bp;
 }
 int HttpServer::controlPort() const {
   return d_->cp;
-}
-int runStdio(Service &service) {
-#ifdef _WIN32
-  _setmode(_fileno(stdin), _O_BINARY);
-  _setmode(_fileno(stdout), _O_BINARY);
-#endif
-  Protocol protocol(service, QCWS_VERSION, {}, Protocol::TransportPolicy::Stdio);
-  std::string session;
-  const auto principal = "stdio-" + QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
-  StdioOutput output;
-  auto writeReply = [&](const ProtocolReply &reply, const Json *request = nullptr) {
-    auto message = reply.message;
-    // HTTP status codes have no channel on stdio. Notifications and cancelled
-    // calls still have no response, but rejected requests receive an error.
-    if (!message && reply.httpStatus >= 400 && request && request->is_object() &&
-        request->contains("method") && (*request)["method"].is_string() && request->contains("id") &&
-        Protocol::validId((*request)["id"])) {
-      message =
-          Json{{"jsonrpc", "2.0"},
-               {"id", (*request)["id"]},
-               {"error", {{"code", -32002}, {"message", "Session is not initialized or is unavailable."}}}};
-    }
-    if (message) {
-      if (!output.enqueue(message->dump()))
-        throw Error("output_unavailable", "Stdio output is unavailable.", 503);
-    }
-  };
-  struct Task {
-    std::thread thread;
-    std::shared_ptr<std::atomic_bool> done;
-  };
-  std::vector<Task> tasks;
-  std::string line;
-  line.reserve(4096);
-  std::string pending;
-  size_t offset = 0;
-  auto reloadAt = Clock::now() + std::chrono::seconds(2);
-  const auto reloadSettings = [&] {
-    if (Clock::now() >= reloadAt) {
-      service.settings().reloadIfChanged();
-      reloadAt = Clock::now() + std::chrono::seconds(2);
-    }
-  };
-#ifdef _WIN32
-  // A private high-resolution timer avoids Sleep's system-tick latency for
-  // sequential MCP calls. Back off while idle without changing timer resolution
-  // for other applications. Supported by both Windows deployment targets.
-  std::unique_ptr<void, decltype(&CloseHandle)> inputTimer(
-      CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
-                             TIMER_MODIFY_STATE | SYNCHRONIZE),
-      &CloseHandle);
-  if (!inputTimer)
-    throw Error("input_unavailable", "Cannot configure stdio input.", 503);
-#endif
-  auto readInput = [&]() -> bool {
-    char buffer[16384];
-#ifdef _WIN32
-    LONGLONG delay = 20000; // Relative timer units are 100 ns.
-#endif
-    for (;;) {
-      reloadSettings();
-      if (output.failed())
-        throw Error("output_unavailable", "Stdio output is unavailable.", 503);
-#ifdef _WIN32
-      const auto input = GetStdHandle(STD_INPUT_HANDLE);
-      DWORD available = sizeof(buffer);
-      if (GetFileType(input) == FILE_TYPE_PIPE) {
-        if (!PeekNamedPipe(input, nullptr, 0, nullptr, &available, nullptr)) {
-          if (GetLastError() == ERROR_BROKEN_PIPE)
-            return false;
-          throw Error("input_unavailable", "Stdio input is unavailable.", 503);
-        }
-        if (!available) {
-          LARGE_INTEGER due;
-          due.QuadPart = -delay;
-          if (!SetWaitableTimer(inputTimer.get(), &due, 0, nullptr, nullptr, FALSE) ||
-              WaitForSingleObject(inputTimer.get(), 1000) != WAIT_OBJECT_0)
-            throw Error("input_unavailable", "Stdio input wait failed.", 503);
-          delay = std::min<LONGLONG>(delay * 2, 250000);
-          continue;
-        }
-      }
-      DWORD count = 0;
-      if (!ReadFile(input, buffer, DWORD(std::min<size_t>(available, sizeof(buffer))), &count, nullptr)) {
-        if (GetLastError() == ERROR_BROKEN_PIPE)
-          return false;
-        throw Error("input_unavailable", "Stdio input is unavailable.", 503);
-      }
-#else
-      pollfd descriptor{STDIN_FILENO, POLLIN, 0};
-      const int ready = poll(&descriptor, 1, 25);
-      if ((ready < 0 && errno == EINTR) || ready == 0)
-        continue;
-      if (ready < 0 || (descriptor.revents & (POLLERR | POLLNVAL)))
-        throw Error("input_unavailable", "Stdio input is unavailable.", 503);
-      const auto count = ::read(STDIN_FILENO, buffer, sizeof(buffer));
-      if (count < 0 && errno == EINTR)
-        continue;
-      if (count < 0)
-        throw Error("input_unavailable", "Stdio input is unavailable.", 503);
-#endif
-      if (!count)
-        return false;
-      pending.assign(buffer, size_t(count));
-      offset = 0;
-      return true;
-    }
-  };
-  // A line beyond the 1 MiB input budget is discarded through its newline
-  // without buffering, so the process keeps serving later messages.
-  enum class Input { Line, Overlong, End };
-  auto readLine = [&]() -> Input {
-    line.clear();
-    bool overlong = false;
-    for (;;) {
-      if (offset == pending.size() && !readInput())
-        return overlong ? Input::Overlong : line.empty() ? Input::End : Input::Line;
-      const char ch = pending[offset++];
-      if (ch == '\n')
-        return overlong ? Input::Overlong : Input::Line;
-      if (overlong)
-        continue;
-      if (line.size() >= 1024 * 1024) {
-        overlong = true;
-        line.clear();
-        continue;
-      }
-      line += ch;
-    }
-  };
-  int result = 0;
-  try {
-    while (!output.failed()) {
-      reloadSettings();
-      const auto input = readLine();
-      if (input == Input::End)
-        break;
-      std::erase_if(tasks, [](Task &t) {
-        if (t.done->load()) {
-          t.thread.join();
-          return true;
-        }
-        return false;
-      });
-      if (input == Input::Overlong) {
-        writeReply({200,
-                    Json{{"jsonrpc", "2.0"},
-                         {"id", nullptr},
-                         {"error", {{"code", -32600}, {"message", "Message exceeds 1 MiB"}}}},
-                    session});
-        continue;
-      }
-      // Blank or CR-only lines are framing noise, not messages.
-      if (line.find_first_not_of(" \t\r") == std::string::npos)
-        continue;
-      auto message = parseBoundedJson(line);
-      if (message.is_discarded()) {
-        writeReply({200,
-                    Json{{"jsonrpc", "2.0"},
-                         {"id", nullptr},
-                         {"error", {{"code", -32700}, {"message", "Parse error"}}}},
-                    session});
-        continue;
-      }
-      if (message.is_object() && message.value("method", Json()) == "tools/call" && tasks.size() < 64) {
-        auto done = std::make_shared<std::atomic_bool>(false);
-        auto sid = session;
-        tasks.push_back({std::thread([&, done, sid, message = std::move(message)] {
-                           try {
-                             writeReply(protocol.handle(principal, sid, message), &message);
-                           } catch (...) {
-                             output.fail();
-                             protocol.shutdown();
-                             service.shutdown();
-                           }
-                           *done = true;
-                         }),
-                         done});
-      } else {
-        auto reply = protocol.handle(principal, session, message);
-        if (!reply.sessionId.empty())
-          session = reply.sessionId;
-        writeReply(reply, &message);
-      }
-    }
-  } catch (const std::exception &) {
-    std::cerr << "Stdio input failed.\n";
-    result = 1;
-  }
-  protocol.shutdown();
-  service.shutdown();
-  for (auto &t : tasks)
-    if (t.thread.joinable())
-      t.thread.join();
-  output.finish();
-  return result || output.failed() ? 1 : 0;
 }
 } // namespace qws

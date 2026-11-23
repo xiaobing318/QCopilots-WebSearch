@@ -1,6 +1,7 @@
 #include "providers_internal.hpp"
 
 #include <QDateTime>
+#include <utility>
 
 namespace qws {
 namespace {
@@ -20,12 +21,14 @@ QDate firstDate(const Json &arguments) {
   return {};
 }
 
-void appendHint(QString &query, const QString &hint) {
-  if (query.toUcs4().size() + 1 + hint.toUcs4().size() <= QueryLimit)
-    query += ' ' + hint;
+bool appendHint(QString &query, const QString &hint) {
+  if (query.toUcs4().size() + 1 + hint.toUcs4().size() > QueryLimit)
+    return false;
+  query += ' ' + hint;
+  return true;
 }
 
-QString deepSeekQuery(const SearchRequest &request) {
+std::pair<QString, bool> deepSeekQuery(const SearchRequest &request) {
   auto query = QString::fromStdString(request.arguments["query"].get<std::string>());
   if (query.toUcs4().size() > QueryLimit)
     throw Error("invalid_argument", "DeepSeek Search accepts at most 128 Unicode characters in a query.");
@@ -39,15 +42,16 @@ QString deepSeekQuery(const SearchRequest &request) {
   const auto locale = searchLocale(request);
   if (locale.language.size() == 2)
     appendHint(query, "lang:" + locale.language);
-  if (const auto date = firstDate(request.arguments); date.isValid())
-    appendHint(query, "after:" + date.toString(Qt::ISODate));
-  return query;
+  const auto date = firstDate(request.arguments);
+  const bool timeRangeOmitted = date.isValid() && !appendHint(query, "after:" + date.toString(Qt::ISODate));
+  return {std::move(query), timeRangeOmitted};
 }
 } // namespace
 
 SearchOutcome searchDeepSeek(const SearchRequest &request, const ProviderConfig &config,
                              const ProviderTransport &send, const std::shared_ptr<CancelToken> &cancel) {
-  const Json arguments = {{"query", deepSeekQuery(request).toStdString()}, {"count", request.arguments["limit"]},
+  const auto [query, timeRangeOmitted] = deepSeekQuery(request);
+  const Json arguments = {{"query", query.toStdString()}, {"count", request.arguments["limit"]},
                           {"need_content", false}};
   HttpRequest outgoing;
   outgoing.url = "https://api.deepseek.com/v1/tools/search";
@@ -65,6 +69,10 @@ SearchOutcome searchDeepSeek(const SearchRequest &request, const ProviderConfig 
       results.push_back(resultItem("deepseek", url, resultText(item, "title"), std::move(snippet),
                                    resultText(item, "date")));
     }
-  return resultsPage("deepseek", std::move(results));
+  auto outcome = resultsPage("deepseek", std::move(results));
+  if (timeRangeOmitted)
+    outcome.timeRangeWarning =
+        "The requested time range was omitted from the DeepSeek query to stay within 128 Unicode code points.";
+  return outcome;
 }
 } // namespace qws

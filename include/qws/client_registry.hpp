@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <qws/config.hpp>
@@ -22,11 +23,10 @@ private:
   struct Snapshot {
     Json entries;
     std::vector<ClientIdentity> identities;
-    std::string revision;
   };
   Config config_;
-  mutable std::mutex mutex_;
-  std::shared_ptr<const Snapshot> active_;
+  mutable std::mutex managementMutex_;
+  std::atomic<std::shared_ptr<const Snapshot>> active_;
   Json change(const std::string &id, const QByteArray *token, const std::string &revision,
               bool createOnly);
 };

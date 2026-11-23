@@ -1,5 +1,6 @@
 """Verify real startup failures without using an existing deployment or its ports."""
 import argparse
+import asyncio
 from contextlib import closing, contextmanager
 import hashlib
 import http.client
@@ -7,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import socket
 import sqlite3
@@ -15,6 +17,9 @@ import subprocess
 import sys
 import tempfile
 import time
+
+if os.name == "nt":
+    import _winapi
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 from testkit import BREAK_HELPER, hidden_console
@@ -356,7 +361,7 @@ def failed_database_cases(executable, root):
 
 
 @contextmanager
-def deny_cache_creation(directory):
+def deny_fixture_access(path, windows_rights, unix_mode):
     if os.name == "nt":
         system = Path(os.environ["SystemRoot"]) / "System32"
         identity = subprocess.run([str(system / "whoami.exe"), "/user", "/fo", "csv", "/nh"],
@@ -364,23 +369,23 @@ def deny_cache_creation(directory):
         match = re.search(rb'"(S-1-[0-9-]+)"', identity.stdout)
         require(identity.returncode == 0 and match is not None, "Cannot identify the ACL fixture account")
         principal = "*" + match[1].decode("ascii")
-        command = [str(system / "icacls.exe"), str(directory)]
-        result = subprocess.run([*command, "/deny", principal + ":(WD,AD)"],
+        command = [str(system / "icacls.exe"), str(path)]
+        result = subprocess.run([*command, "/deny", f"{principal}:({windows_rights})"],
                                 capture_output=True, timeout=8, **cli_options())
-        require(result.returncode == 0, "Cannot apply the cache ACL fixture")
+        require(result.returncode == 0, "Cannot apply the fixture ACL")
         try:
             yield
         finally:
             result = subprocess.run([*command, "/remove:d", principal],
                                     capture_output=True, timeout=8, **cli_options())
-            require(result.returncode == 0, "Cannot restore the cache ACL fixture")
+            require(result.returncode == 0, "Cannot restore the fixture ACL")
     else:
-        mode = directory.stat().st_mode & 0o777
-        directory.chmod(0o500)
+        mode = stat.S_IMODE(path.stat().st_mode)
+        path.chmod(unix_mode)
         try:
             yield
         finally:
-            directory.chmod(mode)
+            path.chmod(mode)
 
 
 def permission_failure(executable, root):
@@ -389,7 +394,7 @@ def permission_failure(executable, root):
         return
     fixture = Fixture(executable, root / "permission")
     fixture.cache.mkdir()
-    with deny_cache_creation(fixture.cache):
+    with deny_fixture_access(fixture.cache, "WD,AD", 0o500):
         probe = fixture.cache / "probe"
         try:
             probe.touch(exist_ok=False)
@@ -406,6 +411,177 @@ def permission_failure(executable, root):
     print("PASS cache lock permission diagnostic and permission restoration")
 
 
+async def stdio_policy(command, cwd, env, search_enabled, change_settings=None):
+    process = await asyncio.create_subprocess_exec(
+        *command, cwd=cwd, env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL, limit=MIB + 1, **cli_options())
+
+    async def rpc(request_id, method, params):
+        message = {"jsonrpc": "2.0", "method": method, "params": params}
+        if request_id is not None:
+            message["id"] = request_id
+        process.stdin.write((json.dumps(message) + "\n").encode("utf-8"))
+        await process.stdin.drain()
+        if request_id is not None:
+            line = await process.stdout.readline()
+            require(line, "Stdio closed before sending a protocol reply")
+            reply = json.loads(line)
+            require(reply["id"] == request_id and "result" in reply, "Unexpected stdio reply")
+            return reply["result"]
+
+    try:
+        async with asyncio.timeout(10):
+            await rpc(1, "initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
+                                        "clientInfo": {"name": "startup-check", "version": "1"}})
+            await rpc(None, "notifications/initialized", {})
+            request_id = 2
+            params = {"name": "web_search_status", "arguments": {}}
+            result = await rpc(request_id, "tools/call", params)
+            policy = result["structuredContent"]["settings"]
+            require(policy["provider"] == "auto" and policy["search_enabled"] is search_enabled,
+                    "Stdio did not use the selected settings")
+            if change_settings:
+                change_settings()
+                while policy["search_enabled"] is search_enabled:
+                    await asyncio.sleep(0.15)
+                    request_id += 1
+                    result = await rpc(request_id, "tools/call", params)
+                    policy = result["structuredContent"]["settings"]
+            process.stdin.close()
+            await process.stdin.wait_closed()
+            require(await process.wait() == 0 and not await process.stdout.read(),
+                    "Stdio did not exit cleanly at EOF")
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+
+
+def stdio_configuration(executable, root):
+    # Stage only the executable. Its own installation, adjacent files and
+    # service credentials must remain untouched even when these cases fail.
+    source = Path(executable)
+    staged = root / "standalone bin" / source.name
+    staged.parent.mkdir()
+    shutil.copy2(source, staged)
+    runtime = staged.parent / "data" / "runtime.json"
+    private_temp = root / "process-temp"
+    private_temp.mkdir()
+    cwd = root / "stdio-cwd"
+    inherited = cwd / "state"
+    inherited.mkdir(parents=True)
+    settings = json.loads((Path(__file__).resolve().parents[2] / "config/settings.json").read_text("utf-8"))
+    settings["tools"]["search"]["enabled"] = False
+    (inherited / "settings.json").write_text(json.dumps(settings), "utf-8")
+    env = dict(os.environ, STATE_DIRECTORY=str(inherited), TMPDIR=str(private_temp),
+               TEMP=str(private_temp), TMP=str(private_temp))
+    for variable, directory in (("PATH", source.parent), ("QT_PLUGIN_PATH", source.parent.parent / "plugins"),
+                                ("LD_LIBRARY_PATH", source.parent.parent / "lib")):
+        if directory.is_dir():
+            env[variable] = str(directory) + (os.pathsep + env[variable] if env.get(variable) else "")
+    env.pop("QCWS_CLIENT_TOKEN", None)
+    bare = [str(staged), "--Stdio"]
+    explicit = [*bare, "--ConfigPath", str(runtime)]
+
+    def rejected(*arguments):
+        result = subprocess.run([*bare, *arguments], cwd=cwd, env=env, input=b"",
+                                capture_output=True, timeout=6, **cli_options())
+        require(result.returncode == 1 and not result.stdout and b"invalid_configuration" in result.stderr,
+                "Invalid stdio configuration did not fail on stderr")
+
+    asyncio.run(stdio_policy(bare, cwd, env, True))
+    require(not runtime.parent.exists(), "Bare stdio created a service deployment")
+    runtime.parent.mkdir()
+    asyncio.run(stdio_policy(bare, cwd, env, True))
+    require(not any(runtime.parent.iterdir()) and not any(private_temp.iterdir()),
+            "Bare stdio left service files or private process state")
+    rejected("--ConfigPath", str(cwd / "missing.json"))
+
+    fixture = Fixture(executable, root / "stdio-configured")
+    shared = fixture.root / "state"
+    shared.mkdir(exist_ok=True)
+    settings_file = shared / "settings.json"
+    settings_file.write_text(json.dumps(settings), "utf-8")
+    fixture.config["settings"]["directory"] = str(shared)
+    fixture.config["cache"]["directory"] = str(fixture.cache)
+    runtime.write_text(json.dumps(fixture.config), "utf-8")
+
+    def enable_search():
+        settings["tools"]["search"]["enabled"] = True
+        settings_file.write_text(json.dumps(settings), "utf-8")
+
+    asyncio.run(stdio_policy(bare, cwd, env, False, enable_search))
+    require(not fixture.cache.exists(), "Stdio used the HTTP instance's persistent cache")
+    runtime.write_text("{", "utf-8")
+    rejected()
+    rejected("--ConfigPath", str(runtime))
+    asyncio.run(stdio_policy([*bare, "--ConfigPath", str(fixture.runtime)], cwd, env, True))
+    runtime.write_text(json.dumps(fixture.config | {"project_version": "999.0.0"}), "utf-8")
+    rejected()
+    rejected("--ConfigPath", str(runtime))
+    runtime.write_text(json.dumps({k: v for k, v in fixture.config.items() if k != "project_version"}), "utf-8")
+    rejected()
+    asyncio.run(stdio_policy(explicit, cwd, env, True))
+    runtime.write_text(json.dumps(fixture.config), "utf-8")
+    fixture.runtime.write_text(json.dumps(fixture.config), "utf-8")
+    settings["tools"]["search"]["enabled"] = False
+    settings_file.write_text(json.dumps(settings), "utf-8")
+    if os.name == "nt" or os.geteuid() != 0:
+        with deny_fixture_access(runtime, "RD", 0):
+            rejected()
+            rejected("--ConfigPath", str(runtime))
+        with deny_fixture_access(runtime.parent, "RD", 0o100):
+            rejected()
+            asyncio.run(stdio_policy(explicit, cwd, env, False))
+        runtime.unlink()
+        with deny_fixture_access(runtime.parent, "RD", 0o100):
+            rejected()
+    else:
+        runtime.unlink()
+        print("SKIP stdio permission fixture under root")
+
+    try:
+        runtime.symlink_to(root / "missing-runtime-target")
+    except OSError as error:
+        if os.name != "nt" or error.winerror != 1314:
+            raise
+        # An unprivileged Windows account can still create a dangling reparse
+        # point at the runtime filename, even with file symlinks disabled.
+        target = root / "runtime-junction-target"
+        target.mkdir()
+        _winapi.CreateJunction(str(target), str(runtime))
+        target.rmdir()
+        try:
+            rejected()
+        finally:
+            runtime.rmdir()
+    else:
+        try:
+            rejected()
+        finally:
+            runtime.unlink()
+        runtime.symlink_to(fixture.runtime)
+        try:
+            rejected()
+            asyncio.run(stdio_policy(explicit, cwd, env, False))
+        finally:
+            runtime.unlink()
+    runtime.parent.rmdir()
+    if os.name == "nt":
+        _winapi.CreateJunction(str(fixture.root), str(runtime.parent))
+    else:
+        runtime.parent.symlink_to(fixture.root, target_is_directory=True)
+    try:
+        rejected()
+        asyncio.run(stdio_policy(explicit, cwd, env, False))
+    finally:
+        if os.name == "nt":
+            runtime.parent.rmdir()
+        else:
+            runtime.parent.unlink()
+    print("PASS stdio discovery, explicit paths, directory permissions, private state and settings reload")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--Executable", type=Path, required=True)
@@ -413,6 +589,7 @@ def main():
     executable = str(arguments.Executable.resolve(strict=True))
     with tempfile.TemporaryDirectory(prefix="qsd-") as temporary:
         root = Path(temporary).resolve()
+        stdio_configuration(executable, root)
         duplicate_and_stale(executable, root)
         unconfirmed_lock_owners(executable, root)
         independent_cache_port_conflict(executable, root)

@@ -39,7 +39,7 @@ private:
   int capacity_;
   std::int64_t searchTtl_ = 0, pageTtl_ = 0;
   std::chrono::seconds searchTimeout_{0}, openTimeout_{0};
-  std::atomic_int calls_{0}, upstream_{0};
+  std::atomic_int calls_{0}, upstream_{0}, searchWaiters_{0};
   std::atomic_bool closing_{false};
   mutable std::mutex mutex_;
   std::unordered_map<std::string, std::shared_ptr<Job>> jobs_;
@@ -50,7 +50,7 @@ private:
   void reportDependency(const ProviderConfig &, Json);
   Json search(const Json &, const std::string &, const std::shared_ptr<CancelToken> &, ProviderConfig);
   Json fetchSearch(const Json &, const std::shared_ptr<CancelToken> &, const ProviderConfig &, bool report = true);
-  void storeSearch(const std::string &, const Json &);
+  void storeSearch(const std::string &, const Job &);
   Json open(const Json &, const std::string &, const std::shared_ptr<CancelToken> &);
   Json find(const Json &, const std::string &);
   Json page(const std::string &, const std::string &);

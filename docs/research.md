@@ -24,6 +24,6 @@
 
 初期范围包括搜索、静态 HTML 和文本阅读，以及对网页快照进行字面查找。自主建索引、付费提供方、JavaScript 执行、PDF 和大语言模型生成的答案均超出初期范围。原生实现使用 Qt Core、Qt Network、Qt SQL、cpp-httplib、libcurl 和 Lexbor。Qt HTTP Server 的模块许可与项目采用 Apache-2.0 的方案不符，因此未引入。 [Qt HTTP Server 模块许可](https://doc.qt.io/qt-6/qthttpserver-index.html)
 
-QGIS 适配器作为独立组件，沿用 QGIS 的 GPL 许可。其他项目的 REST 和 MCP 客户端可以直接使用原生服务。SearXNG 仍是独立部署的 AGPL 服务。
+QGIS 适配器作为独立组件，沿用 QGIS 的 GPL 许可。其他项目的 MCP 客户端可以直接使用原生服务。SearXNG 仍是独立部署的 AGPL 服务。
 
 公开验收报告须分别记录完整结果、部分结果、查询成功但结果为空、提供方错误、缓存命中和传输失败。上线评估没有固定的公开查询成功率门槛。可稳定复现的服务错误、安全故障和打包缺陷均须独立处理。

@@ -135,6 +135,15 @@ int main(int argc, char **argv) {
         "Pre-initialize request was lost");
     first.initialize();
     first.ping(std::string(65534, 'x'));
+    first.send(
+        {{"jsonrpc", "2.0"}, {"method", "notifications/cancelled"}, {"params", {{"requestId", "future"}}}});
+    const auto future = first.exchange(
+        {{"jsonrpc", "2.0"},
+         {"id", "future"},
+         {"method", "tools/call"},
+         {"params", {{"name", "web_find"}, {"arguments", {{"page_id", "missing"}, {"pattern", "word"}}}}}});
+    require(future.at("result").at("structuredContent").at("error").at("code") == "page_unavailable",
+            "An unknown cancellation affected a later stdio request");
     second.initialize("2025-11-25");
     second.ping("alive");
     for (int i = 0; i < 5000; ++i)

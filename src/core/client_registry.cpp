@@ -310,31 +310,23 @@ TransactionResult transact(const Config &config, Operation operation, const std:
 } // namespace
 
 std::string clientRegistryPath(const Config &config) {
-  std::string defaultDirectory = "state";
-#ifndef _WIN32
-  const auto state = qEnvironmentVariable("STATE_DIRECTORY");
-  if (QDir::isAbsolutePath(state) && !state.contains(':'))
-    defaultDirectory = state.toStdString();
-#endif
-  const auto directory = config.path(config.value.value("settings", Json::object()).value("directory", defaultDirectory));
-  return QDir(QString::fromStdString(directory)).filePath("client-registry.json").toStdString();
+  return QDir(QString::fromStdString(settingsDirectory(config))).filePath("client-registry.json").toStdString();
 }
 
 ClientRegistry::ClientRegistry(Config config) : config_(std::move(config)) {
   auto document = readDocument(config_);
   auto resolved = identities(config_, document.entries);
-  active_ = std::make_shared<const Snapshot>(Snapshot{std::move(document.entries), std::move(resolved),
-                                                    std::move(document.revision)});
+  active_.store(std::make_shared<const Snapshot>(Snapshot{std::move(document.entries), std::move(resolved)}));
 }
 
 Json ClientRegistry::view() const {
-  std::lock_guard lock(mutex_);
-  return viewOf(readDocument(config_), active_->entries);
+  std::lock_guard lock(managementMutex_);
+  return viewOf(readDocument(config_), active_.load()->entries);
 }
 
 Json ClientRegistry::reveal(const std::string &id, const std::string &revision) const {
   validateId(id);
-  std::lock_guard lock(mutex_);
+  std::lock_guard lock(managementMutex_);
   const auto document = readDocument(config_);
   if (revision != document.revision)
     throw Error("revision_conflict", "Client credentials changed. Reload before viewing.", 409);
@@ -364,7 +356,8 @@ Json ClientRegistry::reveal(const std::string &id, const std::string &revision) 
   const auto hash = QCryptographicHash::hash(token, QCryptographicHash::Sha256);
   const auto generation = found->value("generation", std::string{});
   const auto principal = generation.empty() ? id : id + ":" + generation;
-  const bool active = std::any_of(active_->identities.begin(), active_->identities.end(),
+  const auto snapshot = active_.load();
+  const bool active = std::any_of(snapshot->identities.begin(), snapshot->identities.end(),
                                   [&](const auto &identity) {
                                     return identity.id == id && identity.principal == principal &&
                                            identity.tokenHash == hash;
@@ -374,14 +367,13 @@ Json ClientRegistry::reveal(const std::string &id, const std::string &revision) 
 
 Json ClientRegistry::change(const std::string &id, const QByteArray *token, const std::string &revision,
                             bool createOnly) {
-  std::lock_guard lock(mutex_);
+  std::lock_guard lock(managementMutex_);
   const auto operation = !token ? Operation::Remove : createOnly ? Operation::Create : Operation::Replace;
   auto replacement = std::make_shared<Snapshot>();
   auto result = transact(config_, operation, id, token, &revision);
   replacement->entries = std::move(result.document.entries);
   replacement->identities = std::move(result.identities);
-  replacement->revision = std::move(result.document.revision);
-  active_ = replacement;
+  active_.store(std::move(replacement));
   return std::move(result.view);
 }
 
@@ -395,12 +387,7 @@ Json ClientRegistry::remove(const std::string &id, const std::string &revision) 
   return change(id, nullptr, revision, false);
 }
 std::string ClientRegistry::authorize(const std::string &authorization) const {
-  std::shared_ptr<const Snapshot> snapshot;
-  {
-    std::lock_guard lock(mutex_);
-    snapshot = active_;
-  }
-  return authenticate(snapshot->identities, authorization);
+  return authenticate(active_.load()->identities, authorization);
 }
 
 void setClientToken(const std::string &path, const std::string &id, const QByteArray &token) {

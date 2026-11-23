@@ -9,10 +9,12 @@ public:
   ~HttpServer();
   void start();
   void stop();
+  bool listenerFailed() const;
   int businessPort() const;
   int controlPort() const;
 
 private:
+  friend void failBusinessAcceptForTest(HttpServer &);
   struct Impl;
   std::unique_ptr<Impl> d_;
 };

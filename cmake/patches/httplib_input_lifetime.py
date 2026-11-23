@@ -20,6 +20,9 @@ def patch(raw):
         text = text.replace(before, after)
 
     replace("process_and_close_socket", "process_socket", 5)
+    replace("protected:\n  bool process_request(Stream &strm,", """protected:
+  void drain_after_response(socket_t sock) noexcept;
+  bool process_request(Stream &strm,""")
     replace("  virtual bool process_socket(socket_t sock);", """  virtual bool process_socket(socket_t sock);
 
   // The accept guard hands ownership to exactly one queued worker.
@@ -70,7 +73,11 @@ inline void drain_and_close_socket(socket_t sock) noexcept {
     size = 0;
     return nullptr;
   }""")
-    replace("inline void Server::stop() noexcept {", """inline void Server::interrupt_accepted_sockets() noexcept {
+    replace("inline void Server::stop() noexcept {", """inline void Server::drain_after_response(socket_t sock) noexcept {
+  if (!accepted_stopping_) { detail::drain_socket(sock); }
+}
+
+inline void Server::interrupt_accepted_sockets() noexcept {
   std::lock_guard<std::mutex> lock(accepted_mutex_);
   accepted_stopping_ = true;
   for (auto sock : accepted_sockets_) { detail::shutdown_socket(sock); }
@@ -190,7 +197,7 @@ inline void Server::stop() noexcept {
     int dummy_status;""")
     replace("""  detail::drain_and_close_socket(sock);
   return ret;
-}""", """  if (!accepted_stopping_) { detail::drain_socket(sock); }
+}""", """  drain_after_response(sock);
   return ret;
 }""")
     replace("""    last_ssl_error_ = static_cast<int>(get_error());
@@ -201,5 +208,8 @@ inline void Server::stop() noexcept {
     replace("""    free_session(session);
     detail::shutdown_socket(sock);
     detail::close_socket(sock);""", """    free_session(session);
-    // The accepted-socket guard closes the descriptor after TLS cleanup.""")
+    // A client may still be transmitting its TLS request body after an early
+    // HTTP response. Half-close and discard in-flight ciphertext before the
+    // accepted-socket guard closes the descriptor, as for plain HTTP.
+    if (handshake_done && !websocket_upgraded) { drain_after_response(sock); }""")
     return text.encode("utf-8")

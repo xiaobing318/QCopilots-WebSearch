@@ -3,7 +3,7 @@
 from __future__ import annotations
 import argparse
 import asyncio
-from contextlib import suppress
+from contextlib import AsyncExitStack, suppress
 import importlib.metadata
 import json
 import logging
@@ -208,22 +208,32 @@ async def exercise(client, fixture, label, public_url):
     payload(await client.call_tool("web_open", {"url": "https://example.org", "page_id": "x"}),
             error="invalid_argument")
     cancellation = await cancel_in_flight(client, fixture, label)
-    public = {"attempted": bool(public_url), "passed": False}
-    if public_url:
+    public = {"attempted": public_url is not None, "passed": False}
+    if public_url is not None:
         try:
-            opened = payload(await client.call_tool("web_open", {"url": public_url}, read_timeout_seconds=30))
+            fetched = await client.call_tool("web_open", {"url": public_url}, read_timeout_seconds=30)
+            if fetched.is_error:
+                error = (fetched.structured_content or {}).get("error", {}).get("code")
+                public_codes = {"invalid_argument", "destination_blocked", "unsupported_content",
+                                "upstream_http_error", "timeout", "response_too_large"}
+                raise Fault(error if error in public_codes else "public_open_failed")
+            opened = payload(fetched)
             first = next(line for line in opened["lines"] if line["text"].strip())
             found = payload(await client.call_tool("web_find",
                 {"page_id": opened["page_id"], "pattern": first["text"].strip()[:64]}))
             require(any(hit["line"] == first["line"] for hit in found["matches"]), "public_find_mismatch")
-            reopened = payload(await client.call_tool("web_open", {"page_id": opened["page_id"], "max_lines": 1}))
-            require(reopened["cache"]["hit"] is True, "public_page_cache")
+            next_line = min(first["line"] + 1, opened["total_lines"])
+            reopened = payload(await client.call_tool("web_open",
+                {"page_id": opened["page_id"], "start_line": next_line, "max_lines": 1}))
+            require(reopened["page_id"] == opened["page_id"] and reopened["cache"]["hit"] is True
+                    and len(reopened["lines"]) == 1 and reopened["lines"][0]["line"] == next_line,
+                    "public_page_continuation")
             public["passed"] = True
-        except Exception:
-            public["error"] = "public_check_failed"
+        except Exception as exc:
+            public["error"] = fault_code(exc)
     await client.session.send_ping()
     return {"transport": label, "protocol": client.protocol_version, "tools": sorted(EXPECTED),
-            "passed": True, "cancellation_seconds": cancellation, "public": public}
+            "passed": public_url is None or public["passed"], "cancellation_seconds": cancellation, "public": public}
 
 
 async def exercise_auto(client, label):
@@ -329,6 +339,62 @@ async def exercise_live_provider(client, label):
     return {"transport": label, "provider": source, "result_count": len(data["results"])}
 
 
+async def exercise_fixed_page(reader, other, fixture, label):
+    search = payload(await reader.call_tool("web_search", {"query": "fixture page", "limit": 1}))
+    require(len(search["results"]) == 1, "fixture_search_result")
+    url = search["results"][0]["url"]
+    opened = payload(await reader.call_tool("web_open", {"url": url, "max_lines": 1}))
+    page_id = opened["page_id"]
+    require(opened["lines"] == [{"line": 1, "text": "First fixture line"}]
+            and opened["next_start_line"] == 2 and opened["cache"]["hit"] is False,
+            "fixture_first_page")
+    found = payload(await reader.call_tool("web_find", {"page_id": page_id, "pattern": "needLE"}))
+    require(found["matches"] == [{"line": 2, "text": "Needle on the second line"}], "fixture_find")
+    rest = payload(await reader.call_tool("web_open", {"page_id": page_id, "start_line": opened["next_start_line"]}))
+    require(rest["lines"] == [{"line": 2, "text": "Needle on the second line"},
+                              {"line": 3, "text": "Last fixture line"}]
+            and rest["next_start_line"] is None and rest["cache"]["hit"] is True, "fixture_continuation")
+    payload(await other.call_tool("web_open", {"page_id": page_id}), error="page_unavailable")
+    payload(await other.call_tool("web_find", {"page_id": page_id, "pattern": "Needle"}), error="page_unavailable")
+    elapsed = await cancel_in_flight(reader, fixture, "page-" + label)
+    return {"transport": label, "source": "injected_page", "passed": True, "cancellation_seconds": elapsed}
+
+
+async def run_page_fixture(executable, template, folder, fixture, tokens):
+    folder.mkdir()
+    proc, ports, _ = start_process(executable, template, folder, fixture, tokens, 300)
+    results = []
+    try:
+        for label in ("http", "stdio"):
+            async with AsyncExitStack() as stack:
+                clients = []
+                for token in tokens[:2]:
+                    if label == "http":
+                        http = await stack.enter_async_context(httpx2.AsyncClient(
+                            headers={"Authorization": "Bearer " + token}, trust_env=False, timeout=30))
+                        transport = streamable_http_client(f"http://127.0.0.1:{ports[0]}/mcp",
+                                                           http_client=http, terminate_on_close=True)
+                    else:
+                        params = StdioServerParameters(command=str(executable),
+                            args=["--ConfigPath", str(folder / "runtime.json"), "--Stdio"], env=environment(tokens))
+                        errlog = stack.enter_context(open(os.devnull, "w", encoding="utf-8"))
+                        transport = stdio_client(params, errlog=errlog)
+                    clients.append(await stack.enter_async_context(
+                        Client(transport, mode="legacy", read_timeout_seconds=10)))
+                results.append(await exercise_fixed_page(*clients, fixture, label))
+    finally:
+        fixture.release.set()
+        stopped = stop_process(proc)
+        remaining = stdio_children(folder / "runtime.json")
+        for child in remaining:
+            with suppress(psutil.NoSuchProcess):
+                child.kill()
+        require(not wait_owned(remaining, timeout=5), "fixture_stdio_stop_failed")
+    require(not remaining, "fixture_stdio_cleanup")
+    require(stopped["passed"], "fixture_stop_failed")
+    return results
+
+
 async def run_live(args, template, folder, tokens, report):
     proc, ports, _ = start_process(args.Executable, template, folder, None, tokens, 300)
     config = folder / "runtime.json"
@@ -390,6 +456,9 @@ async def run(args, report):
             finally:
                 fixture.release.set()
                 report["http_process_stop"] = stop_process(proc)
+            if args.PageFixture:
+                report["fixed_pages"] = await run_page_fixture(
+                    args.PageFixture, template, folder / "injected", fixture, tokens)
             if args.LiveProvider == "auto":
                 live_folder = folder / "live"
                 live_folder.mkdir()
@@ -419,16 +488,21 @@ def main():
     parser.add_argument("--Executable", type=Path, required=True)
     parser.add_argument("--Output", type=Path, required=True)
     parser.add_argument("--PublicUrl", default=None)
+    parser.add_argument("--PageFixture", type=Path, help="Test-only executable with deterministic page responses")
     parser.add_argument("--LiveProvider", choices=("auto",), default=None)
     args = parser.parse_args()
     args.Executable = args.Executable.resolve(strict=True)
+    if args.PageFixture:
+        args.PageFixture = args.PageFixture.resolve(strict=True)
     output = args.Output.resolve()
-    require(output not in (args.Executable, Path(__file__).resolve()), "invalid_output")
+    require(output not in (args.Executable, args.PageFixture, Path(__file__).resolve()), "invalid_output")
     logging.disable(logging.CRITICAL)
     report = {"report_version": 1, "executable_sha256": digest(args.Executable),
               "runtime": fingerprint(args.Executable), "host": host_info(),
               "sdk_version": importlib.metadata.version("mcp"),
               "httpx2_version": importlib.metadata.version("httpx2"), "transports": [], "passed": False}
+    if args.PageFixture:
+        report["page_fixture_sha256"] = digest(args.PageFixture)
     code = 1
     try:
         require(report["sdk_version"] == "2.3.0", "unexpected_sdk_version")
@@ -436,8 +510,13 @@ def main():
         asyncio.run(run(args, report))
         require(digest(args.Executable) == report["executable_sha256"], "binary_changed")
         require(fingerprint(args.Executable) == report["runtime"], "runtime_changed")
+        if args.PageFixture:
+            require(digest(args.PageFixture) == report["page_fixture_sha256"], "fixture_binary_changed")
         require(len(report["transports"]) == 2, "missing_transport")
         require(report["http_process_stop"]["passed"], "http_process_stop_failed")
+        if args.PublicUrl is not None:
+            for transport in report["transports"]:
+                require(transport["public"]["passed"], f"{transport['transport']}_public_check_failed")
         report["passed"], code = True, 0
     except KeyboardInterrupt:
         report["error"], code = "interrupted", 130

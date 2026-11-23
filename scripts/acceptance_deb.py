@@ -15,6 +15,7 @@ import sqlite3
 import stat
 import subprocess
 import tarfile
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -325,6 +326,86 @@ def verify_mcp(port, token):
                 "Installed MCP tool call failed")
     finally:
         require(mcp_request(port, token, session=session)[0] == 204, "Installed MCP session cleanup failed")
+
+
+def check_stdio_accounts(installation, passed):
+    service = pwd.getpwnam(installation.account)
+    ordinary = pwd.getpwnam("nobody")
+    require(ordinary.pw_uid not in (0, service.pw_uid) and ordinary.pw_gid != service.pw_gid,
+            "The acceptance client must be unprivileged and outside the service group")
+    version = "2024-11-05"
+    initialize = {**INITIALIZE, "params": {**INITIALIZE["params"], "protocolVersion": version}}
+    messages = [initialize, {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}]
+    request = "".join(json.dumps(message) + "\n" for message in messages)
+
+    def probe(account, *options, denied=False):
+        # Drop supplementary groups as well as uid and gid before opening any
+        # configuration. No service credentials or inherited deployment state are supplied.
+        result = subprocess.run([installation.exe, "--Stdio", *options], user=account.pw_uid,
+                                group=account.pw_gid, extra_groups=(), cwd="/tmp",
+                                env={"PATH": ENV["PATH"], "LC_ALL": "C", "HOME": account.pw_dir},
+                                input=request, capture_output=True, text=True, encoding="utf-8", timeout=15)
+        if denied:
+            require(result.returncode != 0 and not result.stdout and "invalid_configuration:" in result.stderr,
+                    "An ordinary user must receive a configuration error on the private service directory")
+            return
+        require(result.returncode == 0, "Installed stdio process failed for its configuration owner")
+        replies = [json.loads(line) for line in result.stdout.splitlines()]
+        require(len(replies) == 2 and replies[0].get("id") == 1 and replies[1].get("id") == 2
+                and replies[0]["result"]["protocolVersion"] == version
+                and {tool["name"] for tool in replies[1]["result"]["tools"]}
+                == {"web_search", "web_open", "web_find", "web_search_status"},
+                "Installed stdio process did not negotiate the expected version and four tools")
+
+    probe(service)
+    probe(ordinary, denied=True)
+    # Use the shipped public template so the low-privilege fixture never
+    # receives material from the real service's private runtime directory.
+    template = installation.app / "share/qcopilots-websearch/config/runtime.json"
+    with tempfile.TemporaryDirectory(prefix="qcws-stdio-user-", dir="/tmp") as directory:
+        root = Path(directory)
+        runtime = root / "runtime.json"
+        runtime.write_bytes(template.read_bytes())
+        runtime.chmod(0o600)
+        os.chown(runtime, ordinary.pw_uid, ordinary.pw_gid)
+        os.chown(root, ordinary.pw_uid, ordinary.pw_gid)
+        probe(ordinary, "--ConfigPath", runtime)
+    passed("stdio-accounts", protocol=version)
+
+
+def check_invalid_startup(installation, passed):
+    account = pwd.getpwnam(installation.account)
+    for name in ("settings.json", "secrets.json"):
+        installation.stop()
+        target = installation.state / name
+        # Retaining the original inode preserves its ownership, mode and ACL.
+        with tempfile.TemporaryDirectory(prefix="startup-", dir=installation.state) as directory:
+            scratch = Path(directory)
+            backup = scratch / name
+            invalid = scratch / "malformed"
+            invalid.write_bytes(b"{")
+            invalid.chmod(0o600)
+            os.chown(invalid, account.pw_uid, account.pw_gid)
+            exists = target.exists()
+            if exists:
+                target.rename(backup)
+            try:
+                os.replace(invalid, target)
+                result = run("systemctl", "start", installation.unit, check=False)
+                require(result.returncode != 0 and not installation.active() and installation.pid() == 0,
+                        f"Installed service accepted malformed {name}")
+            finally:
+                # Cancel any queued automatic restart before restoring the file.
+                run("systemctl", "stop", installation.unit, check=False)
+                if exists:
+                    os.replace(backup, target)
+                else:
+                    target.unlink(missing_ok=True)
+        run("systemctl", "reset-failed", installation.unit, check=False)
+        run("systemctl", "start", installation.unit)
+        health(installation)
+    passed("invalid-startup-recovery")
 
 
 def check_token_rotation(installation, passed):
@@ -672,8 +753,10 @@ def main():
         candidate.install()
         health(candidate)
         passed("install")
+        check_stdio_accounts(candidate, passed)
         settings = admin_smoke(candidate.exe, candidate.config, ENV, "auto", persist_in=candidate.state)
         passed("admin", provider=settings["provider"])
+        check_invalid_startup(candidate, passed)
         check_token_rotation(candidate, passed)
         leave_crashed_cli_lock(candidate)
         check_client_registry(candidate, passed)

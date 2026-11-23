@@ -1,5 +1,8 @@
+#include "test_support.hpp"
 #include <QCoreApplication>
 #include <QFile>
+#include <QProcess>
+#include <QTcpServer>
 #include <QTcpSocket>
 #include <QTemporaryDir>
 #include <atomic>
@@ -7,13 +10,8 @@
 #include <httplib.h>
 #include <iostream>
 #include <qws/server.hpp>
-#include <stdexcept>
 using namespace qws;
 namespace {
-void require(bool value, const char *message) {
-  if (!value)
-    throw std::runtime_error(message);
-}
 template <class F> bool eventually(F test, int milliseconds = 2000) {
   const auto deadline = Clock::now() + std::chrono::milliseconds(milliseconds);
   while (Clock::now() < deadline) {
@@ -42,7 +40,7 @@ std::string headers(const std::string &method, const std::string &path, const st
 void drip(int port, const std::string &framing, const std::string &prefix, char byte) {
   auto socket = connection(port);
   const auto started = Clock::now();
-  write(*socket, headers("POST", "/v1/search", framing) + prefix);
+  write(*socket, headers("POST", "/search", framing) + prefix);
   auto next = Clock::now();
   while (socket->state() != QAbstractSocket::UnconnectedState &&
          Clock::now() - started < std::chrono::seconds(4)) {
@@ -57,7 +55,79 @@ void drip(int port, const std::string &framing, const std::string &prefix, char 
   require(socket->state() == QAbstractSocket::UnconnectedState, "slow input held connection");
   require(Clock::now() - started < std::chrono::milliseconds(2800), "absolute input deadline");
 }
-void tests(const char *templatePath) {
+void triggerBusinessFault(int port, const httplib::Headers &auth) {
+  httplib::Client business("127.0.0.1", port);
+  business.set_connection_timeout(1);
+  business.set_read_timeout(2);
+  require(!business.Get("/mcp", auth), "failed accept queue delivered an HTTP response");
+}
+
+void verifyListenerFailure(Json value, const httplib::Headers &auth, const QString &probePath) {
+  QTemporaryDir directory;
+  require(directory.isValid(), "listener failure temporary directory");
+  value["settings"]["directory"] = "state";
+  value["cache"]["directory"] = "cache";
+  value["admin"] = {{"enabled", false}};
+  {
+    Config config{value, directory.path().toStdString()};
+    Service service(config);
+    HttpServer server(service, config);
+    failBusinessAcceptForTest(server);
+    server.start();
+    httplib::Client control("127.0.0.1", server.controlPort());
+    control.set_connection_timeout(1);
+    control.set_read_timeout(2);
+    auto ready = control.Get("/health/ready", auth);
+    require(ready && ready->status == 200 && Json::parse(ready->body).at("service") == "ready",
+            "both listeners must start before the test fault");
+    require(!server.listenerFailed(), "healthy listeners reported failure");
+
+    triggerBusinessFault(server.businessPort(), auth);
+    require(eventually([&] { return server.listenerFailed() && service.status().at("service") == "stopping"; }),
+            "unexpected accept-loop exit must notify the process and stop the service");
+    auto unavailable = control.Get("/health/ready", auth);
+    require(unavailable && unavailable->status == 503 && Json::parse(unavailable->body).at("service") == "stopping",
+            "the surviving control listener must withdraw readiness");
+    server.stop();
+    require(server.listenerFailed(), "coordinated cleanup masked the original listener failure");
+  }
+
+  // The probe runs the production CLI entry point. Use fresh ports so a
+  // previous control connection in TIME_WAIT cannot prevent its bind.
+  QTcpServer businessPort, controlPort;
+  require(businessPort.listen(QHostAddress::LocalHost) && controlPort.listen(QHostAddress::LocalHost),
+          "reserve private loopback ports for the listener failure probe");
+  value["business"]["port"] = businessPort.serverPort();
+  value["control"]["port"] = controlPort.serverPort();
+  QFile runtime(directory.filePath("runtime.json"));
+  const auto contents = QByteArray::fromStdString(value.dump());
+  require(runtime.open(QIODevice::WriteOnly) && runtime.write(contents) == contents.size(),
+          "write listener failure probe configuration");
+  runtime.close();
+  QProcess child;
+  child.setReadChannel(QProcess::StandardError);
+  businessPort.close();
+  controlPort.close();
+  child.start(probePath, {"--ConfigPath", runtime.fileName()});
+  require(child.waitForStarted(5000), "could not start the listener failure CLI probe");
+  QByteArray diagnostics;
+  require(eventually([&] {
+    if (!child.bytesAvailable())
+      child.waitForReadyRead(100);
+    diagnostics += child.readAllStandardError();
+    return diagnostics.contains(" ready.");
+  }, 5000), "the CLI never announced successful startup before the fault");
+  triggerBusinessFault(value.at("business").at("port").get<int>(), auth);
+  require(child.state() == QProcess::NotRunning || child.waitForFinished(10000),
+          "listener failure did not exit the CLI");
+  diagnostics += child.readAllStandardError();
+  require(child.exitStatus() == QProcess::NormalExit && child.exitCode() == 1 &&
+              diagnostics.contains("\nlistener_failed:") && child.readAllStandardOutput().isEmpty(),
+          "the production CLI must report the listener fault after startup and exit with status 1");
+  std::cout << "PASS unexpected business listener exit withdraws readiness and terminates the CLI\n";
+}
+
+void tests(const char *templatePath, const QString &probePath) {
   QTemporaryDir directory;
   require(directory.isValid(), "temporary directory");
   QFile input(QString::fromUtf8(templatePath));
@@ -117,17 +187,14 @@ void tests(const char *templatePath) {
     auto rejected = client.Post("/mcp", mcpHeaders, body, "application/json");
     require(rejected && rejected->status == 400, "deep MCP JSON must be rejected without crashing");
     require(Json::parse(rejected->body)["error"]["code"] == -32700, "bounded MCP parse error");
-    rejected = client.Post("/v1/search", auth, body, "application/json");
-    require(rejected && rejected->status == 400, "deep REST JSON must be rejected");
     auto healthy = control.Get("/health/live", auth);
     require(healthy && healthy->status == 200, "health after excessive JSON nesting");
   }
-  auto initialized = client.Post(
-      "/mcp", mcpHeaders,
-      R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"headers","version":"1"}}})",
-      "application/json");
+  auto initialized = client.Post("/mcp", mcpHeaders, mcpInitialize(1, "2025-06-18").dump(), "application/json");
   require(initialized && initialized->status == 200, "initialize header test session");
-  mcpHeaders.emplace("Mcp-Session-Id", initialized->get_header_value("Mcp-Session-Id"));
+  const auto sessionId = initialized->get_header_value("Mcp-Session-Id");
+  require(!sessionId.empty(), "initialize assigned a session");
+  mcpHeaders.emplace("Mcp-Session-Id", sessionId);
   for (const int scenario : {0, 1, 2, 3}) {
     auto invalid = mcpHeaders;
     // 2025-03-26 predates the header and is not a negotiated revision here.
@@ -144,24 +211,32 @@ void tests(const char *templatePath) {
     require(ping && ping->status == 200 && Json::parse(ping->body).contains("result"),
             "session survives rejected DELETE");
   }
-  auto current = mcpHeaders;
-  current.emplace("MCP-Protocol-Version", "2025-11-25");
-  auto deleted = client.Delete("/mcp", current);
-  require(deleted && deleted->status == 204, "valid session deletion with a supported protocol header");
-  std::cout << "PASS bounded JSON and DELETE protocol headers\n";
+  mcpHeaders.emplace("MCP-Protocol-Version", "2025-06-18");
+  auto ready = client.Post("/mcp", mcpHeaders, R"({"jsonrpc":"2.0","method":"notifications/initialized"})",
+                           "application/json");
+  require(ready && ready->status == 202 && ready->body.empty(), "ready for tools/call");
+  int requestId = 5;
+  const auto searchBody = [&](const std::string &query) {
+    return mcpToolCall(++requestId, "web_search", {{"query", query}}).dump();
+  };
+  const auto sessionFields = "Accept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2025-06-18\r\n"
+                             "Mcp-Session-Id: " + sessionId + "\r\n";
   std::vector<std::unique_ptr<QTcpSocket>> active;
   for (int i = 0; i < 5; ++i) {
     auto sock = connection(server.businessPort());
-    const auto body = Json{{"query", "barrier-" + std::to_string(i)}}.dump();
-    write(*sock,
-          headers("POST", "/v1/search", "Content-Length: " + std::to_string(body.size()) + "\r\n") + body);
+    const auto body = searchBody("barrier-" + std::to_string(i));
+    write(*sock, headers("POST", "/mcp", sessionFields + "Content-Length: " + std::to_string(body.size()) + "\r\n") +
+                     body);
     active.push_back(std::move(sock));
   }
   require(eventually([&] { return held == 5 && service.status()["active_calls"] == 5; }),
           "five real HTTP requests");
   auto started = Clock::now();
-  auto response = client.Post("/v1/search", auth, R"({"query":"sixth"})", "application/json");
-  require(response && response->status == 429, "sixth request must return 429");
+  auto response = client.Post("/mcp", mcpHeaders, searchBody("sixth"), "application/json");
+  require(response && response->status == 200, "sixth call returns a tool result");
+  const auto busy = Json::parse(response->body).at("result");
+  require(busy.at("isError") == true && busy.at("structuredContent").at("error").at("code") == "busy",
+          "sixth call must report exhausted capacity");
   require(Clock::now() - started < std::chrono::milliseconds(200), "busy response latency");
   started = Clock::now();
   response = control.Get("/health/live", auth);
@@ -175,8 +250,9 @@ void tests(const char *templatePath) {
           }),
           "cancel restores all capacity");
   release = true;
-  response = client.Post("/v1/search", auth, R"({"query":"recovered"})", "application/json");
-  require(response && response->status == 200, "request after cancellation");
+  response = client.Post("/mcp", mcpHeaders, searchBody("recovered"), "application/json");
+  require(response && response->status == 200 && Json::parse(response->body).at("result").at("isError") == false,
+          "request after cancellation");
   std::cout << "PASS actual HTTP capacity, independent health and cancellation\n";
   for (const auto *framing : {"Content-Length: 1048576\r\n", "Transfer-Encoding: chunked\r\n"}) {
     auto sock = connection(server.controlPort());
@@ -186,24 +262,28 @@ void tests(const char *templatePath) {
     require(sock->readAll().startsWith("HTTP/1.1 400"), "control body response");
     require(Clock::now() - started < std::chrono::milliseconds(200), "control body latency");
   }
-  drip(server.businessPort(), "Content-Length: 1048576\r\n", "{", ' ');
-  drip(server.businessPort(), "Transfer-Encoding: chunked\r\n", "100000;", 'x');
-  drip(server.businessPort(), "Transfer-Encoding: chunked\r\n", "1\r\n{\r\n0\r\nX-Slow:", 'x');
+  // Exercise the shared HTTP library's input deadline at the local fixture.
+  drip(upstreamPort, "Content-Length: 1048576\r\n", "{", ' ');
+  drip(upstreamPort, "Transfer-Encoding: chunked\r\n", "100000;", 'x');
+  drip(upstreamPort, "Transfer-Encoding: chunked\r\n", "1\r\n{\r\n0\r\nX-Slow:", 'x');
   std::cout << "PASS absolute input deadline including chunks and trailers\n";
   started = Clock::now();
-  response = client.Post("/v1/search", auth, R"({"query":"slow-valid"})", "application/json");
-  require(response && response->status == 200, "complete body must clear input deadline");
+  response = client.Post("/mcp", mcpHeaders, searchBody("slow-valid"), "application/json");
+  require(response && response->status == 200 && Json::parse(response->body).at("result").at("isError") == false,
+          "complete body must clear input deadline");
   require(Clock::now() - started >= std::chrono::milliseconds(2300), "slow handler executed");
+  auto deleted = client.Delete("/mcp", mcpHeaders);
+  require(deleted && deleted->status == 204, "valid session deletion with a supported protocol header");
+  std::cout << "PASS bounded JSON and DELETE protocol headers\n";
   std::vector<std::unique_ptr<QTcpSocket>> pending;
   // Exceed the nine workers without overflowing the 16-slot queue before they dequeue.
   for (int i = 0; i < 12; ++i) {
-    auto sock = connection(server.businessPort());
-    write(*sock, headers("POST", "/v1/search", "Content-Length: 1048576\r\n") + "{");
-    pending.push_back(std::move(sock));
+    pending.push_back(connection(server.businessPort()));
   }
   started = Clock::now();
   server.stop();
   server.stop();
+  require(!server.listenerFailed(), "orderly shutdown must not report a listener failure");
   const auto stopped = Clock::now() - started;
   const auto stoppedMs = std::chrono::duration_cast<std::chrono::milliseconds>(stopped).count();
   if (stopped >= std::chrono::seconds(2))
@@ -262,14 +342,15 @@ void tests(const char *templatePath) {
     upstream.stop();
     upstreamThread.join();
   }
+  verifyListenerFailure(value, auth, probePath);
   qunsetenv("QCWS_HTTP_TEST_TOKEN");
 }
 } // namespace
 int main(int argc, char **argv) {
   QCoreApplication application(argc, argv);
   try {
-    require(argc == 2, "template argument");
-    tests(argv[1]);
+    require(argc == 3, "template and listener failure probe arguments");
+    tests(argv[1], QCoreApplication::arguments().at(2));
     return 0;
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';

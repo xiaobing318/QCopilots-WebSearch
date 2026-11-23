@@ -68,11 +68,12 @@ ProtocolReply Protocol::rpcError(int status, const Json &id, int code, const std
   return {status, Json{{"jsonrpc", "2.0"}, {"id", id}, {"error", {{"code", code}, {"message", message}}}},
           sid};
 }
-Json Protocol::toolResult(Json payload, bool error) {
-  auto text = payload.dump();
-  return {{"content", Json::array({Json{{"type", "text"}, {"text", text}}})},
-          {"structuredContent", std::move(payload)},
-          {"isError", error}};
+Json Protocol::toolResult(Json payload, bool error, std::string_view version) {
+  Json result{{"content", Json::array({Json{{"type", "text"}, {"text", payload.dump()}}})},
+              {"isError", error}};
+  if (version != LegacyStdioVersion)
+    result["structuredContent"] = std::move(payload);
+  return result;
 }
 void Protocol::retireLocked(Session &s) {
   for (auto &[key, t] : s.inFlight) {
@@ -81,7 +82,6 @@ void Protocol::retireLocked(Session &s) {
   }
   s.usedIds.clear();
   s.recentIds.clear();
-  s.earlyCancelled.clear();
   s.usedIdBytes = 0;
 }
 void Protocol::rememberIdLocked(Session &s, const std::string &key) {
@@ -102,7 +102,7 @@ void Protocol::expireLocked(Clock::time_point now) {
   if (transport_ == TransportPolicy::Stdio)
     return;
   std::erase_if(sessions_, [&](const auto &entry) {
-    if (entry.second->expires <= now && entry.second->inFlight.empty()) {
+    if (entry.second->idleExpired(now)) {
       retireLocked(*entry.second);
       return true;
     }
@@ -121,22 +121,28 @@ ProtocolReply Protocol::finishCall(const std::shared_ptr<Session> &s, const std:
   return reply;
 }
 ProtocolReply Protocol::handle(const std::string &principal, const std::string &sid, const Json &m,
-                               std::shared_ptr<CancelToken> cancellation) {
-  auto reply = handleRequest(principal, sid, m, std::move(cancellation));
+                               std::shared_ptr<CancelToken> cancellation, const ToolDispatcher &dispatch) {
+  auto reply = handleRequest(principal, sid, m, std::move(cancellation), dispatch);
+  if (sid.empty() && !reply.sessionId.empty() && m.is_object() && m.value("method", Json()) == "initialize")
+    return boundedReply(std::move(reply), principal);
+  return boundedReply(std::move(reply));
+}
+ProtocolReply Protocol::boundedReply(ProtocolReply reply, const std::string &initializingPrincipal) {
   if (reply.message && reply.message->dump().size() > 1024 * 1024) {
     // Bound the complete envelope, including future status/tool-list growth.
     // Do not leave an initialization session behind when its reply was rejected.
-    if (m.value("method", Json()) == "initialize" && sid.empty() && !reply.sessionId.empty()) {
-      deleteSession(principal, reply.sessionId);
+    if (!initializingPrincipal.empty()) {
+      deleteSession(initializingPrincipal, reply.sessionId);
       reply.sessionId.clear();
     }
-    return rpcError(reply.httpStatus, reply.message->value("id", Json()), -32603, "Response exceeds protocol budget",
-                    reply.sessionId);
+    return rpcError(reply.httpStatus, reply.message->value("id", Json()), -32603,
+                    "Response exceeds protocol budget", reply.sessionId);
   }
   return reply;
 }
 ProtocolReply Protocol::handleRequest(const std::string &principal, const std::string &sid, const Json &m,
-                                      std::shared_ptr<CancelToken> cancellation) {
+                                      std::shared_ptr<CancelToken> cancellation,
+                                      const ToolDispatcher &dispatch) {
   if (principal.empty())
     return {401, std::nullopt, {}};
   if (m.is_object() && m.contains("id") && m["id"].dump().size() > 65536) {
@@ -168,9 +174,11 @@ ProtocolReply Protocol::handleRequest(const std::string &principal, const std::s
     // Echo a supported requested version; otherwise offer the newest one.
     const auto requested = params["protocolVersion"].get<std::string>();
     const std::string negotiated =
-        supportsVersion(requested) ? requested : std::string(SupportedVersions.front());
+        supportsVersion(requested, transport_) ? requested : std::string(SupportedVersions.front());
     const Json &instructions = toolCatalog()["instructions"];
-    const Json &icons = serverIcons();
+    Json serverInfo{{"name", "qcopilots-websearch"}, {"version", version_}};
+    if (negotiated != LegacyStdioVersion)
+      serverInfo["icons"] = serverIcons();
     std::lock_guard lock(mutex_);
     expireLocked(now);
     if (closing_)
@@ -203,6 +211,7 @@ ProtocolReply Protocol::handleRequest(const std::string &principal, const std::s
     } while (sessions_.contains(fresh));
     auto s = std::make_shared<Session>();
     s->principal = principal;
+    s->negotiatedVersion = negotiated;
     s->expires = now + std::chrono::minutes(30);
     rememberIdLocked(*s, key);
     sessions_.emplace(fresh, std::move(s));
@@ -212,7 +221,7 @@ ProtocolReply Protocol::handleRequest(const std::string &principal, const std::s
                  {"result",
                   {{"protocolVersion", negotiated},
                    {"capabilities", {{"tools", Json::object()}}},
-                   {"serverInfo", {{"name", "qcopilots-websearch"}, {"version", version_}, {"icons", icons}}},
+                   {"serverInfo", std::move(serverInfo)},
                    {"instructions", instructions}}}},
             fresh};
   }
@@ -241,12 +250,6 @@ ProtocolReply Protocol::handleRequest(const std::string &principal, const std::s
         const auto target = idKey(params["requestId"]);
         if (auto pending = session->inFlight.find(target); pending != session->inFlight.end())
           pending->second->cancelled = true;
-        else if (!session->usedIds.contains(target) && target.size() <= 1024) {
-          // A stdio worker may not have registered the request yet.
-          if (session->earlyCancelled.size() >= 16)
-            session->earlyCancelled.pop_front();
-          session->earlyCancelled.push_back(target);
-        }
       }
       return {202, std::nullopt, sid};
     }
@@ -284,34 +287,66 @@ ProtocolReply Protocol::handleRequest(const std::string &principal, const std::s
       if (!cancellation)
         token->deadline = Clock::now() + std::chrono::seconds(60);
       session->inFlight.emplace(key, token);
-      auto &early = session->earlyCancelled;
-      if (auto match = std::ranges::find(early, key); match != early.end()) {
-        early.erase(match);
-        token->cancelled = true;
-      }
     }
   }
-  ProtocolReply reply;
-  try {
-    // Service::call validates arguments once. Schema and business failures
-    // are tool results with isError so the model can correct its call.
-    if (method == "tools/list")
-      reply = {200, Json{{"jsonrpc", "2.0"}, {"id", id}, {"result", {{"tools", service_.tools()}}}}, sid};
-    else
-      reply = {200,
-               Json{{"jsonrpc", "2.0"},
-                    {"id", id},
-                    {"result", toolResult(service_.call(tool, args, principal, token), false)}},
-               sid};
-  } catch (const Error &e) {
-    if (token)
-      reply = {200, Json{{"jsonrpc", "2.0"}, {"id", id}, {"result", toolResult(errorPayload(e), true)}}, sid};
-    else
-      reply = rpcError(200, id, -32603, "Internal server error", sid);
-  } catch (...) {
-    reply = rpcError(200, id, -32603, "Internal server error", sid);
+  if (method == "tools/list") {
+    try {
+      auto tools = service_.tools();
+      if (session->negotiatedVersion == LegacyStdioVersion) {
+        for (auto &entry : tools)
+          entry = {{"name", entry.at("name")},
+                   {"description", entry.at("description")},
+                   {"inputSchema", std::move(entry.at("inputSchema"))}};
+      }
+      return {200, Json{{"jsonrpc", "2.0"}, {"id", id}, {"result", {{"tools", std::move(tools)}}}}, sid};
+    } catch (...) {
+      return rpcError(200, id, -32603, "Internal server error", sid);
+    }
   }
-  return token ? finishCall(session, sid, key, token, std::move(reply)) : reply;
+  // Local status stays available even when every stdio worker is occupied.
+  const bool queue = dispatch && tool != "web_search_status";
+  auto execute = [this, session, sid, key, id, token, tool = std::move(tool), args = std::move(args)] {
+    ProtocolReply reply{202, std::nullopt, sid};
+    if (!token->cancelled) {
+      try {
+        auto result = toolResult(service_.call(tool, args, session->principal, token), false,
+                                 session->negotiatedVersion);
+        reply = {200, Json{{"jsonrpc", "2.0"}, {"id", id}, {"result", std::move(result)}}, sid};
+      } catch (const Error &e) {
+        auto result = toolResult(errorPayload(e), true, session->negotiatedVersion);
+        reply = {200, Json{{"jsonrpc", "2.0"}, {"id", id}, {"result", std::move(result)}}, sid};
+      } catch (...) {
+        reply = rpcError(200, id, -32603, "Internal server error", sid);
+      }
+    }
+    return finishCall(session, sid, key, token, std::move(reply));
+  };
+  if (!queue)
+    return execute();
+  try {
+    dispatch([this, execute = std::move(execute)] { return boundedReply(execute()); });
+    return {202, std::nullopt, sid};
+  } catch (const Error &e) {
+    auto result = toolResult(errorPayload(e), true, session->negotiatedVersion);
+    return finishCall(session, sid, key, token,
+                      {200, Json{{"jsonrpc", "2.0"}, {"id", id}, {"result", std::move(result)}}, sid});
+  } catch (...) {
+    return finishCall(session, sid, key, token, rpcError(200, id, -32603, "Cannot dispatch tool call", sid));
+  }
+}
+int Protocol::sessionStatus(const std::string &principal, const std::string &sid) const {
+  if (principal.empty())
+    return 401;
+  if (sid.empty())
+    return 400;
+  std::lock_guard lock(mutex_);
+  if (closing_)
+    return 503;
+  const auto it = sessions_.find(sid);
+  if (it == sessions_.end() || it->second->principal != principal ||
+      (transport_ == TransportPolicy::StreamableHttp && it->second->idleExpired(now_())))
+    return 404;
+  return 200;
 }
 ProtocolReply Protocol::deleteSession(const std::string &principal, const std::string &sid) {
   if (principal.empty())

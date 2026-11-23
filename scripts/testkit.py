@@ -169,6 +169,7 @@ def start_process(executable, template, folder, fixture, tokens, ttl):
                 sock.bind(("127.0.0.1", 0))
             ports = [sock.getsockname()[1] for sock in sockets]
             config = copy.deepcopy(template)
+            config.setdefault("settings", {})["directory"] = str((folder / "state").resolve())
             for name, port in zip(("business", "control"), ports):
                 config[name] = {"host": "127.0.0.1", "port": port,
                                 "allowed_hosts": [f"127.0.0.1:{port}"]}

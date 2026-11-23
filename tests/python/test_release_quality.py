@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from unittest.mock import patch
@@ -47,6 +48,42 @@ class DebIsolationDiagnosticTests(unittest.TestCase):
                      self.assertRaisesRegex(RuntimeError, 'cross-release configuration error'):
                     acceptance_deb.require_cross_release_rejection(
                         subprocess.CompletedProcess([], code, output), legacy=legacy)
+
+
+class ParallelQualityTests(unittest.TestCase):
+    def test_parallel_checks_complete_all_items_and_join_workers(self):
+        pair = threading.Barrier(2, timeout=5)
+        completed = set()
+        lock = threading.Lock()
+
+        def check(item):
+            pair.wait()
+            with lock:
+                completed.add(item)
+
+        stopping = threading.Event()
+        quality.parallel_checks(range(4), check, 2, stopping)
+        self.assertEqual(completed, set(range(4)))
+        self.assertFalse(stopping.is_set())
+
+    def test_failure_signals_the_active_peer_and_preserves_the_original_error(self):
+        stopping = threading.Event()
+        pair = threading.Barrier(2, timeout=5)
+        exited = threading.Event()
+
+        def check(item):
+            pair.wait()
+            if item == 'broken':
+                raise RuntimeError('analysis failed')
+            try:
+                if not stopping.wait(5):
+                    raise AssertionError('peer was not cancelled')
+            finally:
+                exited.set()
+
+        with self.assertRaisesRegex(RuntimeError, 'analysis failed'):
+            quality.parallel_checks(['broken', 'running'], check, 2, stopping)
+        self.assertTrue(exited.is_set())
 
 
 class ReleaseGateTests(unittest.TestCase):

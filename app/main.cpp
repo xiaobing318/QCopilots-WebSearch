@@ -5,6 +5,7 @@
 #include <QTemporaryDir>
 #include <csignal>
 #include <cstdio>
+#include <filesystem>
 #include <iostream>
 #include <qws/admin.hpp>
 #include <qws/client_registry.hpp>
@@ -25,6 +26,60 @@ QString adjacentConfiguration() {
   const auto directory = executable.isEmpty() ? QCoreApplication::applicationDirPath()
                                               : QFileInfo(executable).absolutePath();
   return QDir(directory).filePath("data/runtime.json");
+}
+
+// QFileInfo::exists() cannot distinguish a missing configuration from an
+// inaccessible one. Only the former may use the isolated stdio defaults.
+bool adjacentStdioConfigurationExists(const QFileInfo &runtime) {
+  const auto status = [](const QFileInfo &info) {
+    std::error_code error;
+    const auto type = std::filesystem::symlink_status(info.filesystemAbsoluteFilePath(), error);
+    if (error && error != std::errc::no_such_file_or_directory)
+      throw qws::Error("invalid_configuration", "Cannot inspect the stdio configuration path.");
+    if (std::filesystem::is_symlink(type) || info.isSymLink() || info.isJunction())
+      throw qws::Error("invalid_configuration", "The stdio configuration path cannot be a link.");
+    return type;
+  };
+  const QFileInfo directory(runtime.absolutePath());
+  const auto parent = status(directory);
+  if (!std::filesystem::exists(parent))
+    return false;
+  std::error_code error;
+  if (!std::filesystem::is_directory(parent))
+    throw qws::Error("invalid_configuration", "The stdio configuration parent must be a directory.");
+  // Search permission alone can allow a known filename to be probed in a
+  // directory whose contents this identity cannot read.
+  (void)std::filesystem::directory_iterator(directory.filesystemAbsoluteFilePath(), error);
+  if (error)
+    throw qws::Error("invalid_configuration", "Cannot read the stdio configuration directory.");
+  const auto file = status(runtime);
+  if (!std::filesystem::exists(file))
+    return false;
+  if (!std::filesystem::is_regular_file(file))
+    throw qws::Error("invalid_configuration", "The stdio configuration must be a regular file.");
+  return true;
+}
+
+int serveStdio(const QFileInfo &runtime, bool implicit) {
+  const bool useDefaults = implicit && !adjacentStdioConfigurationExists(runtime);
+  qws::Config config;
+  if (!useDefaults) {
+    config = qws::Config::load(runtime.filePath().toStdString());
+    if (implicit && !config.value.contains("project_version"))
+      throw qws::Error("invalid_configuration", "The adjacent stdio configuration must identify project release "
+                                                QCWS_VERSION ".");
+  }
+  QTemporaryDir state;
+  if (!state.isValid())
+    throw qws::Error("cache_unavailable", "Cannot create private stdio state.", 503)
+        .withReason("cache_path_unavailable");
+  if (useDefaults) {
+    config = {qws::defaultConfiguration(), state.path().toStdString()};
+    config.value["settings"]["directory"] = state.filePath("settings").toStdString();
+  }
+  config.value["cache"]["directory"] = state.filePath("cache").toStdString();
+  qws::Service service(std::move(config));
+  return qws::runStdio(service);
 }
 #ifdef _WIN32
 std::wstring windowsServiceName = QString::fromLatin1(QCWS_WINDOWS_SERVICE_NAME).toStdWString();
@@ -144,15 +199,17 @@ void configureClientToken(const std::string &clientId, bool generate) {
 void signalStop(int) {
   stopping.store(true, std::memory_order_relaxed);
 }
-void waitForStop(qws::Service &service) {
+void waitForStop(qws::Service &service, const qws::HttpServer &server) {
   auto nextReload = qws::Clock::now() + std::chrono::seconds(2);
-  while (!stopping.load(std::memory_order_relaxed)) {
+  while (!stopping.load(std::memory_order_relaxed) && !server.listenerFailed()) {
     if (qws::Clock::now() >= nextReload) {
       service.settings().reloadIfChanged();
       nextReload = qws::Clock::now() + std::chrono::seconds(2);
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
+  if (server.listenerFailed())
+    throw qws::Error("listener_failed", "An HTTP listener stopped unexpectedly.", 503);
 }
 
 std::string listenerUrl(const qws::Json &listener, int port, bool tls = false) {
@@ -169,7 +226,6 @@ void printStartupSummary(const qws::Config &config, const qws::HttpServer &serve
   const auto runtime = QDir::toNativeSeparators(
       QFileInfo(QString::fromStdString(configPath)).absoluteFilePath()).toStdString();
   std::cerr << "QCopilots-WebSearch " << QCWS_VERSION << " ready.\n"
-            << "Business API: " << business << "/v1\n"
             << "MCP endpoint: " << business << "/mcp\n"
             << "Control API: " << control << " (health and metrics)\n"
             << "Runtime configuration: " << runtime << '\n'
@@ -191,19 +247,24 @@ int serve() {
   auto config = qws::Config::load(configPath);
   qws::Service service(config);
   qws::HttpServer server(service, config);
+#ifdef QCWS_TEST_STOP_BUSINESS_LISTENER
+  failBusinessAcceptForTest(server);
+#endif
   server.start();
   printStartupSummary(config, server);
-  waitForStop(service);
+  waitForStop(service, server);
   server.stop();
   return 0;
 }
 #ifdef _WIN32
 SERVICE_STATUS_HANDLE serviceHandle = nullptr;
 SERVICE_STATUS serviceStatus{};
+std::atomic_bool serviceFailed = false;
 void report(DWORD state, DWORD error = NO_ERROR) {
   serviceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
   serviceStatus.dwCurrentState = state;
   serviceStatus.dwWin32ExitCode = error;
+  serviceStatus.dwServiceSpecificExitCode = error == ERROR_SERVICE_SPECIFIC_ERROR ? 1 : 0;
   serviceStatus.dwControlsAccepted =
       state == SERVICE_RUNNING ? SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN : 0;
   serviceStatus.dwWaitHint = (state == SERVICE_START_PENDING || state == SERVICE_STOP_PENDING) ? 10000 : 0;
@@ -219,8 +280,10 @@ DWORD WINAPI serviceControl(DWORD control, DWORD, void *, void *) {
 }
 void WINAPI serviceMain(DWORD, wchar_t **) {
   serviceHandle = RegisterServiceCtrlHandlerExW(windowsServiceName.c_str(), serviceControl, nullptr);
-  if (!serviceHandle)
+  if (!serviceHandle) {
+    serviceFailed = true;
     return;
+  }
   report(SERVICE_START_PENDING);
   try {
     auto config = qws::Config::load(configPath);
@@ -234,10 +297,11 @@ void WINAPI serviceMain(DWORD, wchar_t **) {
       qws::publishWindowsInstalledAdminPort(runtime.absoluteDir().filePath("state"), admin.enabled ? admin.port : 0);
     }
     report(SERVICE_RUNNING);
-    waitForStop(service);
+    waitForStop(service, server);
     server.stop();
     report(SERVICE_STOPPED);
   } catch (...) {
+    serviceFailed = true;
     report(SERVICE_STOPPED, ERROR_SERVICE_SPECIFIC_ERROR);
   }
 }
@@ -308,7 +372,8 @@ int main(int argc, char **argv) {
         return 0;
       } else if (args[i] == "--Help") {
         std::cout << "qcopilots-websearch\n"
-                     "qcopilots-websearch --ConfigPath FILE [--Stdio | --WindowsService]\n"
+                     "qcopilots-websearch --ConfigPath FILE [--WindowsService]\n"
+                     "qcopilots-websearch [--ConfigPath FILE] --Stdio\n"
                      "qcopilots-websearch [--ConfigPath FILE] --CheckConfig\n"
                      "qcopilots-websearch --ConfigPath FILE --InitializeConfig "
                      "[--SelectAvailablePorts] [--StateDirectory DIR]\n"
@@ -320,8 +385,9 @@ int main(int argc, char **argv) {
         throw qws::Error("invalid_argument", "Unknown or incomplete command-line option.");
     }
     const bool standaloneGenerate = generateToken && configPath.empty();
-    if ((!portableStartup && !settingsUrl && (!check || serviceNameSpecified) && !standaloneGenerate &&
-         configPath.empty()) ||
+    const bool allowImplicit = portableStartup || settingsUrl || standaloneGenerate ||
+                               ((stdio || check) && !serviceNameSpecified);
+    if ((!allowImplicit && configPath.empty()) ||
         int(stdio) + int(serviceMode) + int(check) + int(initialize) + int(rollbackInitialization) +
                 int(commitInitialization) + int(settingsUrl) + int(generateToken) + int(setToken) >
             1 || (openUrl && !settingsUrl) ||
@@ -339,7 +405,7 @@ int main(int argc, char **argv) {
     if (implicitConfiguration)
       configPath = adjacentConfiguration().toStdString();
     const QFileInfo runtime(QString::fromStdString(configPath));
-    if (implicitConfiguration) {
+    if (implicitConfiguration && !stdio) {
       const QFileInfo directory(runtime.absolutePath());
       if (directory.isSymLink() || directory.isJunction() || runtime.isSymLink())
         throw qws::Error("invalid_configuration", "Use --ConfigPath to select a linked configuration path.");
@@ -415,22 +481,14 @@ int main(int argc, char **argv) {
       std::cout << "Configuration valid.\n";
       return 0;
     }
-    if (stdio) {
-      QTemporaryDir temporary;
-      if (!temporary.isValid())
-        throw qws::Error("cache_unavailable", "Cannot create private stdio state.", 503)
-            .withReason("cache_path_unavailable");
-      auto config = qws::Config::load(configPath);
-      config.value["cache"]["directory"] = temporary.path().toStdString();
-      qws::Service instance(config);
-      return qws::runStdio(instance);
-    }
+    if (stdio)
+      return serveStdio(runtime, implicitConfiguration);
     if (serviceMode) {
 #ifdef _WIN32
       SERVICE_TABLE_ENTRYW table[] = {{windowsServiceName.data(), serviceMain}, {nullptr, nullptr}};
       if (!StartServiceCtrlDispatcherW(table))
         throw qws::Error("service_error", "Start this mode through Windows Service Control Manager.", 500);
-      return 0;
+      return serviceFailed.load() ? 1 : 0;
 #else
       throw qws::Error("invalid_argument", "Windows service mode is only available on Windows.");
 #endif

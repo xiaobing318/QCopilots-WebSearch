@@ -1,13 +1,17 @@
 """Verify the business listener and a certificate-verifying HTTPS origin connection."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import http.client
+import json
 from pathlib import Path
+import select
 import socket
 import ssl
 import tempfile
 
-from test_admin_http import read_admin_status, request
+from mcp_http_fixture import INITIALIZE, mcp_request
+from test_admin_http import read_admin_status
 from test_client_tokens import Fixture, HOST, require, verify_business
 from tls_fixture import certificates
 
@@ -20,6 +24,25 @@ def rejected_handshake(port, context, hostname):
         except ssl.SSLCertVerificationError:
             return
     raise AssertionError(f"The TLS client accepted an invalid certificate for {hostname}")
+
+
+def verify_early_tls_response(fixture, trusted):
+    body = json.dumps(INITIALIZE).encode()
+    with closing(http.client.HTTPSConnection("127.0.0.1", fixture.business, context=trusted, timeout=3)) as client:
+        client.putrequest("POST", "/mcp", skip_host=True)
+        headers = fixture.headers(fixture.file_token) | {
+            "Origin": "null", "Content-Type": "application/json", "Content-Length": str(len(body)),
+            "Accept": "application/json, text/event-stream",
+        }
+        for name, value in headers.items():
+            client.putheader(name, value)
+        client.endheaders()
+        # Send the normal MCP body in its own TLS record, while the rejection is in flight.
+        require(select.select([client.sock], [], [], 1)[0], "The origin waited for the body before rejecting headers")
+        client.send(body)
+        response = client.getresponse()
+        require(response.status == 403 and json.loads(response.read())["error"]["code"] == "forbidden",
+                "The TLS client lost the early rejection while sending its request body")
 
 
 def verify(executable, openssl, root):
@@ -57,15 +80,16 @@ def verify(executable, openssl, root):
         rejected_handshake(fixture.business, unrelated, "127.0.0.1")
         rejected_handshake(fixture.business, trusted, "wrong-name.invalid")
         try:
-            status, _, _ = request(fixture.business, "GET", "/v1/status", {"Host": HOST})
+            status, _, _ = mcp_request(fixture.business, {"Host": HOST}, INITIALIZE)
         except (OSError, http.client.HTTPException):
             pass
         else:
             require(status == 400, "The TLS origin answered an ordinary plaintext business request")
+        verify_early_tls_response(fixture, trusted)
         verify_business(fixture, fixture.environment_token)
         with ThreadPoolExecutor(max_workers=4) as pool:
-            pending = [pool.submit(fixture.public, "GET", "/v1/status", fixture.file_token) for _ in range(4)]
-            require(all(call.result()[0] == 200 for call in pending), "Concurrent TLS status requests failed")
+            pending = [pool.submit(fixture.probe, fixture.file_token) for _ in range(4)]
+            require(all(call.result()[0] == 200 for call in pending), "Concurrent MCP requests over TLS failed")
 
 
 if __name__ == "__main__":

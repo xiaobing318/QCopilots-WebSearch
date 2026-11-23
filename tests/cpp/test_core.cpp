@@ -1,3 +1,4 @@
+#include "test_support.hpp"
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
@@ -18,6 +19,7 @@
 #include <qws/html.hpp>
 #include <qws/server.hpp>
 #include <stdexcept>
+#include <string_view>
 #include <zlib.h>
 using namespace qws;
 namespace {
@@ -395,6 +397,7 @@ void coalescingTests() {
   a->cancelled = true;
   REQUIRE(first.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
   REQUIRE(first.get().code == "cancelled");
+  REQUIRE(service.status()["search_waiters"] == 1);
   REQUIRE(second.wait_for(std::chrono::milliseconds(0)) == std::future_status::timeout);
   REQUIRE(disconnected == 0);
   release = true;
@@ -416,6 +419,7 @@ void coalescingTests() {
   b->cancelled = true;
   REQUIRE(third.get().code == "cancelled");
   REQUIRE(fourth.get().code == "cancelled");
+  REQUIRE(service.status()["search_waiters"] == 0);
   REQUIRE(eventually(idle));
   // Callers abandoning a search do not make the provider look unavailable.
   REQUIRE(service.status()["provider"]["state"] == "available");
@@ -1029,6 +1033,22 @@ void searchQualityTests() {
   REQUIRE(r["results"].size() == 2);
   REQUIRE(r["results"][0]["url"] == "https://www.example.com/a/");
   REQUIRE(r["results"][1]["url"] == "https://example.com/c");
+  REQUIRE(r["warnings"].empty());
+  // Default ports are equivalent to omission. HTTPS on 80 and HTTP on 443
+  // each identify another result and must keep the page scan moving.
+  respond = [](int page) {
+    if (page == 1)
+      return searxngPage({"https://example.com/a", "http://example.com:80/a", "https://example.com:443/a"});
+    if (page == 2)
+      return searxngPage({"https://example.com:80/a"});
+    return searxngPage({"http://example.com:443/a"});
+  };
+  r = search({{"query", "scheme-specific ports"}, {"limit", 5}});
+  REQUIRE(pages == std::vector<int>({1, 2, 3}));
+  REQUIRE(r["results"].size() == 3);
+  REQUIRE(r["results"][0]["url"] == "https://example.com/a");
+  REQUIRE(r["results"][1]["url"] == "https://example.com:80/a");
+  REQUIRE(r["results"][2]["url"] == "http://example.com:443/a");
   // New URLs rejected by a domain filter still count as progress, so the scan
   // continues to later pages.
   respond = [](int page) {
@@ -1042,6 +1062,20 @@ void searchQualityTests() {
   REQUIRE(pages == std::vector<int>({1, 2, 3}));
   REQUIRE(r["results"].size() == 1);
   REQUIRE(r["results"][0]["url"] == "https://docs.example.com/y");
+  // An excluded host must not claim the result identity of an allowed www
+  // variant. Finding that variant on its own page should also reach page 3.
+  respond = [](int page) {
+    if (page == 1)
+      return searxngPage({"https://example.com/a"});
+    if (page == 2)
+      return searxngPage({"https://www.example.com/a#first", "http://www.example.com/a/"});
+    return searxngPage({"https://www.example.com/b"});
+  };
+  r = search({{"query", "filtered duplicate"}, {"limit", 5}, {"domains", Json::array({"www.example.com"})}});
+  REQUIRE(pages == std::vector<int>({1, 2, 3}));
+  REQUIRE(r["results"].size() == 2);
+  REQUIRE(r["results"][0]["url"] == "https://www.example.com/a");
+  REQUIRE(r["results"][1]["url"] == "https://www.example.com/b");
   // Hosts that are not DNS names are kept when no domain filter applies.
   respond = [](int) { return searxngPage({"http://[2606:4700::1111]/x"}); };
   REQUIRE(search({{"query", "literal"}, {"limit", 1}})["results"].size() == 1);
@@ -1073,7 +1107,7 @@ void searchQualityTests() {
   r = search({{"query", "quality"}, {"limit", 8}, {"time_range", "week"}});
   REQUIRE(pages == std::vector<int>({1, 2}));
   REQUIRE(QUrlQuery(QString::fromStdString(form)).queryItemValue("time_range") == "week");
-  REQUIRE(r["warnings"].size() == 1);
+  REQUIRE(r["warnings"] == Json::array({"Time range is an upstream hint, not a strict date filter."}));
   REQUIRE(r["results"].size() == 8);
   const std::vector<Json> dates = {"2024-05-01T10:30:00Z", "2024-05-01T12:30:00Z", "2024-05-01T12:30:00Z",
                                    nullptr, nullptr, nullptr, nullptr, nullptr};
@@ -1154,23 +1188,89 @@ void searchPartialTests() {
   REQUIRE(r["cache"]["ttl_seconds"] == 0);
   REQUIRE(s.call("web_search", empty, "alice", token())["cache"]["hit"] == false);
   REQUIRE(requests == 6);
-  // A caller joins a running search only while at least half of a fresh search
-  // deadline (here 1 of 2 seconds) remains. The upstream deadline is 1.6 s.
-  std::atomic_bool release = false;
-  respond = [&](int, const auto &cancel) {
-    while (!release && !cancel->stopped())
-      std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    return release ? searxngPage({"https://example.com/join"}) : blockUntilStopped(cancel);
+}
+void searchCacheFormatTests() {
+  QTemporaryDir dir;
+  const auto settings = config(dir);
+  const Json args = {{"query", "filtered"}, {"limit", 1}, {"language", "all"},
+                     {"time_range", "any"}, {"domains", Json::array({"example.com"})}};
+  auto oldKey = [](const Json &parts) {
+    return QCryptographicHash::hash(QByteArray::fromStdString(parts.dump()), QCryptographicHash::Sha256)
+        .toHex().toStdString();
   };
-  const Json join = {{"query", "join rule"}, {"limit", 1}};
-  auto early = std::async(std::launch::async, [&] { return s.call("web_search", join, "alice", token(5000)); });
-  REQUIRE(eventually([&] { return requests == 7; }));
-  std::this_thread::sleep_for(std::chrono::milliseconds(800));
-  auto late = std::async(std::launch::async, [&] { return s.call("web_search", join, "alice", token(5000)); });
-  REQUIRE(eventually([&] { return requests == 8; }));
-  release = true;
-  REQUIRE(early.get()["results"].size() == 1);
-  REQUIRE(late.get()["results"].size() == 1);
+  {
+    SettingsStore providers(settings);
+    const auto fingerprint = providers.provider(*providers.current()).fingerprint();
+    Cache old(dir.filePath("cache-v1.sqlite").toStdString(), 16 * 1024 * 1024, 100);
+    old.put(oldKey({3, fingerprint, "search", "alice", args.dump()}),
+            {{"results", Json::array()}, {"cache", {{"hit", false}, {"ttl_seconds", 300}}}}, 300);
+    old.put(oldKey({3, "page", "page", "alice", "existing-page"}),
+            {{"page_id", "existing-page"}, {"text", "snapshot text"}}, 300);
+  }
+  Service s(settings, transport());
+  const auto search = s.call("web_search", args, "alice", token());
+  REQUIRE(search["cache"]["hit"] == false);
+  REQUIRE(search["results"][0]["url"] == "https://example.com/a");
+  const auto page = s.call("web_find", {{"page_id", "existing-page"}, {"pattern", "text"}}, "alice", token());
+  REQUIRE(page["matches"][0]["text"] == "snapshot text");
+}
+void searchCacheGenerationTests() {
+  using namespace std::chrono_literals;
+  QTemporaryDir dir;
+  auto settings = config(dir);
+  constexpr auto timeout = 4s;
+  settings.value["limits"]["search_timeout_seconds"] = timeout.count();
+  std::atomic_int requests = 0;
+  std::atomic_bool releaseOlder = false, releaseNewer = false;
+  std::promise<Clock::time_point> firstStarted;
+  auto t = transport();
+  t.search = [&](auto, auto, auto, const auto &cancel) {
+    if (++requests == 1) {
+      firstStarted.set_value(cancel->deadline);
+      while (!releaseOlder && !cancel->stopped())
+        std::this_thread::sleep_for(2ms);
+      return searxngPage({"https://example.com/old"},
+                         {{"unresponsive_engines", Json::array({Json::array({"google", "timeout"})})}});
+    }
+    while (!releaseNewer && !cancel->stopped())
+      std::this_thread::sleep_for(2ms);
+    return searxngPage({"https://example.com/new"});
+  };
+  const Json args = {{"query", "overlapping generations"}, {"limit", 1}};
+  {
+    Service s(settings, t);
+    auto deadline = firstStarted.get_future();
+    auto older = std::async(std::launch::async, [&] { return s.call("web_search", args, "alice", token(8000)); });
+    REQUIRE(deadline.wait_for(5s) == std::future_status::ready);
+    // Falling below half a fresh deadline starts a new search for the same key.
+    std::this_thread::sleep_until(deadline.get() - timeout / 2 + 5ms);
+    auto pendingNewer = std::async(std::launch::async, [&] { return s.call("web_search", args, "alice", token(8000)); });
+    REQUIRE(eventually([&] { return requests == 2; }));
+    REQUIRE(s.call("web_search_status", Json::object(), "observer", token())["search_waiters"] == 2);
+    releaseNewer = true;
+    const auto newer = pendingNewer.get();
+    REQUIRE(s.status()["search_waiters"] == 1);
+    REQUIRE(newer["status"] == "ok");
+    REQUIRE(newer["results"][0]["url"] == "https://example.com/new");
+    SqlFixture disk(dir.filePath("cache-v1.sqlite"));
+    REQUIRE(eventually([&] {
+      QSqlQuery query(disk.db);
+      REQUIRE(query.exec("SELECT payload FROM entries"));
+      return query.next() && query.value(0).toByteArray().contains("https://example.com/new");
+    }));
+    REQUIRE(older.wait_for(0ms) == std::future_status::timeout);
+    releaseOlder = true;
+    const auto old = older.get();
+    REQUIRE(s.status()["search_waiters"] == 0);
+    REQUIRE(old["status"] == "partial");
+    REQUIRE(old["results"][0]["url"] == "https://example.com/old");
+  } // Join both background writes before checking the durable result.
+  Service restarted(settings, t);
+  const auto hit = restarted.call("web_search", args, "alice", token());
+  REQUIRE(hit["cache"]["hit"] == true);
+  REQUIRE(hit["status"] == "ok");
+  REQUIRE(hit["results"][0]["url"] == "https://example.com/new");
+  REQUIRE(requests == 2);
 }
 void searchCacheWriteFailureTests() {
   QTemporaryDir dir;
@@ -1341,10 +1441,17 @@ void jsonAndDeadlineTests() {
   }
 }
 // Version negotiation, tools.json metadata, validation as tool errors,
-// cancellation before registration, configuration detail and bearer parsing.
+// cancellation at dispatch, configuration detail and bearer parsing.
 void mcpContractTests() {
   QTemporaryDir dir;
-  Service s(config(dir), transport());
+  int pageFetches = 0;
+  auto fixture = transport();
+  const auto fetch = fixture.open;
+  fixture.open = [&](auto url, auto cancellation) {
+    ++pageFetches;
+    return fetch(std::move(url), std::move(cancellation));
+  };
+  Service s(config(dir), std::move(fixture));
   const auto &catalog = toolCatalog();
   REQUIRE(catalog["instructions"].is_string());
   REQUIRE(catalog["instructions"].get<std::string>().find("next_start_line") != std::string::npos);
@@ -1447,32 +1554,68 @@ void mcpContractTests() {
     REQUIRE(e.code == "invalid_argument");
     REQUIRE(std::string(e.what()).find("'pattern'") != std::string::npos);
   }
-  // A cancellation can arrive before a stdio worker registers its request.
   Protocol stdio(s, QCWS_VERSION, {}, Protocol::TransportPolicy::Stdio);
   const auto stdioSid = initialize(stdio, "2025-06-18").sessionId;
   stdio.handle("alice", stdioSid, initialized);
-  auto cancel = [&](const std::string &id) {
-    return stdio.handle("alice", stdioSid,
-                        {{"jsonrpc", "2.0"}, {"method", "notifications/cancelled"}, {"params", {{"requestId", id}}}});
+  const auto legacySid = initialize(stdio, "2024-11-05").sessionId;
+  stdio.handle("alice", legacySid, initialized);
+  // Interleaved sessions keep the response shape of their own handshake.
+  for (const auto &active : {stdioSid, legacySid}) {
+    const auto tools = stdio.handle("alice", active, {{"jsonrpc", "2.0"}, {"id", 1}, {"method", "tools/list"}});
+    REQUIRE(tools.message->at("result").at("tools").at(0).contains("annotations") == (active == stdioSid));
+    const auto value = stdio.handle("alice", active, mcpToolCall(2, "web_search_status", Json::object()));
+    REQUIRE(value.message->at("result").contains("structuredContent") == (active == stdioSid));
+  }
+  auto cancel = [&](const std::string &owner, const std::string &activeSession, const Json &id) {
+    return stdio.handle(
+        owner, activeSession,
+        {{"jsonrpc", "2.0"}, {"method", "notifications/cancelled"}, {"params", {{"requestId", id}}}});
   };
-  auto status = [&](const std::string &id) {
-    return stdio.handle("alice", stdioSid,
-                        {{"jsonrpc", "2.0"},
-                         {"id", id},
-                         {"method", "tools/call"},
-                         {"params", {{"name", "web_search_status"}}}});
+  auto openRequest = [](const Json &id) {
+    auto message = mcpToolCall(0, "web_open", {{"url", "https://example.com/registered"}});
+    message["id"] = id;
+    return message;
   };
-  REQUIRE(cancel("early").httpStatus == 202);
-  auto r = status("early");
-  REQUIRE(r.httpStatus == 202 && !r.message);
-  r = status("after");
-  REQUIRE(r.message && (*r.message)["result"]["isError"] == false);
-  // Completed IDs are not remembered, and the early window keeps 16 IDs.
-  REQUIRE(cancel("after").httpStatus == 202);
-  for (int i = 0; i < 20; ++i)
-    cancel("window-" + std::to_string(i));
-  REQUIRE(status("window-0").message);
-  REQUIRE(!status("window-19").message);
+  // Hold all workers until every cancellation has reached the reader. The
+  // longest legal string ID and every one of 17 more calls are already owned.
+  std::vector<Protocol::ToolTask> queued;
+  const Protocol::ToolDispatcher dispatch = [&](Protocol::ToolTask task) {
+    queued.push_back(std::move(task));
+  };
+  std::vector<Json> ids{std::string(65534, 'x')};
+  for (int i = 0; i < 17; ++i)
+    ids.emplace_back("queued-" + std::to_string(i));
+  std::vector<std::shared_ptr<CancelToken>> pending;
+  for (const auto &id : ids) {
+    pending.push_back(token());
+    const auto accepted = stdio.handle("alice", stdioSid, openRequest(id), pending.back(), dispatch);
+    REQUIRE(accepted.httpStatus == 202 && !accepted.message);
+  }
+  REQUIRE(queued.size() == ids.size());
+  const auto duplicate = stdio.handle("alice", stdioSid, openRequest(ids[0]), {}, dispatch);
+  REQUIRE(duplicate.message->at("error").at("code") == -32600 && queued.size() == ids.size());
+  REQUIRE(cancel("bob", stdioSid, ids[0]).httpStatus == 404);
+  REQUIRE(cancel("alice", legacySid, ids[0]).httpStatus == 202 && !pending[0]->cancelled);
+  for (size_t i = 0; i < ids.size(); ++i) {
+    REQUIRE(cancel("alice", stdioSid, ids[i]).httpStatus == 202);
+    REQUIRE(pending[i]->cancelled);
+  }
+  const auto before = pageFetches;
+  for (auto &task : queued) {
+    const auto suppressed = task();
+    REQUIRE(suppressed.httpStatus == 202 && !suppressed.message);
+  }
+  REQUIRE(pageFetches == before);
+  REQUIRE(cancel("alice", stdioSid, ids[0]).httpStatus == 202);
+  REQUIRE(cancel("alice", stdioSid, "unknown").httpStatus == 202);
+  const auto following = stdio.handle("alice", stdioSid, openRequest("unknown"));
+  REQUIRE(following.message->at("result").at("isError") == false && pageFetches == before + 1);
+  queued.clear();
+  const auto stopping = token();
+  REQUIRE(stdio.handle("alice", stdioSid, openRequest("shutdown"), stopping, dispatch).httpStatus == 202);
+  REQUIRE(queued.size() == 1);
+  stdio.shutdown();
+  REQUIRE(stopping->cancelled && !queued.front()().message && pageFetches == before + 1);
   // Runtime configuration errors name the failing field.
   auto runtime = defaultConfiguration();
   runtime["limits"]["max_concurrent"] = 999;
@@ -1521,30 +1664,54 @@ void httpTests() {
   client.set_connection_timeout(2);
   client.set_read_timeout(3);
   httplib::Headers headers = {{"Host", "test.local"}, {"Authorization", "Bearer " + std::string(64, 'a')}};
-  auto r = client.Get("/v1/status", headers);
+  auto r = client.Post("/mcp", headers, "{}", "application/json");
+  REQUIRE(r && r->status == 406);
+  auto unavailableJson = headers;
+  unavailableJson.emplace("Accept", "application/json;Q=0, text/event-stream");
+  r = client.Post("/mcp", unavailableJson, mcpInitialize(1, "2025-06-18").dump(), "application/json");
+  REQUIRE(r && r->status == 406);
+  auto mcpHeaders = headers;
+  mcpHeaders.emplace("Accept", "application/json");
+  mcpHeaders.emplace("Accept", "text/event-stream");
+  r = client.Post("/mcp", mcpHeaders, mcpInitialize(1, "2025-06-18").dump(), "application/json");
   REQUIRE(r && r->status == 200);
-  REQUIRE(Json::parse(r->body)["contract_version"] == 1);
+  REQUIRE(Json::parse(r->body)["result"]["protocolVersion"] == "2025-06-18");
+  auto session = mcpHeaders;
+  REQUIRE(!r->get_header_value("Mcp-Session-Id").empty());
+  session.emplace("Mcp-Session-Id", r->get_header_value("Mcp-Session-Id"));
+  session.emplace("MCP-Protocol-Version", "2025-06-18");
+  r = client.Post("/mcp", session, R"({"jsonrpc":"2.0","method":"notifications/initialized"})",
+                  "application/json");
+  REQUIRE(r && r->status == 202 && r->body.empty());
+  int requestId = 1;
+  auto status = [&](const httplib::Headers &requestHeaders) {
+    return client.Post("/mcp", requestHeaders, mcpToolCall(++requestId, "web_search_status", Json::object()).dump(),
+                       "application/json");
+  };
+  r = status(session);
+  REQUIRE(r && r->status == 200);
+  REQUIRE(Json::parse(r->body)["result"]["structuredContent"]["contract_version"] == 1);
   REQUIRE(!r->has_header("Access-Control-Allow-Origin"));
-  r = client.Get("/v1/status", httplib::Headers{{"Host", "test.local"}});
+  r = status({{"Host", "test.local"}});
   REQUIRE(r && r->status == 401);
   for (const auto *origin : {"https://client.example", "https://another.example:8443", "http://localhost:3000",
                              "http://127.0.0.1:0", "https://[::1]:8443", "https://xn--bcher-kva.example"}) {
-    auto browser = headers;
+    auto browser = session;
     browser.emplace("Origin", origin);
-    r = client.Get("/v1/status", browser);
+    r = status(browser);
     REQUIRE(r && r->status == 200);
     REQUIRE(r->get_header_value("Access-Control-Allow-Origin") == origin);
     REQUIRE(r->get_header_value("Vary") == "Origin");
     REQUIRE(r->get_header_value("Access-Control-Expose-Headers") == "Mcp-Session-Id");
     REQUIRE(!r->has_header("Access-Control-Allow-Credentials"));
     browser.erase("Authorization");
-    r = client.Get("/v1/status", browser);
+    r = status(browser);
     REQUIRE(r && r->status == 401);
     REQUIRE(r->get_header_value("Access-Control-Allow-Origin") == origin);
     REQUIRE(r->get_header_value("WWW-Authenticate") == "Bearer");
     REQUIRE(Json::parse(r->body)["error"]["code"] == "unauthorized");
     browser.emplace("Authorization", "Bearer invalid");
-    r = client.Get("/v1/status", browser);
+    r = status(browser);
     REQUIRE(r && r->status == 401);
     REQUIRE(r->get_header_value("Access-Control-Allow-Origin") == origin);
   }
@@ -1556,32 +1723,37 @@ void httpTests() {
                              "https://[::1]:", "https://[::1]:65536", "https://client.example,https://other.example",
                              "https://client.example https://other.example", "https://client.\texample",
                              "https://client.example\\path", "https://%63lient.example"}) {
-    auto browser = headers;
+    auto browser = session;
     browser.emplace("Origin", origin);
-    r = client.Get("/v1/status", browser);
+    r = status(browser);
     REQUIRE(r && r->status == 403);
     REQUIRE(Json::parse(r->body)["error"]["code"] == "forbidden");
     REQUIRE(!r->has_header("Access-Control-Allow-Origin"));
   }
-  auto duplicateOrigin = headers;
+  auto duplicateOrigin = session;
   duplicateOrigin.emplace("Origin", "https://client.example");
   duplicateOrigin.emplace("Origin", "https://client.example");
-  r = client.Get("/v1/status", duplicateOrigin);
+  r = status(duplicateOrigin);
   REQUIRE(r && r->status == 403);
   REQUIRE(!r->has_header("Access-Control-Allow-Origin"));
-  auto wrongHost = headers;
+  auto wrongHost = session;
   wrongHost.erase("Host");
   wrongHost.emplace("Host", "other.example");
   wrongHost.emplace("Origin", "https://client.example");
-  r = client.Get("/v1/status", wrongHost);
+  r = status(wrongHost);
   REQUIRE(r && r->status == 403);
   REQUIRE(!r->has_header("Access-Control-Allow-Origin"));
   r = client.Options("/mcp", {{"Host", "test.local"},
                               {"Origin", "https://client.example"},
+                              {"Access-Control-Request-Headers", "authorization,mcp-method,mcp-name,mcp-protocol-version"},
                               {"Access-Control-Request-Method", "POST"}});
   REQUIRE(r && r->status == 204);
   REQUIRE(r->get_header_value("Access-Control-Allow-Origin") == "https://client.example");
-  REQUIRE(r->get_header_value("Access-Control-Allow-Headers").find("Authorization") != std::string::npos);
+  auto allowedHeaders = QString::fromStdString(r->get_header_value("Access-Control-Allow-Headers")).toLower().split(',');
+  for (auto &field : allowedHeaders)
+    field = field.trimmed();
+  for (const auto *field : {"authorization", "mcp-method", "mcp-name", "mcp-protocol-version"})
+    REQUIRE(allowedHeaders.contains(QString::fromLatin1(field)));
   r = client.Options("/mcp", {{"Host", "test.local"}, {"Origin", "https://another.example"},
                              {"Access-Control-Request-Method", "DELETE"}});
   REQUIRE(r && r->status == 204);
@@ -1591,38 +1763,56 @@ void httpTests() {
   REQUIRE(r && r->status == 403);
   r = client.Options("/mcp", {{"Host", "test.local"}});
   REQUIRE(r && r->status == 403);
-  r = client.Post("/v1/search", headers, "{\"query\":\"hello\"}", "application/json");
+  auto oldRouteHeaders = headers;
+  oldRouteHeaders.emplace("Origin", "https://client.example");
+  for (const auto *path : {"/v1/search", "/v1/open", "/v1/find", "/v1/status"}) {
+    const bool isGet = std::string_view(path) == "/v1/status";
+    r = isGet ? client.Get(path, oldRouteHeaders) : client.Post(path, oldRouteHeaders, "{}", "application/json");
+    REQUIRE(r && r->status == 404);
+    r = client.Options(path, {{"Host", "test.local"}, {"Origin", "https://client.example"},
+                              {"Access-Control-Request-Method", isGet ? "GET" : "POST"},
+                              {"Access-Control-Request-Headers", "authorization"}});
+    REQUIRE(r && r->status == 404);
+  }
+  r = client.Post("/mcp", session, mcpToolCall(++requestId, "web_search", {{"query", "hello"}}).dump(),
+                  "application/json");
   REQUIRE(r && r->status == 200);
-  r = client.Get("/mcp", headers);
-  REQUIRE(r && r->status == 405);
-  r = client.Post("/mcp", headers, "{}", "application/json");
-  REQUIRE(r && r->status == 406);
-  auto mcpHeaders = headers;
-  mcpHeaders.emplace("Accept", "application/json, text/event-stream");
-  Json init = {{"jsonrpc", "2.0"}, {"id", ""}, {"method", "initialize"},
-               {"params", {{"protocolVersion", "2025-06-18"}, {"capabilities", Json::object()},
-                           {"clientInfo", {{"name", "test"}, {"version", "1"}}}}}};
+  REQUIRE(Json::parse(r->body)["result"]["isError"] == false);
+  r = client.Get("/mcp", session);
+  REQUIRE(r && r->status == 405 && r->get_header_value("Allow") == "POST, DELETE");
+  auto badVersion = session;
+  badVersion.erase("MCP-Protocol-Version");
+  badVersion.emplace("MCP-Protocol-Version", "invalid");
+  r = client.Get("/mcp", badVersion);
+  REQUIRE(r && r->status == 400);
+  auto init = mcpInitialize(1, "2025-11-25");
+  init["id"] = "";
   init["id"] = std::string(1024 * 1024 - init.dump().size(), 'x');
   r = client.Post("/mcp", mcpHeaders, init.dump(), "application/json");
   REQUIRE(r && r->status == 400);
   REQUIRE(Json::parse(r->body)["error"]["code"] == -32600);
   REQUIRE(!r->has_header("Mcp-Session-Id"));
-  init["id"] = 1;
-  r = client.Post("/mcp", mcpHeaders, init.dump(), "application/json");
-  REQUIRE(r && r->status == 200);
-  REQUIRE(Json::parse(r->body)["result"]["protocolVersion"] == "2025-06-18");
+  auto probe = headers;
+  probe.emplace("Accept", "application/json");
+  probe.emplace("Origin", "https://client.example");
+  probe.emplace("MCP-Protocol-Version", "2026-07-28");
+  probe.emplace("Mcp-Method", "server/discover");
+  r = client.Post("/mcp", probe, R"({"jsonrpc":"2.0","id":1,"method":"server/discover"})", "application/json");
+  REQUIRE(r && r->status == 400 && !Json::parse(r->body).contains("jsonrpc"));
+  REQUIRE(r->get_header_value("Access-Control-Allow-Origin") == "https://client.example");
   init["id"] = 2;
-  init["params"]["protocolVersion"] = "2025-11-25";
-  r = client.Post("/mcp", mcpHeaders, init.dump(), "application/json");
+  auto browserHeaders = mcpHeaders;
+  browserHeaders.emplace("Origin", "https://client.example");
+  r = client.Post("/mcp", browserHeaders, init.dump(), "application/json");
   REQUIRE(r && r->status == 200);
   const auto negotiated = Json::parse(r->body)["result"];
   REQUIRE(negotiated["protocolVersion"] == "2025-11-25" && negotiated["instructions"].is_string());
-  auto session = mcpHeaders;
-  session.emplace("Mcp-Session-Id", r->get_header_value("Mcp-Session-Id"));
+  auto secondSession = browserHeaders;
+  secondSession.emplace("Mcp-Session-Id", r->get_header_value("Mcp-Session-Id"));
   int pingId = 10;
   for (const auto &[version, status] : std::initializer_list<std::pair<const char *, int>>{
            {"2025-11-25", 200}, {"2025-06-18", 200}, {"2025-03-26", 400}, {"2026-07-28", 400}}) {
-    auto versioned = session;
+    auto versioned = secondSession;
     versioned.emplace("MCP-Protocol-Version", version);
     r = client.Post("/mcp", versioned, Json{{"jsonrpc", "2.0"}, {"id", ++pingId}, {"method", "ping"}}.dump(),
                     "application/json");
@@ -1631,12 +1821,21 @@ void httpTests() {
     if (status == 400)
       REQUIRE(!Json::parse(r->body).contains("jsonrpc"));
   }
-  r = client.Post("/v1/search", headers, R"({"query":"q","limit":0})", "application/json");
-  REQUIRE(r && r->status == 400);
-  REQUIRE(Json::parse(r->body)["error"]["message"].get<std::string>().find("/limit") != std::string::npos);
-  r = client.Get("/v1/status",
-                 httplib::Headers{{"Host", "test.local"}, {"Authorization", "bearer " + std::string(64, 'a')}});
+  r = client.Post("/mcp", session, mcpToolCall(++requestId, "web_search", {{"query", "q"}, {"limit", 0}}).dump(),
+                  "application/json");
   REQUIRE(r && r->status == 200);
+  const auto invalid = Json::parse(r->body)["result"];
+  REQUIRE(invalid["isError"] == true);
+  REQUIRE(invalid["structuredContent"]["error"]["message"].get<std::string>().find("/limit") != std::string::npos);
+  auto lowercase = session;
+  lowercase.erase("Authorization");
+  lowercase.emplace("Authorization", "bearer " + std::string(64, 'a'));
+  r = status(lowercase);
+  REQUIRE(r && r->status == 200);
+  r = client.Delete("/mcp", session);
+  REQUIRE(r && r->status == 204);
+  r = client.Get("/mcp", session);
+  REQUIRE(r && r->status == 404);
   httplib::Client control("127.0.0.1", server.controlPort());
   r = control.Get("/health/live", headers);
   REQUIRE(r && r->status == 200);
@@ -1693,8 +1892,8 @@ int main(int argc, char **argv) {
       auto r = client.requestBackend(argv[2], "q=tls", "", token(5000));
       return success && r.status == 200 && r.body == "q=tls" ? 0 : 21;
     } catch (const Error &e) {
-      std::cerr << e.code << ": " << e.what() << '\n';
-      return !success && e.code == "provider_unavailable" ? 0 : 22;
+      std::cerr << e.code << " (" << e.reason << "): " << e.what() << '\n';
+      return !success && e.code == "provider_unavailable" && e.reason == "network_tls_failed" ? 0 : 22;
     }
   }
   const std::pair<const char *, void (*)()> tests[] = {
@@ -1714,6 +1913,8 @@ int main(int argc, char **argv) {
       {"concurrency", concurrencyTests},
       {"search-quality", searchQualityTests},
       {"search-partial", searchPartialTests},
+      {"search-cache-format", searchCacheFormatTests},
+      {"search-cache-generation", searchCacheGenerationTests},
       {"search-cache-write-failure", searchCacheWriteFailureTests},
       {"protocol", protocolTests},
       {"json-and-deadlines", jsonAndDeadlineTests},

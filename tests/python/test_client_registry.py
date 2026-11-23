@@ -13,11 +13,10 @@ import tempfile
 import threading
 import time
 
-from test_admin_http import ports, request
+from mcp_http_fixture import mcp_probe, mcp_request, ports, request, start_session
 
 
 API = "/admin/api/v1"
-PROTOCOL_VERSION = "2025-06-18"
 
 
 def require(condition, message):
@@ -65,12 +64,8 @@ class Fixture:
         require(self.runtime.read_bytes() == self.runtime_bytes,
                 "Client management modified the installed runtime configuration")
 
-    def public(self, token, path="/v1/status", method="GET", body=None, extra=None, control=False):
-        headers = {"Authorization": f"Bearer {token}"}
-        if body is not None:
-            headers["Content-Type"] = "application/json"
-        return request(self.control if control else self.business, method, path,
-                       headers | (extra or {}), body)
+    def probe(self, token):
+        return mcp_probe(self.business, {"Authorization": f"Bearer {token}"})
 
     def login(self):
         headers = {"Origin": f"http://127.0.0.1:{self.admin}", "Content-Type": "application/json"}
@@ -148,24 +143,11 @@ class Fixture:
                         process.kill()
                         process.wait(5)
 
-    def mcp(self, token, message, session=None):
-        headers = {"Accept": "application/json, text/event-stream"}
-        if session:
-            headers.update({"Mcp-Session-Id": session, "MCP-Protocol-Version": PROTOCOL_VERSION})
-        return self.public(token, "/mcp", "POST", message, headers)
+    def mcp(self, token, message, session):
+        return mcp_request(self.business, {"Authorization": f"Bearer {token}"}, message, session)
 
     def new_session(self, token):
-        message = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-            "protocolVersion": PROTOCOL_VERSION, "capabilities": {},
-            "clientInfo": {"name": "client-registry-test", "version": "1"},
-        }}
-        status, headers, body = self.mcp(token, message)
-        session = headers.get("Mcp-Session-Id")
-        require(status == 200 and session and body.get("result", {}).get("protocolVersion") == PROTOCOL_VERSION,
-                "Client could not create an MCP session")
-        require(self.mcp(token, {"jsonrpc": "2.0", "method": "notifications/initialized"}, session)[0] == 202,
-                "Client could not initialize its MCP session")
-        return session
+        return start_session(self.business, {"Authorization": f"Bearer {token}"})
 
 
 def require_sources(view, expected):
@@ -180,7 +162,7 @@ def verify_body_id_routes(fixture):
         replacement = f"dot/{len(client_id)}/rotated"
         before = fixture.view()["revision"]
         added = fixture.change("POST", fields={"id": client_id, "token": token})
-        require(fixture.public(token)[0] == 200, "A dot client could not authenticate after creation")
+        require(fixture.probe(token)[0] == 200, "A dot client could not authenticate after creation")
         fixture.reveal(client_id, token)
         require(fixture.admin_request("PUT", body={"revision": before, "id": client_id,
                 "token": replacement})[0] == 409, "Body-ID replacement ignored a stale revision")
@@ -193,14 +175,14 @@ def verify_body_id_routes(fixture):
             require(fixture.admin_request(method, body=body)[0] == 400,
                     "A body-ID route accepted a missing or invalid client ID")
         updated = fixture.change("PUT", fields={"id": client_id, "token": replacement})
-        require(fixture.public(token)[0] == 401 and fixture.public(replacement)[0] == 200,
+        require(fixture.probe(token)[0] == 401 and fixture.probe(replacement)[0] == 200,
                 "Body-ID replacement did not rotate a dot client's credential immediately")
         require(fixture.admin_request("DELETE", body={"revision": added["revision"],
                 "id": client_id})[0] == 409, "Body-ID deletion ignored a stale revision")
-        require(fixture.view()["revision"] == updated["revision"] and fixture.public(replacement)[0] == 200,
+        require(fixture.view()["revision"] == updated["revision"] and fixture.probe(replacement)[0] == 200,
                 "Rejected body-ID changes altered the active registry")
         fixture.change("DELETE", fields={"id": client_id})
-        require(fixture.public(replacement)[0] == 401, "Body-ID deletion left a dot client's credential active")
+        require(fixture.probe(replacement)[0] == 401, "Body-ID deletion left a dot client's credential active")
         for method, fields in (("PUT", {"token": replacement}), ("DELETE", {})):
             require(fixture.admin_request(method, body={"revision": fixture.view()["revision"],
                     "id": client_id} | fields)[0] == 404, "A missing body-ID client did not return 404")
@@ -228,10 +210,10 @@ def verify_crud(fixture):
         added = fixture.change("POST", fields={"id": "browser", "token": manual})
         require_sources(added, initial | {"browser": "manual"})
         require(fixture.registry.is_file(), "The first change did not create the client registry")
-        require(fixture.public(manual)[0] == 200, "A short custom token was not immediately usable")
+        require(fixture.probe(manual)[0] == 200, "A short custom token was not immediately usable")
         fixture.reveal("browser", manual)
         for token in (fixture.file_token, fixture.environment_token):
-            require(fixture.public(token)[0] == 200, "Migration broke an inherited credential")
+            require(fixture.probe(token)[0] == 200, "Migration broke an inherited credential")
         require(fixture.admin_request("POST", body=body)[0] == 409,
                 "A stale revision was allowed to overwrite the registry")
         current = added["revision"]
@@ -259,8 +241,8 @@ def verify_crud(fixture):
             require(status == 400 and result["error"].get("reason") == "client_credential_duplicate" and
                     result["error"].get("parameters") == {"client_id": owner} and
                     duplicate_token not in json.dumps(result), "Duplicate source or replacement identified the wrong client")
-        require(fixture.view()["revision"] == current and fixture.public(manual)[0] == 200 and
-                fixture.public(fixture.file_token)[0] == 200, "A duplicate-credential error changed active authorization")
+        require(fixture.view()["revision"] == current and fixture.probe(manual)[0] == 200 and
+                fixture.probe(fixture.file_token)[0] == 200, "A duplicate-credential error changed active authorization")
         for invalid in ("", "contains space", "line\nbreak", "tab\tvalue", "\x00", "\x7f", "非ASCII", "a" * 8193):
             status, _, _ = fixture.admin_request("PUT", "/browser", {"revision": current, "token": invalid})
             require(status == 400, "An invalid business credential was accepted")
@@ -269,23 +251,23 @@ def verify_crud(fixture):
         session = fixture.new_session(manual)
         fixture.change("PUT", "/browser", {"token": replacement})
         fixture.reveal("browser", replacement)
-        require(fixture.public(manual)[0] == 401 and fixture.public(replacement)[0] == 200,
+        require(fixture.probe(manual)[0] == 401 and fixture.probe(replacement)[0] == 200,
                 "Token rotation did not apply immediately")
         status, _, reply = fixture.mcp(replacement, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, session)
         require(status == 200 and bool(reply.get("result", {}).get("tools")),
                 "Token rotation discarded the existing client's MCP identity")
         fixture.change("DELETE", "/browser")
-        require(fixture.public(replacement)[0] == 401, "A deleted credential remained active")
+        require(fixture.probe(replacement)[0] == 401, "A deleted credential remained active")
         fixture.change("POST", fields={"id": "browser", "token": replacement})
-        require(fixture.public(replacement)[0] == 200, "A recreated client could not authenticate")
+        require(fixture.probe(replacement)[0] == 200, "A recreated client could not authenticate")
         require(fixture.mcp(replacement, {"jsonrpc": "2.0", "id": 3, "method": "tools/list"}, session)[0] == 404,
                 "Recreating a client inherited the deleted client's MCP session")
         require(fixture.new_session(replacement) != session, "A recreated client reused a retired session ID")
 
         fixture.change("POST", fields={"id": "one-character", "token": "/"})
-        require(fixture.public("/")[0] == 200, "A one-character visible ASCII credential was rejected")
+        require(fixture.probe("/")[0] == 200, "A one-character visible ASCII credential was rejected")
         fixture.change("PUT", "/one-character", {"token": "a" * 8192})
-        require(fixture.public("a" * 8192)[0] == 200, "The documented maximum credential length was rejected")
+        require(fixture.probe("a" * 8192)[0] == 200, "The documented maximum credential length was rejected")
         fixture.change("DELETE", "/one-character")
         encoded = fixture.registry.read_bytes()
         stored = next(entry for entry in json.loads(encoded)["clients"] if entry["id"] == "browser")
@@ -300,9 +282,9 @@ def verify_crud(fixture):
     with fixture.running():
         require_sources(fixture.view(), initial | {"browser": "manual"})
         for token in (replacement, fixture.file_token, fixture.environment_token):
-            require(fixture.public(token)[0] == 200, "A registry credential did not survive restart")
+            require(fixture.probe(token)[0] == 200, "A registry credential did not survive restart")
         fixture.reveal("browser", replacement)
-        require(fixture.public(manual)[0] == 401, "Restart restored an obsolete credential")
+        require(fixture.probe(manual)[0] == 401, "Restart restored an obsolete credential")
         fixture.unchanged_runtime()
 
 
@@ -329,19 +311,19 @@ def verify_cli_pending(fixture):
         for name, token in tokens.items():
             fixture.reveal(name, token, active=False)
         for token in tokens.values():
-            require(fixture.public(token)[0] == 401, "CLI enrollment changed the active registry before apply")
+            require(fixture.probe(token)[0] == 401, "CLI enrollment changed the active registry before apply")
         require(fixture.admin_request("POST", body={"revision": previous["revision"],
                 "id": "stale", "token": "stale/input"})[0] == 409,
                 "A stale web update overwrote concurrent CLI enrollment")
         fixture.change("POST", fields={"id": "web-apply", "token": "web/apply"})
         for name, token in tokens.items():
-            require(fixture.public(token)[0] == 200, "Web apply omitted pending CLI changes")
+            require(fixture.probe(token)[0] == 200, "Web apply omitted pending CLI changes")
             fixture.reveal(name, token)
         result = fixture.command("--SetToken", "--ClientId", "concurrent-a", user_input=replacement + "\ny\n")
         require(result.returncode == 0 and replacement not in result.stdout + result.stderr,
                 "CLI rotation failed or exposed a manual token")
-        require(fixture.view()["pending_restart"] and fixture.public(tokens["concurrent-a"])[0] == 200 and
-                fixture.public(replacement)[0] == 401, "CLI rotation did not remain pending until restart")
+        require(fixture.view()["pending_restart"] and fixture.probe(tokens["concurrent-a"])[0] == 200 and
+                fixture.probe(replacement)[0] == 401, "CLI rotation did not remain pending until restart")
         fixture.reveal("concurrent-a", replacement, active=False)
         fixture.reveal("concurrent-b", tokens["concurrent-b"])
         encoded = json.loads(fixture.registry.read_bytes())
@@ -352,8 +334,8 @@ def verify_cli_pending(fixture):
 
     with fixture.running():
         require(not fixture.view()["pending_restart"], "Restart did not consume pending CLI changes")
-        require(fixture.public(replacement)[0] == 200 and fixture.public(tokens["concurrent-a"])[0] == 401 and
-                fixture.public(tokens["concurrent-b"])[0] == 200,
+        require(fixture.probe(replacement)[0] == 200 and fixture.probe(tokens["concurrent-a"])[0] == 401 and
+                fixture.probe(tokens["concurrent-b"])[0] == 200,
                 "Restart did not apply the CLI registry without losing another client")
         fixture.reveal("concurrent-a", replacement)
         fixture.unchanged_runtime()
@@ -365,8 +347,8 @@ def verify_zero_clients(fixture):
             fixture.change("DELETE", "/" + client["id"])
         require(fixture.view()["clients"] == [], "Deleting the last client was rejected")
         for token in (fixture.file_token, fixture.environment_token):
-            require(fixture.public(token)[0] == 401 and
-                    fixture.public(token, "/health/live", control=True)[0] == 401,
+            require(fixture.probe(token)[0] == 401 and
+                    request(fixture.control, "GET", "/health/live", {"Authorization": f"Bearer {token}"})[0] == 401,
                     "An empty registry restored runtime credentials or disabled authentication")
         fixture.login()
         require(fixture.view()["clients"] == [], "Zero clients prevented administration")
@@ -385,10 +367,10 @@ def verify_zero_clients(fixture):
         fixture.registry.write_bytes(committed)
 
     with fixture.running():
-        require(fixture.view()["clients"] == [] and fixture.public(fixture.file_token)[0] == 401,
+        require(fixture.view()["clients"] == [] and fixture.probe(fixture.file_token)[0] == 401,
                 "Restart restored runtime clients after deleting the authoritative registry's last client")
         fixture.change("POST", fields={"id": "recovered", "token": "recover/access"})
-        require(fixture.public("recover/access")[0] == 200, "The administrator could not recover an empty registry")
+        require(fixture.probe("recover/access")[0] == 200, "The administrator could not recover an empty registry")
         fixture.unchanged_runtime()
 
 
@@ -426,7 +408,7 @@ def verify_reveal(fixture):
         try:
             source.write_text(replacement + "\n", encoding="ascii")
             fixture.reveal("local", replacement, active=False)
-            require(fixture.public(fixture.file_token)[0] == 200 and fixture.public(replacement)[0] == 401,
+            require(fixture.probe(fixture.file_token)[0] == 200 and fixture.probe(replacement)[0] == 401,
                     "Reading a changed file source applied it to the active service")
             hidden = source.with_name("client.unavailable")
             source.rename(hidden)
@@ -452,8 +434,8 @@ def verify_reveal(fixture):
                                 (token, candidate, replacement, fixture.file_token, str(source))),
                             "An unavailable source error exposed a credential or source path")
                     require(fixture.view() == before and fixture.registry.read_bytes() == saved and
-                            fixture.public(token)[0] == 200 and fixture.public(fixture.file_token)[0] == 200 and
-                            fixture.public(candidate)[0] == 401,
+                            fixture.probe(token)[0] == 200 and fixture.probe(fixture.file_token)[0] == 200 and
+                            fixture.probe(candidate)[0] == 401,
                             "A failed source lookup changed disk state or the authentication snapshot")
             finally:
                 hidden.rename(source)
@@ -472,7 +454,7 @@ def verify_reveal(fixture):
                     "A hash-only record was incorrectly described as recoverable")
             status, _, result = fixture.admin_request("POST", "/reveal", {"id": "visible", "revision": old["revision"]})
             require(status == 400 and result["error"].get("reason") == "credential_not_recoverable" and
-                    fixture.public(token)[0] == 200, "Hash-only reveal changed authentication or hid its cause")
+                    fixture.probe(token)[0] == 200, "Hash-only reveal changed authentication or hid its cause")
             require(fixture.command("--CheckConfig").returncode == 0, "Hash-only credentials no longer authenticate")
             stored["token_value"] = "incorrect/" + secrets.token_hex(24)
             fixture.registry.write_text(json.dumps(document), encoding="utf-8")
@@ -494,7 +476,7 @@ def verify_reveal(fixture):
         fixture.login()
         fixture.reveal("visible", token)
         fixture.change("DELETE", fields={"id": "visible"})
-        require(fixture.public(token)[0] == 401, "Deleting a revealed credential did not revoke it")
+        require(fixture.probe(token)[0] == 401, "Deleting a revealed credential did not revoke it")
         fixture.unchanged_runtime()
 
 
@@ -523,14 +505,14 @@ def verify_registry_capacity(fixture):
         replacement = '"' * 8188 + "next"
         fixture.change("PUT", fields={"id": "capacity-0", "token": replacement})
         fixture.reveal("capacity-0", replacement)
-        require(fixture.public(replacement)[0] == 200, "Maximum escaped credential did not authenticate")
+        require(fixture.probe(replacement)[0] == 200, "Maximum escaped credential did not authenticate")
         committed = fixture.registry.read_bytes()
         try:
             fixture.registry.write_bytes(committed + b" " * (2 * 1024 * 1024 + 1 - len(committed)))
             status, _, result = fixture.admin_request()
             require(status == 400 and result["error"].get("reason") == "client_registry_too_large",
                     "An oversized registry was not explicitly rejected")
-            require(fixture.public(replacement)[0] == 200, "Oversized disk state replaced the valid active snapshot")
+            require(fixture.probe(replacement)[0] == 200, "Oversized disk state replaced the valid active snapshot")
         finally:
             fixture.registry.write_bytes(committed)
         fixture.unchanged_runtime()
@@ -572,8 +554,8 @@ def verify_write_failure(fixture):
             expected = "client_registry_write_failed" if os.name == "nt" else "client_registry_permissions"
             require(status == 400 and result["error"].get("reason") == expected and
                     replacement not in json.dumps(result), "A failed write had no safe, specific error")
-            require(fixture.registry.read_bytes() == committed and fixture.public("before/write")[0] == 200 and
-                    fixture.public(replacement)[0] == 401, "A failed write changed disk state or live authentication")
+            require(fixture.registry.read_bytes() == committed and fixture.probe("before/write")[0] == 200 and
+                    fixture.probe(replacement)[0] == 401, "A failed write changed disk state or live authentication")
             fixture.reveal("write-check", "before/write")
         finally:
             if handle is not None:

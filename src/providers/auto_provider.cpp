@@ -43,6 +43,7 @@ public:
     try {
       auto result = page(bingRequest(request), SerpSource::Bing, state_->bing, token, token->deadline);
       result.warnings.push_back("DuckDuckGo was busy, results come from Bing.");
+      result.timeRangeWarning = "Bing did not apply the requested time range.";
       return result;
     } catch (const Error &error) {
       if (!reportableFailure(error))

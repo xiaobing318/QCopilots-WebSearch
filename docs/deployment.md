@@ -10,13 +10,13 @@
 
 MSI 和 DEB 安装包会为每个项目版本注册独立服务。新版本首次安装时会创建自己的部署配置、客户端令牌、管理令牌、设置、搜索源密钥和缓存。运行配置和令牌位于该版本的 `bin/data` 目录，设置、搜索源密钥和缓存位于 `bin/data/state`。将同一版本重新安装到原目录时，会继续使用该版本的数据。先前安装的版本继续使用各自的目录和配置。
 
-安装程序优先选择业务、控制和管理监听器的默认回环端口，依次为 3181、3182 和 3183。安装程序会跳过已被占用的端口，以及其他已安装版本配置中记录的端口，即使对应服务当前处于停止状态。选定的端口会写入该版本的运行配置，服务重启时继续使用这些端口。REST 和 MCP 使用 `business.port`，健康检查和指标使用 `control.port`，设置页使用 `admin.port`。连接时请使用同一版本的令牌。
+安装程序优先选择业务、控制和管理监听器的默认回环端口，依次为 3181、3182 和 3183。安装程序会跳过已被占用的端口，以及其他已安装版本配置中记录的端口，即使对应服务当前处于停止状态。选定的端口会写入该版本的运行配置，服务重启时继续使用这些端口。MCP 使用 `business.port`，健康检查和指标使用 `control.port`，设置页使用 `admin.port`。连接时请使用同一版本的令牌。
 
 <a name="business-addresses-and-browser-access"></a>
 
 ## 业务地址与网页接入
 
-业务接口供不同产品的网页、原生程序和服务端 API 客户端使用。任意合法 HTTP(S) 网页均可携带有效的客户端 Bearer 调用 `/v1` 和 `/mcp`，无需将每个产品的域名登记到服务配置。网页的 CORS 预检不要求 Bearer，实际业务请求始终要求有效 Bearer。业务接口不使用浏览器 Cookie 鉴权。原生程序和服务端客户端可以省略 `Origin`。
+业务接口供不同产品的网页、原生程序和服务端 API 客户端使用。任意合法 HTTP(S) 网页均可携带有效的客户端 Bearer 调用 `/mcp`，无需将每个产品的域名登记到服务配置。网页的 CORS 预检不要求 Bearer，实际业务请求始终要求有效 Bearer。业务接口不使用浏览器 Cookie 鉴权。原生程序和服务端客户端可以省略 `Origin`。
 
 | 配置或请求信息 | 作用 |
 | --- | --- |
@@ -41,6 +41,27 @@ MSI 和 DEB 安装包会为每个项目版本注册独立服务。新版本首�
 
 升级旧配置时，删除 `business.origins`，即使它是空数组也需要删除，然后运行 `--CheckConfig` 并重启服务。程序不会自动删除或迁移该字段。仅删除业务配置中的字段，保留控制和管理监听器原有的 Host、Origin、管理会话和 CSRF 限制。
 
+## 通过 stdio 连接 llama-server
+
+将以下内容保存为 `mcp.json`，将 `command` 换为当前平台可执行文件的绝对路径。启动 llama-server 时传入 `--mcp-servers-config mcp.json`。其 `GET /tools` 会列出 `websearch_web_search` 等四项工具。首次实际调用会重新启动子进程。
+
+```json
+{
+  "mcpServers": {
+    "websearch": {
+      "command": "C:/Tools/QCopilots-WebSearch/bin/qcopilots-websearch.exe",
+      "args": ["--Stdio"]
+    }
+  }
+}
+```
+
+`--Stdio` 使用同版本可执行文件旁的 `data/runtime.json`。仅在确认该配置不存在时，才采用内置的自动搜索及进程私有的临时设置与缓存。共享部署配置的 stdio 进程使用后台管理的设置，页面快照始终归当前子进程所有。配置不兼容或不可读时，启动诊断写入 stderr，进程以非零状态退出。
+
+需要自己的配置时，向 `args` 追加 `["--ConfigPath", "/absolute/path/to/runtime.json"]`。可将发行包中的 `config/runtime.json` 复制到用户自有目录，按需指定 `settings.directory`。安装服务的数据目录受限时，可以使用自己的配置或通过 HTTPS 与 Bearer 连接服务。
+
+llama.cpp WebUI 中添加 Streamable HTTP 服务器，URL 填部署的 `/mcp` 地址，自定义请求头 `Authorization` 填 `Bearer <业务授权码>`。直接连接时关闭 WebUI 的 CORS 代理。发现工具后先调用 `web_search_status`，再用 `web_search` 验证选定的搜索后端。
+
 <a name="ubuntu-host"></a>
 
 ## Ubuntu 主机
@@ -48,7 +69,7 @@ MSI 和 DEB 安装包会为每个项目版本注册独立服务。新版本首�
 使用 apt 安装发布版 DEB，将 `version` 设为安装包文件名中的版本号。每个安装包都会创建该版本专用的非特权服务账号和 systemd 单元。DEB 要求 `/opt` 归 `root` 所有，且仅允许所有者写入。
 
 ```bash
-version=0.4.0
+version=0.5.0
 package=qcopilots-websearch-$version
 sudo apt install "./${package}_${version}_amd64.deb"
 sudo systemctl status "$package.service"
@@ -62,20 +83,22 @@ systemd 服务读取 `/opt/qcopilots-websearch-<version>/bin/data/runtime.json`�
 sudo "/opt/$package/bin/qcopilots-websearch" --SettingsUrl
 ```
 
-在服务所在主机的浏览器中打开链接。若要从远程浏览器访问，可通过 SSH 隧道连接到对应的回环地址，或配置专用 HTTPS 代理，并设置管理端的 `Host`、`Origin` 和公开源地址。下文的 Caddy 部署示例对外提供业务接口。
+在服务所在主机的浏览器中打开链接。若要从远程浏览器访问，可通过 SSH 隧道连接到对应的回环地址，或配置专用 HTTPS 代理，并设置管理端的 `Host`、`Origin` 和公开源地址。
 
-将 `deploy/team` 复制到管理员控制的部署目录。将 `.env.example` 复制为 `.env`，设置实际的 DNS 主机名和 ACME 联系方式。用服务的 `--GenerateToken` 命令生成密码学安全的随机值，作为 `SEARXNG_SECRET`。直接将其写入权限为 0600 的私有环境文件，避免输出到终端或 CI 日志。
+需要反向代理时，仅发布业务监听器上的 `/mcp`。以下 Caddy 配置将请求送到本机业务端口。将域名与端口替换为实际值，并将外部域名加入 `business.allowed_hosts`。
 
-在复制后的 `Caddyfile` 中，将反向代理的上游设为 `127.0.0.1:<business.port>`，其中端口取自要对外提供服务的版本的运行配置。
-
-```bash
-docker compose --env-file .env config --quiet
-docker compose --env-file .env up -d
+```caddyfile
+search.example.org {
+    handle /mcp {
+        reverse_proxy 127.0.0.1:3181
+    }
+    handle {
+        respond 404
+    }
+}
 ```
 
-仅 Caddy 使用主机网络，因此它能访问服务的回环监听器。SearXNG 映射至 `127.0.0.1:8888`，Valkey 只在 Compose 内部网络可访问。Caddy 对外提供 HTTPS API，它自身的存活检查使用回环端口 8090。自动申请证书需要公网 DNS 和入站 80、443 端口。服务自身的控制端点保持在本地。
-
-在管理页的“搜索设置”中选择 SearXNG，将端点设为 `http://127.0.0.1:8888/search`。在 `business.allowed_hosts` 中加入实际的外部主机名及所用端口，例如 `search.example.org` 和 `search.example.org:443`，将 `business.public_url` 设为 `https://search.example.org/mcp`。保留回环绑定，以及本地客户端所需的准确主机和端口。QCopilots 和其他网页均凭业务 Bearer 接入，无需单独登记网页域名。
+使用私有 SearXNG 时，在后台“搜索设置”中指定已有实例的搜索端点，例如 `http://127.0.0.1:8888/search`。私有后端、管理端口和控制端口仅供其预期客户端访问。
 
 为每个集成方或团队成员分配独立的客户端身份及授权码。QGIS 在 MCP Servers 页面填写该业务 Bearer。修改监听配置后，使用目标版本的服务账号检查配置，再重启该版本。
 
@@ -85,9 +108,7 @@ sudo -u "$account" "/opt/$package/bin/qcopilots-websearch" --CheckConfig
 sudo systemctl restart "$package.service"
 ```
 
-Caddy 原样转发客户端的 `Authorization`、`Host` 和 `Origin`，由原生服务验证客户端凭据。保留上游请求的默认取消行为，避免添加会改变客户端断开时取消行为的 `flush_interval -1`。原生服务会拒绝配置中未允许的 Host，以及格式不合法的 Origin。原生服务监听器、Caddy 健康检查监听器和 SearXNG 均应保持在外部主机无法直接访问的范围内。
-
-本私有后端模板关闭了 SearXNG 自带的限流器。SearXNG 作为内部服务运行。如需单独对外开放，应为其设计身份验证、限流和代理地址策略。`compose.yml` 固定了容器镜像摘要。更新镜像时应重新执行验收。
+代理应保留业务 Host、Origin、Authorization 和 MCP 会话头，并在客户端断开时取消上游请求。
 
 ## Windows
 
@@ -96,14 +117,14 @@ MSI 安装 `QCopilotsWebSearch-<version>` 系统服务，运行账号为虚拟�
 如需改用其他目录，请在以管理员身份打开的命令提示符中设置 `INSTALL_ROOT`。程序及其 `bin\data` 目录均位于指定位置。请为不同版本选择各自的安装目录。
 
 ```cmd
-msiexec.exe /i "C:\Downloads\QCopilots-WebSearch-0.4.0-win64.msi" INSTALL_ROOT="C:\Program Files\QCopilots-WebSearch-Custom-0.4.0"
+msiexec.exe /i "C:\Downloads\QCopilots-WebSearch-0.5.0-win64.msi" INSTALL_ROOT="C:\Program Files\QCopilots-WebSearch-Custom-0.5.0"
 ```
 
 本机交互式用户可以读取 `admin.token`，用于登录设置页并管理搜索设置。运行配置、客户端令牌和搜索源密钥各自受文件 ACL 保护。在目标版本安装目录的 `bin` 下运行 `qcopilots-websearch.exe --SettingsUrl`，即可为正在运行的服务生成一次性链接。
 
 请以管理员身份运行 MSI，并阅读安装程序显示的 Apache 许可条款和 Microsoft 运行库条款。安装包的签名状态以发布说明为准，未特别说明时为未签名。在 Windows 的“已安装的应用”中按版本选择要卸载的 MSI。卸载会移除该版本的程序文件和服务，并保留配置和数据。
 
-将便携 ZIP 解压到私有可写目录，每个便携实例使用独立的解压目录。例如，将 `QCopilots-WebSearch-0.4.0-win64.zip` 下载到 `C:\Softwares\QCopilots-WebSearch`，解压后确认 `C:\Softwares\QCopilots-WebSearch\QCopilots-WebSearch-0.4.0-win64\bin\qcopilots-websearch.exe` 存在，避免重复嵌套同名目录。在解压目录运行 `.\bin\qcopilots-websearch.exe`，即可在前台启动服务。
+将便携 ZIP 解压到私有可写目录，每个便携实例使用独立的解压目录。例如，将 `QCopilots-WebSearch-0.5.0-win64.zip` 下载到 `C:\Softwares\QCopilots-WebSearch`，解压后确认 `C:\Softwares\QCopilots-WebSearch\QCopilots-WebSearch-0.5.0-win64\bin\qcopilots-websearch.exe` 存在，避免重复嵌套同名目录。在解压目录运行 `.\bin\qcopilots-websearch.exe`，即可在前台启动服务。
 
 首次启动会创建 `bin\data\runtime.json`，并生成客户端令牌和管理令牌。监听器准备就绪后，终端显示实际的业务、MCP、控制、设置地址、配置和数据路径，以及登录方法。默认业务端口为 3181，控制端口为 3182，设置端口为 3183。若首次初始化选用了其他端口，以启动信息和运行配置为准。服务运行期间，从另一个终端执行 `.\bin\qcopilots-websearch.exe --SettingsUrl`，打开该实例的设置页。
 
@@ -120,13 +141,18 @@ msiexec.exe /i "C:\Downloads\QCopilots-WebSearch-0.4.0-win64.msi" INSTALL_ROOT="
 1. 在解压目录运行 `.\bin\qcopilots-websearch.exe` 完成首次启动。按 Ctrl+C 停止程序后，打开 `bin\data\runtime.json`，确认 `business.host` 为 `127.0.0.1` 并记下 `business.port`。下面假定端口是 3181。如果配置中是其他端口，后续步骤使用实际值。
 2. 在 `business.allowed_hosts` 中保留现有的回环地址（如 `127.0.0.1:3181`），追加 `search.example.org` 和 `search.example.org:443`。将 `business.public_url` 设为 `https://search.example.org/mcp`，让设置页的连接步骤显示可复制的公网 MCP 地址。默认 HTTP 配置没有 `business.tls` 字段。从此前的 HTTPS 配置切换时，移除这一字段。保存文件，运行 `.\bin\qcopilots-websearch.exe --CheckConfig`，检查通过后再无参数启动程序。
 3. 在 Cloudflare 的 **Networking → Tunnels → 目标隧道 → Routes** 编辑或添加 **Published application**。主机名填公网域名，Path 留空。在 **Service** 中选择 **HTTP**，**URL** 填 `127.0.0.1:3181`。若页面只有 **Service URL** 一栏，填写 `http://127.0.0.1:3181`。只发布业务端口，控制和管理端口供本机使用。[Cloudflare 路由设置](https://developers.cloudflare.com/tunnel/get-started/#publish-an-application)
-4. 保持服务运行，在解压目录另开 PowerShell 进行公网验证。下列第一条命令应显示 `401`，最后一条应显示 `contract_version` 为 `1`、`service` 为 `ready`。示例使用首次启动生成的业务令牌。如果已通过页面或 CLI 轮换该令牌，请将 `$token` 设为此前保存的新 Bearer。轮换不会更新 `client.token`，新保存的授权码可在本机管理页选择该客户端后按需查看或复制。
+4. 保持服务运行，在解压目录另开 PowerShell 进行公网验证。下列第一条命令应显示 `401`，随后的初始化请求应显示协商的协议版本。示例使用首次启动生成的业务令牌。如果已通过页面或 CLI 轮换该令牌，请将 `$token` 设为此前保存的新 Bearer。轮换不会更新 `client.token`，新保存的授权码可在本机管理页选择该客户端后按需查看或复制。
 
 ```powershell
-curl.exe -sS -o NUL -w "%{http_code}\n" https://search.example.org/v1/status
+curl.exe -sS -o NUL -w "%{http_code}\n" https://search.example.org/mcp
 $token = (Get-Content -Raw .\bin\data\client.token).Trim()
-Invoke-RestMethod -Uri 'https://search.example.org/v1/status' -Headers @{ Authorization = "Bearer $token" } |
-  Select-Object contract_version,service
+$headers = @{ Authorization = "Bearer $token"; Accept = 'application/json, text/event-stream' }
+$body = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"deployment-check","version":"1"}}}'
+$reply = Invoke-WebRequest -UseBasicParsing -Method Post -Uri 'https://search.example.org/mcp' -ContentType 'application/json' -Headers $headers -Body $body
+($reply.Content | ConvertFrom-Json).result.protocolVersion
+$headers['Mcp-Session-Id'] = [string]($reply.Headers['Mcp-Session-Id'] | Select-Object -First 1)
+$headers['MCP-Protocol-Version'] = '2025-11-25'
+Invoke-WebRequest -UseBasicParsing -Method Delete -Uri 'https://search.example.org/mcp' -Headers $headers | Out-Null
 ```
 
 在解压目录运行 `.\bin\qcopilots-websearch.exe --SettingsUrl --Open` 即可打开本机设置页。
@@ -166,13 +192,18 @@ if ($LASTEXITCODE -eq 0) { .\bin\qcopilots-websearch.exe }
 5. 在 Cloudflare 的 **Networking → Tunnels** 选择隧道，打开 **Routes** 并编辑或新增 **Published application**。选择公网主机名并留空 Path。Service URL 填 `https://127.0.0.1:3181`。若界面分别显示 Type 和 URL，则选择 **HTTPS** 并输入 `127.0.0.1:3181`。业务监听器使用 HTTP/1.1，请保持 **HTTP/2 to origin** 关闭，保留默认的公网 Host 和 TLS 证书验证。对本例的 IP 证书，留空 **Origin Server Name**，保持 **Match SNI to Host** 关闭。使用私有 CA 时，在 **CA Pool** 填连接器本机的 CA 证书文件绝对路径。若证书使用 DNS 类型的 SAN，将 **Origin Server Name** 设为该 DNS 名称。控制和管理端口只供本机使用。[Cloudflare 路由设置](https://developers.cloudflare.com/tunnel/get-started/#publish-an-application) · [源站 TLS 参数](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/origin-parameters/)
 6. 逐台核对同一隧道的所有副本。每台连接器访问的是自己的 `127.0.0.1:3181`，都需能读取路由指定路径的 CA 文件，并连接到具有有效证书和相同业务凭据的服务。MCP 会话与已打开的网页快照属于处理请求的 WebSearch 实例，跨不同实例的后续调用可能找不到会话或页面。需要连续调用的验收应安排到同一实例。
 
-以下示例在每台源站校验证书与接口，再从公网验证同一个接口。将第一条命令的 CA 路径替换为本机实际文件。本例私有 CA 未发布吊销信息，Windows 自带的 curl 使用 `--ssl-revoke-best-effort` 允许缺少该信息，同时验证 CA 和源站身份。未携带 Bearer 的源站检查应得到 HTTP 401。公网检查使用初始 `local` 客户端的 `client.token`，如果已更换令牌，请从实际凭据来源读取。成功时会显示 `contract_version` 为 1、`service` 为 `ready`。
+以下示例在每台源站校验证书与接口，再从公网验证同一个接口。将第一条命令的 CA 路径替换为本机实际文件。本例私有 CA 未发布吊销信息，Windows 自带的 curl 使用 `--ssl-revoke-best-effort` 允许缺少该信息，同时验证 CA 和源站身份。未携带 Bearer 的源站检查应得到 HTTP 401。公网检查使用初始 `local` 客户端的 `client.token`，如果已更换令牌，请从实际凭据来源读取。成功时会显示协商的协议版本。
 
 ```powershell
-curl.exe --noproxy "*" --cacert .\bin\data\tls\origin-ca.pem --ssl-revoke-best-effort -sS -o NUL -w "%{http_code}\n" https://127.0.0.1:3181/v1/status
+curl.exe --noproxy "*" --cacert .\bin\data\tls\origin-ca.pem --ssl-revoke-best-effort -sS -o NUL -w "%{http_code}\n" https://127.0.0.1:3181/mcp
 $token = (Get-Content -Raw .\bin\data\client.token).Trim()
-Invoke-RestMethod -Uri 'https://search.example.org/v1/status' -Headers @{ Authorization = "Bearer $token" } |
-  Select-Object contract_version,service
+$headers = @{ Authorization = "Bearer $token"; Accept = 'application/json, text/event-stream' }
+$body = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"deployment-check","version":"1"}}}'
+$reply = Invoke-WebRequest -UseBasicParsing -Method Post -Uri 'https://search.example.org/mcp' -ContentType 'application/json' -Headers $headers -Body $body
+($reply.Content | ConvertFrom-Json).result.protocolVersion
+$headers['Mcp-Session-Id'] = [string]($reply.Headers['Mcp-Session-Id'] | Select-Object -First 1)
+$headers['MCP-Protocol-Version'] = '2025-11-25'
+Invoke-WebRequest -UseBasicParsing -Method Delete -Uri 'https://search.example.org/mcp' -Headers $headers | Out-Null
 ```
 
 公网出现 502 时，先在报错副本上运行源站检查，核对监听端口、HTTP 或 HTTPS、证书有效期、SAN 和 CA 文件访问权限。401 表示需要核对该实例的业务令牌，403 时检查实际 Host 是否在允许列表中，以及浏览器 Origin 是否为合法的单一 HTTP(S) 来源。仅访问公网根路径无法验收业务接口。设置页面使用独立的管理监听器。在源站另开终端运行 `.\bin\qcopilots-websearch.exe --SettingsUrl --Open` 可直接打开设置页。单独使用 `--SettingsUrl` 会打印链接，将输出粘贴到浏览器地址栏，两分钟内可登录一次。
@@ -229,7 +260,7 @@ CLI 默认客户端 ID 为 `local`。对于新 ID，命令会添加条目。对�
 对于 DEB 安装，以管理员身份生成凭据，再用该版本的服务账号检查配置并重启服务。
 
 ```bash
-version=0.4.0
+version=0.5.0
 package=qcopilots-websearch-$version
 executable="/opt/$package/bin/qcopilots-websearch"
 config_path="/opt/$package/bin/data/runtime.json"
@@ -242,7 +273,7 @@ sudo systemctl restart "$package.service"
 对于 MSI 安装，将 `installRoot` 设为安装程序实际使用的目录，然后在以管理员身份打开的 PowerShell 中运行以下命令。便携版请指定其运行配置路径，并省略 `--ServiceName`。
 
 ```powershell
-$version = '0.4.0'
+$version = '0.5.0'
 $serviceName = "QCopilotsWebSearch-$version"
 $installRoot = Join-Path $env:ProgramFiles "QCopilots-WebSearch-$version"
 $executable = Join-Path $installRoot 'bin\qcopilots-websearch.exe'

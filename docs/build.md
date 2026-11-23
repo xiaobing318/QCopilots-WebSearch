@@ -69,6 +69,8 @@ npm run build
 python scripts/test_mcp_sdk.py --Executable <installed-binary> --Output <report.json>
 ```
 
+使用 `--PageFixture <build>/tests/qcws_sdk_page_fixture`（Windows 添加 `.exe`）可运行双传输离线网页成功链。CTest 可通过 `QCWS_SDK_TEST_PYTHON` 指定装有锁定 SDK 的解释器。指定 `--PublicUrl <公开测试页>` 后，读取、查找或续读失败会令验收退出非零。
+
 添加 `--LiveProvider auto` 可访问真实的公共搜索源。此项检查的结果应独立于本地可复现测试结果记录。
 
-CI 使用 Windows ZIP 解压后的可执行文件和 Ubuntu DEB 安装后的可执行文件进行测试。发布和手动触发的 CI 使用两个基线版本，验证 MSI 和 DEB 的多版本并装、各版本独立的配置和凭据，以及卸载一个版本后其他版本仍可用。0.0.1 使用当前的软件包目录布局。0.2.0 从曾将数据放在系统目录的提交构建。请在可丢弃的 Windows 环境中以管理员身份运行 `scripts/AcceptWindowsMsi.ps1`。这些作业也会验证 Caddy 部署。
+CI 使用 Windows ZIP 解压后的可执行文件和 Ubuntu DEB 安装后的可执行文件进行测试。手动运行和发布运行还使用官方 0.4.0 安装包，以及由固定提交 `91e528f` 构建的 0.2.0 系统目录布局基线，验证 MSI 和 DEB 的并装、配置与凭据隔离，以及卸载一个版本后其他版本仍可用。旧布局基线复用本次构建的设置页面，验收对象是旧版服务与安装目录。请在可丢弃的 Windows 环境中以管理员身份运行 `scripts/AcceptWindowsMsi.ps1`。

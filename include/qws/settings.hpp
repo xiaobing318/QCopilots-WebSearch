@@ -17,6 +17,8 @@ struct ProviderConfig {
   std::string fingerprint() const;
 };
 
+std::string settingsDirectory(const Config &config);
+
 class SettingsStore {
 public:
   explicit SettingsStore(Config config);
@@ -42,6 +44,8 @@ private:
   std::string error_;
   Json errorDetails_ = nullptr;
   Json view(const SettingsSnapshot &) const;
+  Json writeKey(const std::string &id, const std::string *key);
+  void loadSnapshot();
 };
 
 struct AdminConfig {

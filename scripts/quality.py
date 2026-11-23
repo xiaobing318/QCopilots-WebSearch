@@ -2,6 +2,7 @@
 """Run source-bound Linux sanitizer, static analysis and bounded fuzz checks."""
 from __future__ import annotations
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 import os
@@ -12,7 +13,9 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
+from typing import NamedTuple
 import xml.etree.ElementTree as ET
 from pipeline import apt_command
 
@@ -112,6 +115,35 @@ def stop_group(pid):
         time.sleep(delay)
 
 
+class CommandResult(NamedTuple):
+    log: Path
+    duration_seconds: float
+
+
+def parallel_checks(items, check, workers, stopping):
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
+        futures = [pool.submit(check, item) for item in items]
+        for future in as_completed(futures):
+            future.result()
+    except BaseException:
+        stopping.set()
+        raise
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
+def wait_command(process, timeout, stopping):
+    deadline = time.monotonic() + timeout
+    while not stopping.is_set():
+        try:
+            return process.wait(timeout=min(1, max(0, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired:
+            if time.monotonic() >= deadline:
+                raise
+    raise RuntimeError('Cancelled after another quality check stopped')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--ConfigPath', type=Path, required=True)
@@ -128,31 +160,32 @@ def main():
         'coverage_exclusions': ['prebuilt Qt and ICU', 'system OpenSSL']}
     env = dict(os.environ, **QUALITY_ENV)
     build = ROOT / 'build/quality'
+    report_lock = threading.Lock()
+    stopping = threading.Event()
 
     def run(label, command, timeout=1800):
         command = list(map(str, command))
-        log = out / f'{len(report["commands"]):03d}-{label}.log'
-        row = {'label': label, 'argv': command, 'cwd': str(ROOT), 'log': log.name,
-               'started_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-               'exit_code': None, 'timed_out': False}
-        report['commands'].append(row)
+        with report_lock:
+            log = out / f'{len(report["commands"]):03d}-{label}.log'
+            row = {'label': label, 'argv': command, 'cwd': str(ROOT), 'log': log.name,
+                   'started_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                   'exit_code': None, 'timed_out': False}
+            report['commands'].append(row)
         started, process = time.monotonic(), None
         print('Quality:', label, flush=True)
         try:
+            need(not stopping.is_set(), 'Quality check cancelled before launch')
             with log.open('wb') as stream:
                 process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=stream,
                                            stderr=subprocess.STDOUT, start_new_session=True)
                 try:
-                    row['exit_code'] = process.wait(timeout=timeout)
+                    row['exit_code'] = wait_command(process, timeout, stopping)
                 except subprocess.TimeoutExpired:
                     row['timed_out'] = True
-                    stop_group(process.pid)
-                    row['exit_code'] = process.wait(timeout=10)
         finally:
             if process is not None:
                 stop_group(process.pid)
-                if process.poll() is None:
-                    process.wait(timeout=10)
+                row['exit_code'] = process.wait(timeout=10)
             row['duration_seconds'] = round(time.monotonic() - started, 3)
             if log.is_file():
                 row['log_sha256'] = sha(log)
@@ -161,11 +194,11 @@ def main():
                 stream.seek(max(0, log.stat().st_size - 32768))
                 print(stream.read().decode('utf-8', errors='replace'), file=sys.stderr, flush=True)
         need(row['exit_code'] == 0 and not row['timed_out'], f'Command failed: {label}')
-        return log
+        return CommandResult(log, row['duration_seconds'])
 
     try:
-        report['source_commit'] = run('git-head', ['git', 'rev-parse', 'HEAD']).read_text().strip()
-        report['clean_before'] = not run('git-clean-before', ['git', 'status', '--porcelain=v1']).read_text().strip()
+        report['source_commit'] = run('git-head', ['git', 'rev-parse', 'HEAD']).log.read_text().strip()
+        report['clean_before'] = not run('git-clean-before', ['git', 'status', '--porcelain=v1']).log.read_text().strip()
         need(report['clean_before'], 'Quality checks require a clean checkout')
         report.update(repository=env.get('GITHUB_REPOSITORY'), run_id=env.get('GITHUB_RUN_ID'),
                       run_attempt=env.get('GITHUB_RUN_ATTEMPT'), github_sha=env.get('GITHUB_SHA'))
@@ -174,7 +207,10 @@ def main():
         config = json.loads(args.ConfigPath.read_text(encoding='utf-8-sig'))
         profile = config['profiles'][args.Profile]
         need(profile['platform'] == 'ubuntu-x64', 'Quality profile must target Ubuntu')
-        profile.update(buildDir=str(build), installDir=str(ROOT / 'install/quality'), buildType='RelWithDebInfo', jobs=2)
+        # Keep two memory-intensive Clang processes or 1 GiB fuzz campaigns
+        # as an upper bound. A single-core runner or a smaller profile uses one.
+        workers = min(2, profile['jobs'], len(os.sched_getaffinity(0)))
+        profile.update(buildDir=str(build), installDir=str(ROOT / 'install/quality'), buildType='RelWithDebInfo', jobs=workers)
         profile['cmakeArgs'] = profile.get('cmakeArgs', []) + ['-DCMAKE_C_COMPILER=/usr/bin/clang-21',
             '-DCMAKE_CXX_COMPILER=/usr/bin/clang++-21', '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON',
             '-DQCWS_SANITIZERS=ON', '-DQCWS_FUZZING=ON']
@@ -191,12 +227,12 @@ def main():
         report['tool_versions'] = {}
         for name, command in [('packages', ['dpkg-query', '-W', *packages]), ('clang', ['clang-21', '--version']),
                               ('clang-tidy', ['clang-tidy-21', '--version']), ('symbolizer', ['llvm-symbolizer-21', '--version'])]:
-            report['tool_versions'][name] = run('version-' + name, command).read_text(encoding='utf-8', errors='replace')
+            report['tool_versions'][name] = run('version-' + name, command).log.read_text(encoding='utf-8', errors='replace')
         base = [sys.executable, ROOT / 'scripts/pipeline.py', '--ConfigPath', cfg,
                 '--Profile', 'ubuntu-x64-quality', '--Stages']
         for stage in ('bootstrap', 'doctor', 'configure', 'build'):
             run('pipeline-' + stage, [*base, stage], timeout=5400)
-        discovery = run('ctest-discovery', ['ctest', '--test-dir', build, '--show-only=json-v1'])
+        discovery = run('ctest-discovery', ['ctest', '--test-dir', build, '--show-only=json-v1']).log
         shutil.copyfile(discovery, out / 'discovered-tests.json')
         names = [item['name'] for item in json.loads(discovery.read_text())['tests']]
         need(len(names) == len(set(names)) and REQUIRED <= set(names), 'Missing or duplicate discovered tests')
@@ -211,28 +247,37 @@ def main():
         shutil.copyfile(build / 'dependencies/zlib-build/CMakeCache.txt', out / 'zlib-CMakeCache.txt')
         units = first_party(database, ROOT)
         report['expected_tidy_files'] = units
-        for unit in units:
-            run('tidy-' + str(len(report['tidy_files'])), ['clang-tidy-21', '-p', build, ROOT / unit,
+        def tidy(entry):
+            index, unit = entry
+            run(f'tidy-{index}', ['clang-tidy-21', '-p', build, ROOT / unit,
                 '--config-file=' + str(ROOT / '.clang-tidy'), '--warnings-as-errors=*',
                 '--header-filter=^' + re.escape(str(ROOT)) + '/(include/qws|src|app|tests)/'], timeout=600)
-            report['tidy_files'].append(unit)
+            with report_lock:
+                report['tidy_files'].append(unit)
+
+        parallel_checks(enumerate(units), tidy, workers, stopping)
         check_tidy(database, ROOT, report['tidy_files'])
-        for name, max_len in FUZZERS.items():
+
+        def fuzz(entry):
+            name, max_len = entry
             executable, seed_dir = build / f'qcws_{name}_fuzz', ROOT / 'tests/fuzz/corpus' / name
             corpus = out / 'corpus' / name
             corpus.mkdir(parents=True, exist_ok=True)
             artifacts = out / 'failures' / name
             artifacts.mkdir(parents=True, exist_ok=True)
             item = {'executable_sha256': sha(executable), 'seeds': seeds(seed_dir), 'max_len': max_len}
-            report['fuzz'][name] = item
-            log = run('fuzz-' + name, [executable, corpus, seed_dir, f'-max_total_time={args.Seconds}',
+            with report_lock:
+                report['fuzz'][name] = item
+            campaign = run('fuzz-' + name, [executable, corpus, seed_dir, f'-max_total_time={args.Seconds}',
                 f'-max_len={max_len}', '-timeout=5', '-rss_limit_mb=1024', '-print_final_stats=1',
                 '-artifact_prefix=' + artifacts.as_posix() + '/'], timeout=args.Seconds + 60)
-            text = log.read_text(encoding='utf-8', errors='replace')
-            result = fuzz_result(text, report['commands'][-1]['duration_seconds'], args.Seconds)
+            text = campaign.log.read_text(encoding='utf-8', errors='replace')
+            result = fuzz_result(text, campaign.duration_seconds, args.Seconds)
             need(item['executable_sha256'] == sha(executable) and item['seeds'] == seeds(seed_dir), 'Fuzz inputs changed')
-            item.update(log=log.name, **result)
-        report['clean_after'] = not run('git-clean-after', ['git', 'status', '--porcelain=v1']).read_text().strip()
+            item.update(log=campaign.log.name, **result)
+
+        parallel_checks(FUZZERS.items(), fuzz, workers, stopping)
+        report['clean_after'] = not run('git-clean-after', ['git', 'status', '--porcelain=v1']).log.read_text().strip()
         need(report['clean_after'], 'Source changed during quality checks')
         report['passed'] = True
     except BaseException as error:
@@ -253,6 +298,7 @@ def main():
             candidate = build / relative
             if candidate.is_file():
                 shutil.copyfile(candidate, out / name)
+        report['tidy_files'].sort()
         report['files'] = {p.name: sha(p) for p in sorted(out.iterdir()) if p.is_file() and p.name != 'quality.json'}
         (out / 'quality.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
     return 0 if report['passed'] else 1

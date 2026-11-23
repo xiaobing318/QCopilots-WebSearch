@@ -50,18 +50,19 @@ def system_tool(name):
 def check_private_registry(path, env):
     script = r'''
 $ErrorActionPreference = 'Stop'
-$acl = Get-Acl -LiteralPath $env:QCWS_ACCEPTANCE_PRIVATE_FILE
+$acl = [IO.File]::GetAccessControl($env:QCWS_ACCEPTANCE_PRIVATE_FILE)
 $current = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $allowed = @($current, 'S-1-5-18', 'S-1-5-32-544')
 $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
 $grants = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) |
     Where-Object AccessControlType -eq ([Security.AccessControl.AccessControlType]::Allow))
 if (!$acl.AreAccessRulesProtected -or $owner -notin $allowed -or !$grants.Count -or
-    @($grants | Where-Object { $_.IdentityReference.Value -notin $allowed }).Count) { exit 1 }
+    @($grants | Where-Object { $_.IdentityReference.Value -notin $allowed }).Count) { exit 2 }
 '''
     result = subprocess.run([system_tool('WindowsPowerShell/v1.0/powershell.exe'), '-NoProfile', '-NonInteractive',
                              '-Command', script], env=env | {'QCWS_ACCEPTANCE_PRIVATE_FILE': str(path)},
                             capture_output=True, timeout=8, **hidden_console())
+    need(result.returncode in (0, 2), 'Could not inspect the portable client registry permissions')
     need(result.returncode == 0, 'Portable client registry permissions were not private')
 
 
@@ -234,6 +235,26 @@ def verify_portable(executable, folder, cwd, env):
     need(cli(executable, cwd, env, '--SetToken').returncode != 0,
          'Portable token update accepted a missing explicit configuration')
     need(not data.exists(), 'Standalone generator initialized portable data')
+    # Exercise the relocated archive before the portable HTTP server initializes its data.
+    legacy = INITIALIZE | {'params': INITIALIZE['params'] | {'protocolVersion': '2024-11-05'}}
+    frames = [legacy, {'jsonrpc': '2.0', 'method': 'notifications/initialized'},
+              {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list'}]
+    stdio_input = b''.join(json.dumps(frame).encode('utf-8') + b'\n' for frame in frames)
+    bare = cli(executable, cwd, env, '--Stdio', reply=stdio_input)
+    need(bare.returncode == 0 and not data.exists(), 'Bare stdio failed or initialized HTTP service data')
+    replies = [json.loads(line) for line in bare.stdout.splitlines()]
+    need(len(replies) == 2 and replies[0]['id'] == 1 and replies[0]['result']['protocolVersion'] == '2024-11-05'
+         and replies[1]['id'] == 2 and {tool['name'] for tool in replies[1]['result']['tools']} ==
+         {'web_search', 'web_open', 'web_find', 'web_search_status'}, 'Portable stdio negotiation or listing failed')
+    data.mkdir()
+    runtime.write_bytes(b'{')
+    try:
+        rejected = cli(executable, cwd, env, '--Stdio', reply=stdio_input)
+        need(rejected.returncode != 0 and not rejected.stdout and b'invalid_configuration' in rejected.stderr
+             and runtime.read_bytes() == b'{', 'Bare stdio ignored or rewrote a corrupt adjacent configuration')
+    finally:
+        runtime.unlink()
+        data.rmdir()
     check_read_only(executable, cwd, env, data)
 
     with occupy_default_ports():
@@ -305,7 +326,8 @@ def verify_portable(executable, folder, cwd, env):
     need(all(digest(path) == value for path, value in token_hashes.items()), 'Portable restart replaced credential files')
     need(not any(program_data.iterdir()) and snapshot(cwd) == decoy_snapshot,
          'Portable startup wrote to ProgramData or used the working directory')
-    return {'concurrent_startup': True, 'fixed_default_ports': True, 'occupied_port_failure': True,
+    return {'bare_stdio': True, 'invalid_adjacent_stdio_rejected': True,
+            'concurrent_startup': True, 'fixed_default_ports': True, 'occupied_port_failure': True,
             'startup_summary': True, 'read_only_failure': True, 'explicit_config': True,
             'standalone_generator': True, 'bearer_rotation_restart': True, 'runtime_acl_preserved': True}
 

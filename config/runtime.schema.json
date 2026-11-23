@@ -76,7 +76,7 @@
         "allowed_hosts"
       ],
       "additionalProperties": false,
-      "description": "Business listener for REST and MCP. Browser clients from any valid HTTP or HTTPS origin may connect with their own Bearer credential. There is no business origins allowlist. The optional TLS configuration applies to this listener only."
+      "description": "Business listener for Streamable HTTP MCP. Browser clients from any valid HTTP or HTTPS origin may connect with their own Bearer credential. There is no business origins allowlist. The optional TLS configuration applies to this listener only."
     },
     "control": {
       "type": "object",

@@ -2,7 +2,7 @@
 
 # 版本 1 接口
 
-所有实际业务请求均要求提供 `Authorization: Bearer <client-token>`。
+调用 HTTP `/mcp` 时，客户端通过 `Authorization: Bearer <client-token>` 提供业务凭据。浏览器预检除外。
 `Bearer` 鉴权方案名不区分大小写。每个客户端都有独立身份。请求的 Host 必须与 `business.allowed_hosts` 中的条目匹配。
 任意合法 HTTP(S) 网页均可携带业务 Bearer 接入，不再提供 `business.origins` 配置。带 Origin 的请求必须提供单一合法的 HTTP(S) 来源，不能是 `null`、多值或重复头，也不能包含用户信息、路径、查询或片段。原生和服务端客户端可以省略 Origin。远程客户端使用 HTTPS 并验证服务端证书。
 
@@ -10,15 +10,11 @@
 
 | 接口 | 请求 |
 | --- | --- |
-| REST 搜索 | `POST /v1/search`，请求体为 `web_search` 输入对象 |
-| REST 网页读取 | `POST /v1/open`，请求体为 `web_open` 输入对象 |
-| REST 文本查找 | `POST /v1/find`，请求体为 `web_find` 输入对象 |
-| REST 状态查询 | `GET /v1/status` |
 | MCP HTTP | 向 `/mcp` 发送 JSON-RPC POST 请求，协议版本为 `2025-11-25` 或 `2025-06-18` |
-| MCP stdio | `--Stdio --ConfigPath FILE`，每行传输一条 JSON-RPC 消息 |
+| MCP stdio | `--Stdio [--ConfigPath FILE]`，每行一条 JSON-RPC 消息，支持两个 HTTP 版本及 `2024-11-05` |
 
 输入 JSON Schema 位于 `contracts/v1`。`contracts/v1/tools.json` 包含各工具的标题、描述和注解，以及 MCP
-`instructions` 文本。MCP `tools/list` 直接发布这些文件定义的内容。为兼容会拒绝顶层
+`instructions` 文本。MCP `tools/list` 按会话版本发布工具定义。2024 版提供名称、描述和输入 Schema，调用结果以可解析的 JSON 文本及 `isError` 返回。两个 2025 版本还提供 `structuredContent`。为兼容会拒绝顶层
 `oneOf`、`anyOf`、`allOf` 或 `not` 的模型 API，输入 Schema 使用普通的 Draft 7 对象。
 QGIS 插件通过 MCP 转发初始化、工具发现和工具调用，工具定义及输入校验由远端服务负责。
 
@@ -37,10 +33,9 @@ SearXNG 内部最多读取三页上游结果，其他来源只取一页。该接
 例如 `notexample.org` 不匹配 `example.org`。
 
 跨页去重时，忽略 URL 的协议、开头的 `www.`、末尾的斜杠、片段、默认端口，以及
-`utm_*`、`gclid` 和 `fbclid` 参数。多个结果命中同一个去重键时，保留最先返回的 URL。
+`utm_*`、`gclid` 和 `fbclid` 参数。多个结果命中同一个去重键时，保留其中第一个符合域名条件的 URL。
 
-`time_range` 接受 `any`、`day`、`week`、`month` 和 `year`。这是传给上游的时间提示，
-结果的发布日期可能超出该范围。每条结果包含 `title`、`url`、`snippet`、`sources` 和
+`time_range` 接受 `any`、`day`、`week`、`month` 和 `year`。支持时间范围的来源将其作为提示，结果的发布日期可能超出该范围。自动模式回退到 Bing 时会在响应的 warnings 中告知此次搜索未应用时间提示。每条结果包含 `title`、`url`、`snippet`、`sources` 和
 `published_at`。`published_at` 使用 UTC ISO 8601 格式，例如 `2024-05-01T10:30:00Z`。
 上游未提供可用日期时，该字段为 `null`。响应中的 `provider` 标识实际提供结果的来源。
 响应还可带有上游提供的 `corrections` 和 `suggestions`，两者分别最多 5 条，每条最多 200 个字符。
@@ -128,7 +123,7 @@ Windows-1252、GBK、GB18030 和 Big5。非法字节序列会替换为 U+FFFD。
 | 单行长度 | 1,000 个 Unicode 字符 |
 | 提取的链接 | 200 条 |
 | 服务负载 | 240 KiB |
-| 完整 REST 或 MCP 响应 | 1 MiB |
+| 完整 MCP 响应 | 1 MiB |
 
 只有超出传输限制时才返回 `response_too_large`。输入超出其他读取、解析、遍历或文本限制时，
 服务保留可读部分并设置 `truncated`。为满足负载大小限制，网页读取和文本查找可能减少返回的行和链接。
@@ -139,11 +134,10 @@ Windows-1252、GBK、GB18030 和 Big5。非法字节序列会替换为 U+FFFD。
 ## 结果与错误
 
 工具成功返回的负载包含 `contract_version: 1`。增加字段时保留该版本号。
-MCP 将相同的负载分别放在 `structuredContent` 和一个 JSON 文本内容块中。
+stdio 的 `2024-11-05` 客户端读取 JSON 文本块和 `isError`。两个 2025 版本将相同的负载分别放在 `structuredContent` 和一个 JSON 文本内容块中。
 业务失败或参数违反输入 Schema 时，响应使用 `isError: true`，并附上本节所示的错误对象，便于模型修正调用。
 错误消息指出第一个未通过校验的字段，例如
 `Input does not match the schema at /limit: instance exceeds maximum of 20.`。
-REST 以 HTTP 400 返回同样的消息。
 只有调用未知工具名称时，才返回 JSON-RPC 参数无效错误。此版本不声明 `outputSchema`。
 
 JSON 输入上限为 1 MiB，容器最大嵌套深度为 64。服务在构建 JSON 树前拒绝嵌套过深的输入。
@@ -153,7 +147,7 @@ JSON 输入上限为 1 MiB，容器最大嵌套深度为 64。服务在构建 JS
 Stdio 响应也受 1 MiB 上限约束。队列最多容纳 32 条消息，占用不超过 4 MiB，正在写入的消息也计入。
 关闭 stdin 后，服务会等待短暂的输出排空期，再取消阻塞的 stdout 写入。即使客户端停止读取，进程也能退出。
 
-REST 错误返回对应的 HTTP 状态码，以及以下格式的响应体。
+HTTP 鉴权和请求头错误使用相应的 HTTP 状态码。工具执行失败时，错误对象放在 MCP 工具结果内。例如
 
 ```json
 {"error":{"code":"busy","message":"Service capacity is exhausted.","retryable":true}}
@@ -163,7 +157,7 @@ REST 错误返回对应的 HTTP 状态码，以及以下格式的响应体。
 再解析成功响应的内容。`retryable` 指示稍后重试同一调用是否可能成功。HTTP 429 响应还带有 `Retry-After`
 响应头。上游限流时，错误对象可以包含与该头对应的 `retry_after_seconds` 字段。
 
-| 错误码 | 常见 HTTP 状态码 | 可重试 | 含义 |
+| 错误码 | 对应错误状态（工具调用见 `isError`） | 可重试 | 含义 |
 | --- | --- | --- | --- |
 | `invalid_argument` | 400 | 否 | 输入违反对应版本的 Schema，或未在 `url` 与 `page_id` 之间恰好选择一项 |
 | `unauthorized` | 401 | 否 | 缺少客户端的独立凭据，或提供的凭据无效 |
@@ -188,12 +182,12 @@ REST 错误返回对应的 HTTP 状态码，以及以下格式的响应体。
 MCP HTTP 先进行初始化，随后在请求头中携带返回的会话 ID 和协商后的协议版本。
 `initialize` 会采用请求中的 `2025-11-25` 或 `2025-06-18`。请求其他版本时，响应使用 `2025-11-25`。
 初始化结果包含 `instructions`，说明搜索、网页读取和文本查找的使用流程。
-`serverInfo.icons` 包含内嵌 SVG data URI，HTTP 和 stdio 使用相同资源，不依赖管理监听器或额外图片请求。支持图标元数据的客户端可直接显示，不支持该字段的旧客户端可以忽略它。
-如果 `MCP-Protocol-Version` 头的值不受支持，服务会返回 HTTP 400 和 REST 错误响应体，便于较新的客户端回退到
+`serverInfo.icons` 包含内嵌 SVG data URI，两个 2025 版本的 HTTP 和 stdio 使用相同资源，不依赖管理监听器或额外图片请求。支持图标元数据的客户端可直接显示，不支持该字段的旧客户端可以忽略它。
+如果 `MCP-Protocol-Version` 头的值不受支持，服务会返回 HTTP 400 和 JSON 错误响应体，便于较新的客户端回退到
 `initialize`。发送 `notifications/initialized` 后即可调用工具。DELETE 结束会话。
-GET 返回 405，因为服务没有用于推送消息的 SSE 流。取消请求会停止相应操作，并保留其他仍在等待同一次合并执行的请求。
+携带有效会话的 GET 返回 405，失效会话返回 404，不支持的协议头返回 400。取消请求会停止相应操作，并保留其他仍在等待同一次合并执行的请求。
 
-`tools/list` 按固定顺序返回工具，包含 `name`、`title`、`description`、`annotations` 和
+2025 版本的 `tools/list` 按固定顺序返回工具，包含 `name`、`title`、`description`、`annotations` 和
 `inputSchema`。所有工具都是只读的。`web_search` 和 `web_open` 的 `openWorldHint` 为 `true`，
 只读取本地状态的 `web_find` 和 `web_search_status` 为 `false`。
 
@@ -205,15 +199,15 @@ HTTP 会话空闲 30 分钟后过期。服务最多保留 100 个会话，每个
 Stdio 会话与子进程的生命周期一致。服务保留有限数量的近期请求 ID 和所有进行中的请求 ID，
 整段会话的请求总数不设配额。客户端在整个会话中必须使用唯一的请求 ID。
 服务忽略空行，接受 CRLF 换行和开头的 UTF-8 BOM。超过 1 MiB 的行会被丢弃，服务返回带 `id: null` 的
-Invalid Request 后继续处理请求。如果取消消息刚好在对应请求开始前到达，服务仍会取消该请求。
+Invalid Request 后继续处理请求。服务读入工具请求后即可按 ID 取消，即使工作线程尚未开始执行。服务忽略与在途请求无关的取消通知。
 
 <a name="settings-status"></a>
 
 ## 设置状态
 
-`web_search_status` 和 `GET /v1/status` 返回本地设置及最近一次已知的搜索来源状态。
+`web_search_status` 返回本地设置及最近一次已知的搜索来源状态。
 为此新增的 `settings` 对象包含 `search_enabled`、`open_enabled`、`search_without_asking`、
-`provider`、`provider_ready` 和 `revision`。搜索和网页读取开关同时适用于 REST、MCP HTTP 和 stdio。
+`provider`、`provider_ready` 和 `revision`。搜索和网页读取开关同时适用于 MCP HTTP 和 stdio。
 `web_find` 与状态查询始终可用，切换开关后工具列表保持原样。
 `search_without_asking` 为旧客户端保留。当前 QGIS 插件透明转发 MCP 请求，不读取该字段来增加搜索审批。
 
@@ -253,7 +247,7 @@ Invalid Request 后继续处理请求。如果取消消息刚好在对应请求�
 
 管理界面按受控原因和操作上下文显示中英文提示，不展示任意后端异常或上游响应正文。重复授权码保留 HTTP 400，原因及安全的冲突客户端标识说明应更换哪个输入。无结构化正文的 HTTP 409 不会被推断为修订冲突。网络连接失败、无效 JSON 和未知服务错误有各自提示，未知错误不推断服务没有运行。
 
-缓存的具体原因包括 `instance_already_running`、`cache_locked`、`cache_lock_permission_denied`、`cache_lock_failed`、`cache_path_unavailable`、`cache_capacity_exceeded`、`cache_database_open_failed`、`cache_database_corrupt`、`cache_database_incompatible`、`cache_database_busy`、`cache_storage_full`、`cache_database_error` 和 `cache_worker_unavailable`。临时锁占用或数据库忙可稍后重试，权限、损坏、容量及格式问题需要先修复。持锁 PID、绝对路径和本机诊断只写启动 stderr，不进入公共 REST/MCP 错误响应。
+缓存的具体原因包括 `instance_already_running`、`cache_locked`、`cache_lock_permission_denied`、`cache_lock_failed`、`cache_path_unavailable`、`cache_capacity_exceeded`、`cache_database_open_failed`、`cache_database_corrupt`、`cache_database_incompatible`、`cache_database_busy`、`cache_storage_full`、`cache_database_error` 和 `cache_worker_unavailable`。临时锁占用或数据库忙可稍后重试，权限、损坏、容量及格式问题需要先修复。持锁 PID、绝对路径和本机诊断只写启动 stderr，不进入公共 MCP 错误响应。
 
 新的客户端应使用请求体传递 `id` 的 `/clients` 接口，包括合法 ID `.` 和 `..`。浏览器会归一化 URL 中的点路径段，因此不能通过旧路径接口可靠地管理这两个 ID。
 

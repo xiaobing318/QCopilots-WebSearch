@@ -5,30 +5,22 @@ from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
-import queue
 import socket
 import subprocess
 import tempfile
-import threading
 import time
 import xml.etree.ElementTree as ET
 
-from test_admin_http import request
+from mcp_http_fixture import mcp_probe, request
+from test_stdio_transport import LEGACY_STDIO_VERSION, VERSIONS, check_tool_wire, initialize, stdio_peer
 
 
-VERSIONS = ("2025-06-18", "2025-11-25")
 WINDOWS = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
 
 
 def require(condition, message):
     if not condition:
         raise AssertionError(message)
-
-
-def initialize(version):
-    return {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-        "protocolVersion": version, "capabilities": {},
-        "clientInfo": {"name": "embedded-icon-test", "version": "1"}}}
 
 
 def validate_svg(data):
@@ -89,6 +81,19 @@ def stop(process):
             process.wait(timeout=5)
 
 
+def http_tool_wire(port, headers, version):
+    def exchange(message):
+        status, _, body = request(port, "POST", "/mcp", headers, message)
+        if "id" not in message:
+            require(status == 202 and not body, "HTTP notification did not return an empty 202")
+            return None
+        require(status == 200 and body.get("jsonrpc") == "2.0" and body.get("id") == message["id"],
+                "HTTP reply did not match its request")
+        return body
+
+    check_tool_wire(exchange, version)
+
+
 def http_icons(executable, runtime, config, token, expected):
     with ExitStack() as stack:
         reservations = reserve_ports(stack, config)
@@ -108,7 +113,7 @@ def http_icons(executable, runtime, config, token, expected):
             while time.monotonic() < deadline:
                 require(process.poll() is None, "The isolated HTTP fixture exited before becoming ready")
                 try:
-                    if request(port, "GET", "/v1/status", headers)[0] == 200:
+                    if mcp_probe(port, headers)[0] == 200:
                         break
                 except OSError:
                     pass
@@ -116,17 +121,31 @@ def http_icons(executable, runtime, config, token, expected):
             else:
                 raise AssertionError("The isolated HTTP fixture did not become ready")
             icons = []
-            for version in VERSIONS:
-                status, response, body = request(port, "POST", "/mcp", headers, initialize(version))
-                require(status == 200, "HTTP initialize failed")
-                session = response.get("Mcp-Session-Id")
-                require(bool(session), "HTTP initialize omitted its session")
-                try:
+
+            def close_session(session_headers):
+                status, _, body = request(port, "DELETE", "/mcp", session_headers)
+                require(status == 204 and not body, "The HTTP test session did not close")
+
+            with ExitStack() as clients:
+                sessions = []
+                for requested in (*VERSIONS, LEGACY_STDIO_VERSION):
+                    status, response, body = request(port, "POST", "/mcp", headers, initialize(requested))
+                    require(status == 200, "HTTP initialize failed")
+                    session = response.get("Mcp-Session-Id")
+                    require(bool(session), "HTTP initialize omitted its session")
+                    # A 2024 body without a version header negotiates up on HTTP.
+                    version = "2025-11-25" if requested == LEGACY_STDIO_VERSION else requested
+                    session_headers = headers | {"Mcp-Session-Id": session, "MCP-Protocol-Version": version}
+                    clients.callback(close_session, session_headers)
                     icons.append(validate_response(body, version, expected))
-                finally:
-                    status, _, body = request(port, "DELETE", "/mcp", headers | {
-                        "Mcp-Session-Id": session, "MCP-Protocol-Version": version})
-                    require(status == 204 and not body, "The icon test session did not close")
+                    sessions.append((session_headers, version))
+                for session_headers, version in sessions:
+                    http_tool_wire(port, session_headers, version)
+                status, response, _ = request(port, "POST", "/mcp",
+                                              headers | {"MCP-Protocol-Version": LEGACY_STDIO_VERSION},
+                                              initialize(LEGACY_STDIO_VERSION))
+                require(status == 400 and "Mcp-Session-Id" not in response,
+                        "HTTP accepted the 2024 stdio-only protocol header")
             return icons
         finally:
             stop(process)
@@ -137,31 +156,8 @@ def stdio_icon(executable, runtime, config, version, expected):
         reserve_ports(stack, config)
         config["admin"]["enabled"] = True
         runtime.write_text(json.dumps(config), encoding="utf-8")
-        errors = stack.enter_context(tempfile.TemporaryFile())
-        process = subprocess.Popen([executable, "--ConfigPath", str(runtime), "--Stdio"], cwd=runtime.parent,
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors, **WINDOWS)
-        response = queue.Queue()
-        reader = threading.Thread(target=lambda: response.put(process.stdout.readline(1024 * 1024 + 1)),
-                                  daemon=True)
-        try:
-            reader.start()
-            process.stdin.write((json.dumps(initialize(version)) + "\n").encode("utf-8"))
-            process.stdin.flush()
-            try:
-                line = response.get(timeout=8)
-            except queue.Empty:
-                raise AssertionError("Stdio initialize did not return within its deadline") from None
-            require(line.endswith(b"\n") and len(line) <= 1024 * 1024, "Stdio emitted an invalid protocol line")
-            icon = validate_response(json.loads(line), version, expected)
-            process.stdin.close()
-            require(process.wait(timeout=5) == 0, "Stdio did not exit normally after EOF")
-            require(process.stdout.read() == b"", "Stdio emitted non-protocol output after its response")
-            return icon
-        finally:
-            stop(process)
-            reader.join(timeout=2)
-            process.stdin.close()
-            process.stdout.close()
+        with stdio_peer(executable, runtime) as exchange:
+            return validate_response(exchange(initialize(version)), version, expected)
 
 
 def main():
@@ -182,7 +178,7 @@ def main():
         icons = http_icons(executable, runtime, config, token, expected)
         icons.extend(stdio_icon(executable, runtime, config, version, expected) for version in VERSIONS)
         require(all(icon == icons[0] for icon in icons), "Transports or protocol versions advertised different icons")
-    print("PASS self-contained SVG icons over HTTP and stdio for both MCP versions without an admin listener")
+    print("PASS self-contained SVG icons for both 2025 versions, HTTP tool results and version negotiation")
 
 
 if __name__ == "__main__":

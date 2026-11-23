@@ -26,15 +26,19 @@ QCopilots-WebSearch 是一个使用 C++20 和 Qt 6.12 的独立服务，提供�
 
 设置命令打印一次性链接，请在两分钟内打开。添加 `--Open` 可直接启动浏览器。也可以访问该实例管理端口上的 `/settings/`，输入对应的 `admin.token`。
 
-业务监听提供 REST 的 `/v1` 路由和 MCP HTTP 的 `/mcp`，两者均使用客户端 Bearer 令牌。健康和指标使用独立的控制监听。进程型 MCP 客户端通过 `--Stdio --ConfigPath FILE` 接入。[部署和 QGIS 接入说明](docs/deployment.md)
+HTTP 客户端使用 `/mcp` 和业务 Bearer。llama.cpp WebUI 选择 Streamable HTTP，填写 URL，并将 `Authorization` 请求头设为 `Bearer <client-token>`。进程型客户端将命令设为可执行文件，参数设为 `["--Stdio"]`，需要指定配置时追加 `--ConfigPath FILE`。健康和指标使用独立控制监听。[部署和 QGIS 接入说明](docs/deployment.md)
 
 任意 HTTP(S) 网页均可凭有效的业务 Bearer 调用业务接口，无需维护逐站的 `business.origins` 列表。原生或服务端客户端可以省略 `Origin`。新生成配置的业务 Host 默认包含 `127.0.0.1:3181` 和 `web-search.vastarmorai.com`，`business.public_url` 默认为 `https://web-search.vastarmorai.com/mcp`。初始化选用其他端口时，回环 Host 使用实际端口。公网 URL 仅用于展示连接资料，不会创建隧道或验证公网可达性。使用其他部署时，修改为实际 Host 和公网 URL。已有配置若包含 `business.origins`，需要先删除该字段，再通过 `--CheckConfig` 检查。控制接口和设置页仍受各自的访问限制。[业务配置说明](docs/deployment.md#business-addresses-and-browser-access)
 
 管理页顶部提供“访问授权”“搜索设置”“服务状态”三个标签页。“访问授权”左侧为客户端列表，右侧为所选客户端的操作。添加或替换授权码按三步完成：填写或生成授权码，确认“保存并生效”，再复制已生效的 Bearer 和服务地址。保存后立即生效，重启后继续保留。QCopilots 使用该 Bearer，保留已登记的服务地址。
 
-可手动输入包含 `/` 的授权码、随机生成令牌，或选择“从字符串生成”。字符串生成使用原文 UTF-8 字节的 SHA-256，输出 64 位小写十六进制字符，不去除空格或改变大小写。源字符串仅在页面中参与计算，生成后立即清空。保存后停留在“复制连接资料”步骤时，可以重复复制授权码。授权码仅临时保留在页面内存中，点击完成、切换客户端或标签页、刷新或退出登录后清空，之后无法从已保存的客户端列表找回。[令牌管理](docs/deployment.md#manage-client-tokens)
+可手动输入包含 `/` 的授权码、随机生成令牌，或选择“从字符串生成”。字符串生成使用原文 UTF-8 字节的 SHA-256，输出 64 位小写十六进制字符，不去除空格或改变大小写。源字符串仅在页面中参与计算，生成后立即清空。保存后停留在“复制连接资料”步骤时，可以重复复制授权码。离开该步骤后，页面会清空显示的授权码。已登录的管理员可在客户端详情中按需查看已保存的授权码。只保存了摘要的旧记录仍可用于认证，无法回显原文。[令牌管理](docs/deployment.md#manage-client-tokens)
 
 Cloudflare Tunnel 和 WebSearch 运行在同一台 Windows 主机时，将隧道指向本机业务地址，通常为 `http://127.0.0.1:3181`。在 QCopilots 的 MCP Servers 页面保留 Web Search 已登记的服务 URL，启用 Authorization 并输入客户端 Bearer 令牌。插件将 MCP 请求转发到 `https://web-search.vastarmorai.com/mcp`，无需另建后端配置文件或经过额外搜索审批。其他 MCP 客户端直接连接该公网 `/mcp` 地址。[Windows 隧道快速设置](docs/deployment.md#windows-cloudflare-tunnel) · [QGIS 接入](docs/deployment.md#qgis)
+
+## 从 0.4 升级
+
+原有 `/v1/search`、`/v1/open`、`/v1/find`、`/v1/status` 调用分别迁到下面四项 MCP 工具。各安装版本具有独立数据目录。使用新版本自己的地址和凭据验证搜索后再切换客户端。需要回退时重新连接原实例。
 
 ## MCP 工具
 

@@ -8,7 +8,7 @@ on:
         type: boolean
         default: false
       deep:
-        description: Run side-by-side package and Caddy acceptance
+        description: Run side-by-side package acceptance
         type: boolean
         default: false
 
@@ -136,27 +136,40 @@ jobs:
           output = Path(os.environ["QCWS_ACCEPTANCE_DIR"])
           output.mkdir(parents=True, exist_ok=True)
           subprocess.run([sys.executable, "-m", "pip", "install", "--require-hashes", "-r", "tests/requirements.lock"], check=True)
+          fixture = Path("build", os.environ["QCWS_PROFILE"], "tests", "qcws_sdk_page_fixture")
+          env = os.environ.copy()
+          if os.name == "nt":
+              fixture = fixture.with_suffix(".exe")
+              env["PATH"] = str(Path(env["QCWS_EXECUTABLE"]).parent) + os.pathsep + env["PATH"]
           subprocess.run([
               sys.executable, "scripts/test_mcp_sdk.py",
-              "--Executable", os.environ["QCWS_EXECUTABLE"], "--Output", str(output / "mcp-sdk.json"),
-          ], check=True)
-      - name: Build a second release for side-by-side acceptance
+              "--Executable", env["QCWS_EXECUTABLE"], "--PageFixture", str(fixture),
+              "--Output", str(output / "mcp-sdk.json"),
+          ], env=env, check=True)
+      - name: Download and verify the v0.4.0 installer
         if: inputs.release || inputs.deep
         shell: python
         run: |
-          import json, os, subprocess, sys
+          import hashlib, os, subprocess
           from pathlib import Path
-          config = json.loads(Path("config/BuildPipeline.json").read_text(encoding="utf-8"))
-          name = os.environ["QCWS_PROFILE"]
-          profile = config["profiles"][name]
-          profile.update(buildDir="build/upgrade-baseline", installDir="install/upgrade-baseline")
-          profile["cmakeArgs"].append("-DQCWS_VERSION=0.0.1")
-          destination = Path(os.environ["QCWS_ACCEPTANCE_DIR"]) / "baseline.json"
-          destination.write_text(json.dumps(config), encoding="utf-8")
+
+          if os.environ["RUNNER_OS"] == "Windows":
+              name = "QCopilots-WebSearch-0.4.0-win64.msi"
+              expected = "00f3a74d2a4b07e576795a606f5215f7209807f49e07dd4b1753324078a3c5dd"
+          else:
+              name = "qcopilots-websearch-0.4.0_0.4.0_amd64.deb"
+              expected = "cb39726c5228394ea1661a2b4f9414125dbfda3ad9627016de16951fbaee3842"
+          url = f"https://github.com/xiaobing318/QCopilots-WebSearch/releases/download/v0.4.0/{name}"
+          target = Path("build/upgrade-baseline/packages/v0.4.0", name)
+          target.parent.mkdir(parents=True, exist_ok=True)
           subprocess.run([
-              sys.executable, "scripts/pipeline.py", "--ConfigPath", str(destination),
-              "--Profile", name, "--Stages", "configure,build,test,install,publish",
+              "curl", "--fail", "--silent", "--show-error", "--location", "--retry", "3",
+              "--proto", "=https", "--proto-redir", "=https", "--max-time", "180", "--output", str(target), url,
           ], check=True)
+          with target.open("rb") as stream:
+              actual = hashlib.file_digest(stream, "sha256").hexdigest()
+          if actual != expected:
+              raise RuntimeError(f"SHA-256 mismatch for {name}: expected {expected}, got {actual}")
       - name: Check out the system-directory release
         if: inputs.release || inputs.deep
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -173,11 +186,12 @@ jobs:
           from pathlib import Path
 
           source = Path("build/legacy-source").resolve()
+          build = Path("build/legacy-baseline").resolve()
           config = json.loads((source / "config/BuildPipeline.json").read_text(encoding="utf-8"))
           name = os.environ["QCWS_PROFILE"]
           profile = config["profiles"][name]
           profile.update(
-              buildDir=str(Path("build/legacy-baseline").resolve()),
+              buildDir=str(build),
               installDir=str(Path("install/legacy-baseline").resolve()),
               cacheDir=str(Path(".cache").resolve()),
               qtRoot=str(Path(".cache/qt").resolve()),
@@ -187,14 +201,19 @@ jobs:
           destination.write_text(json.dumps(config), encoding="utf-8")
           subprocess.run([
               sys.executable, str(source / "scripts/pipeline.py"), "--ConfigPath", str(destination),
-              "--Profile", name, "--Stages", "configure,build,install,publish",
+              "--Profile", name, "--Stages", "configure,build",
+          ], check=True)
+          generator = "WIX" if os.name == "nt" else "DEB"
+          subprocess.run([
+              "cpack", "--config", str(build / "CPackConfig.cmake"), "-G", generator,
+              "-B", str(build / "packages" / "system-layout"),
           ], check=True)
       - name: Verify the packaged service
         shell: python
         env:
           QCWS_FULL_ACCEPTANCE: ${{ (inputs.release || inputs.deep) && 'true' || 'false' }}
         run: |
-          import hashlib, os, shutil, subprocess, sys
+          import hashlib, json, os, shutil, subprocess, sys
           from pathlib import Path
 
           def package(build, suffix):
@@ -230,9 +249,10 @@ jobs:
                       ], check=True)
           else:
               candidate = package(build, ".deb")
+              report_path = output / "deb.json"
               command = [
                   "sudo", "/usr/bin/python3", "scripts/acceptance_deb.py", "--Package", str(candidate),
-                  "--PackageSHA256", digest(candidate), "--OutputPath", str(output / "deb.json"),
+                  "--PackageSHA256", digest(candidate), "--OutputPath", str(report_path),
                   "--DisposableMachine",
               ]
               if deep:
@@ -240,15 +260,15 @@ jobs:
                       previous = package(path, ".deb")
                       command += ["--BaselinePackage", str(previous), "--BaselineSHA256", digest(previous)]
               subprocess.run(command, check=True)
+              report = json.loads(report_path.read_text(encoding="utf-8"))
+              print(f"Candidate DEB SHA-256: {report['candidateSha256']}")
+              for name, check in report["checks"].items():
+                  print(f"{name}: {check['status']}")
           distribution = build / "release-packages"
           distribution.mkdir()
           suffixes = (".zip", ".msi") if os.name == "nt" else (".deb",)
           for suffix in suffixes:
               shutil.copy2(package(build, suffix), distribution)
-      - name: Check the Caddy HTTPS deployment
-        if: runner.os == 'Linux' && (inputs.release || inputs.deep)
-        run: |
-          python scripts/acceptance_caddy.py --Executable "$QCWS_EXECUTABLE" --Output "$QCWS_ACCEPTANCE_DIR/caddy.json"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: packages-${{ matrix.platform }}
@@ -262,7 +282,6 @@ jobs:
           name: native-failure-${{ matrix.platform }}
           path: |
             build/ci-${{ matrix.platform }}/test-results.xml
-            build/upgrade-baseline/test-results.xml
             ${{ env.QCWS_ACCEPTANCE_DIR }}
           if-no-files-found: ignore
           retention-days: 7
