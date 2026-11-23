@@ -2,6 +2,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QTcpServer>
 #include <QTemporaryDir>
 #include <iostream>
@@ -37,6 +38,59 @@ int main(int argc, char **argv) {
     removedBusinessOption["business"]["origins"] = qws::Json::array();
     requireError("invalid_argument",
                  [&] { qws::validateSchema(qws::readSchema("runtime"), removedBusinessOption); });
+    const auto requireConfigurationError = [](const qws::Json &value, const QString &path,
+                                             const char *diagnostic) {
+      require(QDir().mkpath(QFileInfo(path).absolutePath()), "Cannot create a configuration fixture directory.");
+      QFile file(path);
+      const auto bytes = QByteArray::fromStdString(value.dump());
+      require(file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size(),
+              "Cannot write a configuration fixture.");
+      file.close();
+      try {
+        (void)qws::Config::load(path.toStdString());
+      } catch (const qws::Error &error) {
+        require(error.code == "invalid_configuration", "Configuration failures must have a controlled error code.");
+        require(std::string(error.what()).find(diagnostic) != std::string::npos,
+                "Configuration failure used the wrong diagnostic.");
+        return;
+      }
+      throw std::runtime_error("Expected a configuration error.");
+    };
+    const auto runtimePath = QDir(temporary.path()).filePath("runtime.json");
+    auto previousRelease = removedBusinessOption;
+    previousRelease["project_version"] = "0.2.0";
+    requireConfigurationError(previousRelease, runtimePath, "different project release");
+    requireConfigurationError(qws::Json{{"project_version", "0.2.0"}}, runtimePath, "different project release");
+    requireConfigurationError(removedBusinessOption, runtimePath, "does not match its schema");
+    for (const auto *layout : {"qcopilots-websearch-0.2.0/runtime.json", "qcopilots-websearch-0.2.0/service.json",
+                               "QCopilots-WebSearch-0.2.0-win64/bin/data/runtime.json"})
+      requireConfigurationError(removedBusinessOption, QDir(temporary.path()).filePath(layout),
+                                "different project release");
+    auto unversionedPackage = removedBusinessOption;
+    unversionedPackage.erase("project_version");
+    requireConfigurationError(unversionedPackage,
+                              QDir(temporary.path()).filePath(
+                                  QString::fromStdString("qcopilots-websearch-" +
+                                      config.value.at("project_version").get<std::string>() + "/runtime.json")),
+                              "different project release");
+    for (const auto &invalidType : {qws::Json(), qws::Json::array(), qws::Json("invalid"),
+                                    qws::Json(1), qws::Json(false)})
+      requireConfigurationError(invalidType, runtimePath, "does not match its schema");
+    for (const auto &invalidVersion : {qws::Json(), qws::Json::array(), qws::Json::object(),
+                                       qws::Json(1), qws::Json(false)}) {
+      auto invalidConfiguration = config.value;
+      invalidConfiguration["project_version"] = invalidVersion;
+      requireConfigurationError(invalidConfiguration, runtimePath, "does not match its schema");
+    }
+    auto unversionedPortable = config.value;
+    unversionedPortable.erase("project_version");
+    QFile portable(runtimePath);
+    const auto portableBytes = QByteArray::fromStdString(unversionedPortable.dump());
+    require(portable.open(QIODevice::WriteOnly) && portable.write(portableBytes) == portableBytes.size(),
+            "Cannot write an unversioned portable configuration fixture.");
+    portable.close();
+    require(qws::Config::load(runtimePath.toStdString()).value == unversionedPortable,
+            "An unversioned portable configuration outside a release directory must remain valid.");
     endpoint.erase("public_url");
     require(qws::businessMcpUrl(endpoint) == "http://127.0.0.1:3181/mcp",
             "An unconfigured public endpoint must describe the local business listener.");

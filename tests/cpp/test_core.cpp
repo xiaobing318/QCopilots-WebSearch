@@ -1124,6 +1124,16 @@ void searchPartialTests() {
   // A partial result is cached for at most 30 seconds.
   REQUIRE(s.call("web_search", slow, "alice", token())["cache"]["hit"] == true);
   REQUIRE(requests == 2);
+  {
+    // A completed job can report a cache hit before its background write reads
+    // the clock. Wait for the stored expiry before advancing the fake time.
+    SqlFixture persisted(dir.filePath("cache-v1.sqlite"));
+    REQUIRE(eventually([&] {
+      QSqlQuery query(persisted.db);
+      REQUIRE(query.exec("SELECT expires FROM entries"));
+      return query.next() && query.value(0).toLongLong() == 1030;
+    }, 5000));
+  }
   respond = [](int page, const auto &) {
     return page == 1 ? searxngPage({"https://example.com/first"}) : searxngPage(Json::array());
   };

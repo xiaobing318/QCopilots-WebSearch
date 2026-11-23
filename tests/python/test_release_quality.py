@@ -1,14 +1,52 @@
 """Quality checks must reject incomplete or ineffective execution immediately."""
 import copy
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
+import types
 import unittest
+from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts'))
 import quality
 import release_gate
+
+# Only the pure diagnostic check is exercised on Windows. The DEB installer
+# itself remains Linux-only and its account operations are never called here.
+with patch.dict(sys.modules, {"pwd": types.ModuleType("pwd")} if sys.platform == "win32" else {}):
+    import acceptance_deb
+
+
+class DebIsolationDiagnosticTests(unittest.TestCase):
+    version_error = ("invalid_configuration: Runtime configuration belongs to a different project release. "
+                     "This executable expects 0.0.1.\n")
+    schema_error = ("invalid_configuration: Runtime configuration does not match its schema "
+                    "/business: required property 'origins' not found.\n")
+
+    def test_version_rejection_is_required_for_current_layouts(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                acceptance_deb.require_cross_release_rejection(
+                    subprocess.CompletedProcess([], 1, self.version_error), legacy=legacy)
+        with self.assertRaisesRegex(RuntimeError, 'cross-release configuration error'):
+            acceptance_deb.require_cross_release_rejection(
+                subprocess.CompletedProcess([], 1, self.schema_error), legacy=False)
+
+    def test_immutable_legacy_release_may_reject_new_schema_first(self):
+        acceptance_deb.require_cross_release_rejection(
+            subprocess.CompletedProcess([], 1, self.schema_error), legacy=True)
+
+    def test_success_and_unrelated_failures_cannot_pass_isolation(self):
+        for legacy in (False, True):
+            for code, output in ((0, self.version_error), (0, self.schema_error), (1, ''),
+                                 (1, 'invalid_configuration: Cannot read runtime configuration.\n'),
+                                 (1, 'unexpected prefix: ' + self.schema_error)):
+                with self.subTest(legacy=legacy, code=code, output=output), \
+                     self.assertRaisesRegex(RuntimeError, 'cross-release configuration error'):
+                    acceptance_deb.require_cross_release_rejection(
+                        subprocess.CompletedProcess([], code, output), legacy=legacy)
 
 
 class ReleaseGateTests(unittest.TestCase):

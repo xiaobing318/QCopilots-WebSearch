@@ -543,6 +543,16 @@ def check_client_registry(installation, passed):
     passed("client-registry-service-writes")
 
 
+def require_cross_release_rejection(result, *, legacy):
+    expected = ("invalid_configuration: Runtime configuration belongs to a different project release.",)
+    if legacy:
+        # The immutable system-directory release checks its older schema before
+        # version ownership, so newer configuration fields can reject first.
+        expected += ("invalid_configuration: Runtime configuration does not match its schema ",)
+    require(result.returncode != 0 and any(line.startswith(expected) for line in result.stdout.splitlines()),
+            "The installed executable did not return the expected cross-release configuration error")
+
+
 def check_isolation(candidate, baselines, passed):
     installations = [candidate, *baselines]
     for first, second in combinations(installations, 2):
@@ -560,9 +570,7 @@ def check_isolation(candidate, baselines, passed):
                 continue
             reject_token(own, other.token())
             mismatch = run(own.exe, "--ConfigPath", other.config, "--CheckConfig", check=False)
-            expected = "invalid_configuration: Runtime configuration belongs to a different project release."
-            require(mismatch.returncode != 0 and any(line.startswith(expected) for line in mismatch.stdout.splitlines()),
-                    "The installed executable did not return the expected cross-release configuration error")
+            require_cross_release_rejection(mismatch, legacy=own.legacy)
         # Unlike run(), this call must not put the temporary login link in the log.
         link = subprocess.run([str(own.exe), "--SettingsUrl"], env=ENV, capture_output=True,
                               text=True, timeout=8)

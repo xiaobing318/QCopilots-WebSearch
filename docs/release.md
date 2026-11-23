@@ -109,7 +109,7 @@ if ($LASTEXITCODE -ne 0) { throw '手动验收未成功，请先处理失败。'
 
 ### 3. 创建并推送带注释的版本标签
 
-推送标签前再次核对 main push CI，避免采用已经被后续失败或取消运行替代的记录。标签固定在 `$releaseSha`，已有标签不要覆盖或移动。
+推送标签前再次核对 main push CI，避免采用已经被后续失败或取消运行替代的记录。标签固定在 `$releaseSha`，默认不覆盖或移动已有标签，未发布标签的异常处理见下文。
 
 ```powershell
 $gateRuns = @(gh run list --repo $repo --workflow ci.yml --branch main --event push --commit $releaseSha --limit 1 --json status,conclusion | ConvertFrom-Json)
@@ -175,6 +175,7 @@ foreach ($package in $assets | Where-Object Extension -in @('.zip', '.msi', '.de
 - main push CI 失败或被取消时，先查看该运行的失败日志。若无需改代码，可在 Actions 重跑同一运行，成功后再打标签。若修改了代码，提交新 SHA 并重新等待它的 main push CI，不沿用旧结果。
 - 手动 CI 意外取消 main push CI 时，手动成功仍不能通过发布门禁。等手动运行结束，再重跑对应的 main push CI 并确认成功。
 - Release 因主分支 CI 未完成而被门禁拒绝时，先让同 SHA 的 main push CI 成功，再重跑原 Release。基础设施或下载暂时失败且未创建发布时，也可重跑原运行。查看日志可使用 `gh run view <运行ID> --repo $repo --log-failed`。
+- 标签已推送但尚未创建 Release，而修复需要新提交时，推荐使用新的版本号。只有仓库维护者明确同意，且已确认没有该版本的 Release 或发布资产，才考虑修正尚未发布的标签。新提交仍须先通过对应的 main push CI，再触发新的标签发布运行。重跑旧运行不会自动使用修复后的提交。
 - Release 已创建但后续检查失败时，先核对现有资产和日志，不直接重复创建或覆盖资产。需要代码或版本修复时使用新提交和新版本，例如 `v0.4.1`。不要删除并重建已发布标签，不要移动标签到另一提交。
 
 参阅[许可声明和 Qt 替换说明](licensing.md)。

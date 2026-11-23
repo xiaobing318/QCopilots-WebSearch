@@ -144,14 +144,18 @@ QString packageDirectoryRelease(const QString &path) {
 Config validatedConfiguration(Json value, const QString &path) {
   Config c{std::move(value), QFileInfo(path).absolutePath().toStdString(),
            QFileInfo(path).absoluteFilePath().toStdString()};
+  const auto deployment = packageDirectoryRelease(path);
+  // Older releases can have a different schema. Report ownership before
+  // interpreting their fields, while leaving malformed types to the schema.
+  if (c.value.is_object()) {
+    const auto version = c.value.find("project_version");
+    if ((!deployment.isEmpty() && (deployment != QLatin1String(QCWS_VERSION) || version == c.value.end())) ||
+        (version != c.value.end() && version->is_string() && *version != QCWS_VERSION))
+      throw Error("invalid_configuration", "Runtime configuration belongs to a different project release. "
+                                           "This executable expects " QCWS_VERSION ".");
+  }
   if (const auto problem = violation(readSchema("runtime"), c.value))
     throw Error("invalid_configuration", "Runtime configuration does not match its schema " + *problem + ".");
-  const auto deployment = packageDirectoryRelease(path);
-  if ((!deployment.isEmpty() && (deployment != QLatin1String(QCWS_VERSION) ||
-                                !c.value.contains("project_version"))) ||
-      (c.value.contains("project_version") && c.value["project_version"] != QCWS_VERSION))
-    throw Error("invalid_configuration", "Runtime configuration belongs to a different project release. "
-                                         "This executable expects " QCWS_VERSION ".");
   if (const auto p = c.value.find("provider"); p != c.value.end()) {
     const auto &provider = *p;
     const QUrl url(QString::fromStdString(provider["url"].get<std::string>()), QUrl::StrictMode);
