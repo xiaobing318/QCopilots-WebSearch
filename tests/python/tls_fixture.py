@@ -39,15 +39,19 @@ class Server(ThreadingHTTPServer):
 
     def get_request(self):
         raw, address = super().get_request()
-        raw.settimeout(3)
+        # The native probe has a five-second deadline for the handshake and HTTP exchange.
+        # Keep the fixture from closing a valid connection before that deadline.
+        raw.settimeout(7)
         with self.lock:
             self.accepted += 1
         if self.context is None:
             return raw, address
         try:
             return self.context.wrap_socket(raw, server_side=True), address
-        except BaseException:
+        except BaseException as exc:
             raw.close()
+            if isinstance(exc, TimeoutError):
+                print("TLS fixture: handshake timed out", file=sys.stderr, flush=True)
             raise
 
     def counters(self):
@@ -60,6 +64,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *_args):
         pass
+
+    def log_error(self, message, *args):
+        print("TLS fixture HTTP:", message % args, file=sys.stderr, flush=True)
 
     def reply(self, status, data, content_type):
         self.send_response(status)
