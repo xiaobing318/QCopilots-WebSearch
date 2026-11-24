@@ -87,7 +87,7 @@ Watch-CheckedRun $pushRunId 'CI' 'push' 'main'
 
 ### 3. 创建带中文发布说明的注释标签
 
-标签注释将成为 GitHub Release 正文。按本次交付撰写中文说明，核对包名、目标系统和主要功能。推送标签前再次查询该 SHA 最新的 main push CI。
+标签注释将成为 GitHub Release 正文。按本次交付撰写中文 Markdown 说明，核对包名、目标系统和主要功能。说明文件使用无 BOM 的 UTF-8、LF 换行和一个消息终止换行。推送前核对该 SHA 最新的 main push CI、标签对象、目标提交和正文。
 
 ```powershell
 $gate = @(gh run list --repo $repo --workflow ci.yml --branch main --event push --commit $releaseSha --limit 1 --json headSha,status,conclusion | ConvertFrom-Json)
@@ -95,13 +95,37 @@ if ($LASTEXITCODE -ne 0 -or $gate.Count -ne 1 -or $gate[0].headSha -ne $releaseS
     $gate[0].status -ne 'completed' -or $gate[0].conclusion -ne 'success') {
     throw '本提交最新的 main push CI 尚未成功。'
 }
-$notes = @"
-QCopilots-WebSearch $version
+$utf8 = [Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $utf8
+$notes = @'
+## 安装包
 
-Windows 11 x64 提供便携 ZIP 和 MSI，Ubuntu 26.04 amd64 提供 DEB。通过 MCP HTTP 或 stdio 可调用搜索、网页读取、页内查找和服务状态四项工具。发布资产附有对应的 Qt 源码与 SHA256SUMS 校验清单。
-"@
-git tag -a $tag $releaseSha -m $notes
-if ($LASTEXITCODE -ne 0) { throw '创建注释标签失败，请检查已有标签。' }
+- Windows 11 x64 提供便携 ZIP 和 MSI。
+- Ubuntu 26.04 amd64 提供 DEB。
+
+通过 MCP HTTP 或 stdio 可调用搜索、网页读取、页内查找和服务状态四项工具。发布资产附有对应的 Qt 源码与 `SHA256SUMS` 校验清单。
+'@
+$notes = $notes -replace '\r\n?', "`n"
+$tagMessage = $notes + "`n"
+$notesFile = [IO.Path]::GetTempFileName()
+try {
+    [IO.File]::WriteAllText($notesFile, $tagMessage, $utf8)
+    git tag -a --cleanup=verbatim -F $notesFile $tag $releaseSha
+    if ($LASTEXITCODE -ne 0) { throw '创建注释标签失败，请检查已有标签。' }
+} finally {
+    Remove-Item -LiteralPath $notesFile
+}
+$tagRef = "refs/tags/$tag"
+$tagType = git cat-file -t $tagRef
+if ($LASTEXITCODE -ne 0 -or $tagType -cne 'tag') { throw '需要带注释的标签。' }
+$tagCommit = git rev-parse --verify "$tagRef^{commit}"
+if ($LASTEXITCODE -ne 0 -or $tagCommit -cne $releaseSha) { throw '标签指向的提交与发布 SHA 不一致。' }
+$contents = (git tag --list $tag '--format=%(contents)') -join "`n"
+if ($LASTEXITCODE -ne 0) { throw '读取标签正文失败。' }
+$signature = (git tag --list $tag '--format=%(contents:signature)') -join "`n"
+if ($LASTEXITCODE -ne 0 -or ![string]::Equals($contents, $tagMessage + $signature, [StringComparison]::Ordinal)) {
+    throw '本地标签正文与发布说明不一致。'
+}
 git push origin "refs/tags/$tag"
 if ($LASTEXITCODE -ne 0) { throw '推送标签失败，请检查远端状态。' }
 ```
@@ -116,16 +140,20 @@ $releaseRunId = Read-Host '输入本标签的 Release 运行 ID，列表未更�
 Watch-CheckedRun $releaseRunId 'Release' 'push' $tag
 $remoteTag = git ls-remote --exit-code --tags origin "refs/tags/$tag^{}"
 if ($LASTEXITCODE -ne 0 -or ($remoteTag -split '\s+')[0] -ne $releaseSha) { throw '远端注释标签指向其他提交。' }
+$release = gh release view $tag --repo $repo --json tagName,body,isDraft,isPrerelease | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $release.tagName -cne $tag -or $release.isDraft -or $release.isPrerelease) {
+    throw '发布页的标签或正式发布状态不符。'
+}
+$publishedNotes = $release.body -replace '\r\n?', "`n"
+if (![string]::Equals($publishedNotes, $notes, [StringComparison]::Ordinal)) { throw 'Release 正文与已核对的中文说明不一致。' }
 $latest = gh api "repos/$repo/releases/latest" --jq '.tag_name'
 if ($LASTEXITCODE -ne 0 -or $latest -cne $tag) { throw 'Latest 未指向本次正式发布。' }
-gh release view $tag --repo $repo
-if ($LASTEXITCODE -ne 0) { throw '读取 Release 失败。' }
 $releaseDir = Join-Path ([IO.Path]::GetTempPath()) "qcopilots-$tag-$([guid]::NewGuid())"
 gh release download $tag --repo $repo --dir $releaseDir
 if ($LASTEXITCODE -ne 0) { throw '下载发布资产失败。' }
 ```
 
-核对发布页上的中文说明与注释标签。下载目录应包含三个安装包、匹配的 Qt 源码和 `SHA256SUMS`，共五项资产。清单须分别覆盖四个有效载荷。Qt 源码另与发布提交的依赖锁核对，三个安装包的来源证明分别绑定到发布工作流、标签和提交。[下载资产](https://cli.github.com/manual/gh_release_download) · [验证来源证明](https://cli.github.com/manual/gh_attestation_verify)
+下载目录应包含三个安装包、匹配的 Qt 源码和 `SHA256SUMS`，共五项资产。清单须分别覆盖四个有效载荷。Qt 源码另与发布提交的依赖锁核对，三个安装包的来源证明分别绑定到发布工作流、标签和提交。[下载资产](https://cli.github.com/manual/gh_release_download) · [验证来源证明](https://cli.github.com/manual/gh_attestation_verify)
 
 ```powershell
 $packages = @("QCopilots-WebSearch-$version-win64.zip", "QCopilots-WebSearch-$version-win64.msi",

@@ -108,9 +108,13 @@ jobs:
           ACCEPTED_TAG_OBJECT: ${{ needs.version.outputs.tag_object }}
         run: |
           local_tag=$(git rev-parse --verify "$GITHUB_REF")
-          remote_tag=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" --jq '.object.sha')
-          if [[ "$local_tag" != "$ACCEPTED_TAG_OBJECT" || "$remote_tag" != "$ACCEPTED_TAG_OBJECT" ]]; then
-            echo "The annotated release tag changed after validation." >&2
-            exit 1
-          fi
+          verify_release_tag() {
+            remote_tag=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" --jq '.object.sha')
+            if [[ "$local_tag" != "$ACCEPTED_TAG_OBJECT" || "$remote_tag" != "$ACCEPTED_TAG_OBJECT" ]]; then
+              echo "The annotated release tag changed after validation." >&2
+              exit 1
+            fi
+          }
+          verify_release_tag
           gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --notes-from-tag
+          verify_release_tag

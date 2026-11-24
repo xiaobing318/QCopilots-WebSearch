@@ -26,9 +26,11 @@ Assert ($supportedDesktop -or $supportedServer) 'Use Windows 11 or Windows Serve
 $programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
 Assert ([IO.Directory]::Exists($programFiles)) 'Cannot locate Program Files.'
 $wi = New-Object -ComObject WindowsInstaller.Installer
-function Read-Msi([string]$path) {
+function Read-Msi([string]$path, [string]$expectedSha256) {
     $full = (Resolve-Path -LiteralPath $path).ProviderPath
     Assert ([IO.Path]::GetExtension($full) -eq '.msi') 'Expected an MSI file.'
+    $sha256 = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash
+    Assert ($expectedSha256 -match '^[a-fA-F0-9]{64}$' -and $sha256 -eq $expectedSha256) 'MSI SHA-256 mismatch.'
     $db = $wi.OpenDatabase($full, 0)
     try {
         $properties = @{}
@@ -40,6 +42,9 @@ function Read-Msi([string]$path) {
         }
         [void]$view.Close()
         [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($view)
+        Assert ($properties.ProductVersion -match '^[0-9]+\.[0-9]+\.[0-9]+$') 'Require a three-field MSI version.'
+        $expectedName = 'QCopilots-WebSearch-{0}-win64.msi' -f $properties.ProductVersion
+        Assert ([string]::Equals([IO.Path]::GetFileName($full), $expectedName, [StringComparison]::Ordinal)) "MSI filename must match ProductVersion ($expectedName)."
         $view = $db.OpenView(('SELECT {0}Name{0}, {0}StartName{0}, {0}Arguments{0} FROM {0}ServiceInstall{0}' -f [char]96))
         [void]$view.Execute()
         $record = $view.Fetch()
@@ -65,7 +70,7 @@ function Read-Msi([string]$path) {
         [void]$view.Close()
         [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($view)
         $properties.Path = $full
-        $properties.Sha256 = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash
+        $properties.Sha256 = $sha256
         return $properties
     } finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($db) }
 }
@@ -73,7 +78,6 @@ function Set-ExpectedInstance([hashtable]$metadata, [bool]$overrideInstallRoot) 
     $version = $metadata.ProductVersion
     [void][guid]::Parse($metadata.ProductCode)
     [void][guid]::Parse($metadata.UpgradeCode)
-    Assert ($version -match '^[0-9]+\.[0-9]+\.[0-9]+$') 'Require a three-field MSI version.'
     Assert ($metadata.ProductName -eq 'QCopilots-WebSearch') 'Expected a production package.'
     $directory = "QCopilots-WebSearch-$version"
     $name = "QCopilotsWebSearch-$version"
@@ -100,7 +104,7 @@ function Set-ExpectedInstance([hashtable]$metadata, [bool]$overrideInstallRoot) 
     $metadata.AdminToken = Join-Path $metadata.DataRoot 'admin.token'
     $metadata.AdminEndpoint = Join-Path $metadata.DataRoot 'state\admin-port'
     $metadata.InstallAttempted = $false
-    $metadata.TrackedRoots = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $metadata.ObservedInstallRoot = $null
 }
 function Registered([string]$code) {
     foreach ($product in $wi.ProductsEx($code, 'S-1-1-0', 7)) { return $true }
@@ -171,9 +175,7 @@ function Invoke-Msi([hashtable]$metadata, [string]$mode, [string]$label, [int]$e
         }
         $code = $process.ExitCode
     } finally { $process.Dispose() }
-    foreach ($root in @($metadata.InstallRoot, $metadata.DataRoot)) {
-        if (Test-Path -LiteralPath $root) { [void]$metadata.TrackedRoots.Add($root) }
-    }
+    if (Test-Path -LiteralPath $metadata.InstallRoot) { $metadata.ObservedInstallRoot = $metadata.InstallRoot }
     if ($code -ne $expected -and (Test-Path -LiteralPath $log)) {
         $tail = (Get-Content -LiteralPath $log -Tail 120) -join [Environment]::NewLine
         if ($tail.Length -gt 32768) { $tail = $tail.Substring($tail.Length - 32768) }
@@ -576,11 +578,10 @@ function Assert-InstalledColdStartValidation([hashtable]$metadata) {
         }
     }
 }
-function Remove-OwnedTree([hashtable]$metadata, [string]$root) {
-    $absolute = [IO.Path]::GetFullPath($root).TrimEnd('\')
-    Assert ($metadata.InstallAttempted -and $metadata.TrackedRoots.Contains($absolute) -and
-            [IO.Path]::GetDirectoryName($metadata.InstallRoot) -eq $programFiles -and
-            (@($metadata.InstallRoot, $metadata.DataRoot) -contains $absolute)) 'Refusing unowned delete.'
+function Remove-OwnedTree([hashtable]$metadata, [switch]$AfterServiceRollback) {
+    $absolute = [IO.Path]::GetFullPath($metadata.InstallRoot).TrimEnd('\')
+    Assert ($metadata.InstallAttempted -and $metadata.ObservedInstallRoot -ceq $absolute -and
+            [IO.Path]::GetDirectoryName($absolute) -eq $programFiles) 'Refusing unowned delete.'
     if (!(Test-Path -LiteralPath $absolute)) { return }
     Assert ((Resolve-Path -LiteralPath $absolute).ProviderPath.TrimEnd('\') -eq $absolute) 'Cleanup root changed.'
     for ($parent = [IO.Path]::GetDirectoryName($absolute); $parent; $parent = [IO.Path]::GetDirectoryName($parent)) {
@@ -588,16 +589,43 @@ function Remove-OwnedTree([hashtable]$metadata, [string]$root) {
     }
     $pending = [Collections.Generic.Stack[string]]::new()
     $pending.Push($absolute)
+    if ($AfterServiceRollback) {
+        # A stopped fresh service can leave its advertised port and SQLite database.
+        # The cache uses DELETE journaling and releases its lock when it closes.
+        $stateDirectories = @('bin\data\state', 'bin\data', 'bin')
+        $stateFiles = @('bin\data\state\admin-port', 'bin\data\state\cache-v1.sqlite')
+    }
     while ($pending.Count) {
         $directory = $pending.Pop()
-        Assert (!((Get-Item -LiteralPath $directory -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) 'Reparse point in cleanup tree.'
+        $entry = Get-Item -LiteralPath $directory -Force
+        Assert ($entry.PSIsContainer -and !($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) 'Invalid directory in cleanup tree.'
         foreach ($item in Get-ChildItem -LiteralPath $directory -Force) {
             Assert (!($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) 'Reparse point in cleanup tree.'
             Assert ($item.FullName.StartsWith($absolute + '\', [StringComparison]::OrdinalIgnoreCase)) 'Cleanup child escaped root.'
+            if ($AfterServiceRollback) {
+                $relative = $item.FullName.Substring($absolute.Length + 1)
+                $allowed = ($item -is [IO.DirectoryInfo] -and $relative -cin $stateDirectories) -or
+                           ($item -is [IO.FileInfo] -and $relative -cin $stateFiles)
+                Assert $allowed "Unexpected path or file type after MSI rollback: $relative"
+            }
             if ($item.PSIsContainer) { $pending.Push($item.FullName) }
         }
     }
-    Remove-Item -LiteralPath $absolute -Recurse -Force
+    if ($AfterServiceRollback) {
+        # Validate the entire tree above before deleting anything. Empty-only directory
+        # removal also leaves any unexpected late arrival visible as a failure.
+        foreach ($relative in $stateFiles) {
+            $file = Join-Path $absolute $relative
+            if ([IO.File]::Exists($file)) { [IO.File]::Delete($file) }
+        }
+        foreach ($relative in $stateDirectories) {
+            $directory = Join-Path $absolute $relative
+            if ([IO.Directory]::Exists($directory)) { [IO.Directory]::Delete($directory) }
+        }
+        [IO.Directory]::Delete($absolute)
+    } else {
+        Remove-Item -LiteralPath $absolute -Recurse -Force
+    }
 }
 function Assert-Uninstalled([hashtable]$metadata) {
     Wait-Absent $metadata
@@ -613,15 +641,10 @@ function Assert-RolledBack([hashtable]$metadata, [bool]$serviceStarted) {
     foreach ($path in @($metadata.Config, $metadata.Token, $metadata.AdminToken)) {
         Assert (!(Test-Path -LiteralPath $path)) "Rollback left an installer-created path: $path"
     }
-    if ($serviceStarted -and (Test-Path -LiteralPath $metadata.DataRoot)) {
-        # The service can generate state after StartServices, outside the MSI file receipt.
-        # Delete it only after verifying rollback and ownership so the next install starts fresh.
-        Remove-OwnedTree $metadata $metadata.DataRoot
-        foreach ($ancestor in @($metadata.BinRoot, $metadata.InstallRoot)) {
-            if ([IO.Directory]::Exists($ancestor)) { [IO.Directory]::Delete($ancestor) }
-        }
+    if ($serviceStarted -and (Test-Path -LiteralPath $metadata.InstallRoot)) {
+        Remove-OwnedTree $metadata -AfterServiceRollback
     }
-    Assert (!(Test-Path -LiteralPath $metadata.InstallRoot)) 'Rollback left unexpected installed files or deployment data.'
+    Assert-CleanHost $metadata
 }
 function Assert-CleanHost([hashtable]$metadata) {
     Assert (!(Get-CimInstance Win32_Service -Filter "Name='$($metadata.ServiceName)'")) 'The service is already registered.'
@@ -692,7 +715,7 @@ function Test-MsiLayout([hashtable]$metadata, $result) {
                 }
                 foreach ($process in Owned-Processes $metadata) { Stop-Process -Id $process.ProcessId -Force }
                 Assert-Uninstalled $metadata
-                if (Test-Path -LiteralPath $metadata.InstallRoot) { Remove-OwnedTree $metadata $metadata.InstallRoot }
+                if (Test-Path -LiteralPath $metadata.InstallRoot) { Remove-OwnedTree $metadata }
                 Assert-CleanHost $metadata
                 $result.Checks.Add('cleanup')
             } catch { $result.CleanupErrors.Add($_.Exception.Message) }
@@ -703,9 +726,8 @@ function Test-MsiLayout([hashtable]$metadata, $result) {
     if ($result.CleanupErrors.Count) { throw ($result.CleanupErrors -join [Environment]::NewLine) }
 }
 
-$candidate = Read-Msi $options['--CandidateMsi']
 $expected = $options['--CandidateSHA256']
-Assert ($expected -match '^[a-fA-F0-9]{64}$' -and $candidate.Sha256 -eq $expected) 'MSI SHA-256 mismatch.'
+$candidate = Read-Msi $options['--CandidateMsi'] $expected
 $output = [IO.Path]::GetFullPath($options['--OutputDir'])
 $runDir = Join-Path $output ('msi-acceptance-' + [guid]::NewGuid().ToString('N'))
 $layouts = [ordered]@{}

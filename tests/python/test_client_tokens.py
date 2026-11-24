@@ -448,8 +448,8 @@ def verify_release_config(executable, folder):
     }, "Portable initialization did not generate the public business defaults")
 
     peer_version = "999.999.999" if version != "999.999.999" else "1.2.3"
-    peer = folder / f"qcopilots-websearch-{peer_version}" / "runtime.json"
-    peer.parent.mkdir()
+    peer = folder / f"qcopilots-websearch-{peer_version}" / "bin" / "data" / "runtime.json"
+    peer.parent.mkdir(parents=True)
     peer.write_text(json.dumps(value | {"project_version": peer_version}), encoding="utf-8")
     peer_bytes = peer.read_bytes()
     result = command(peer, "--CheckConfig")
@@ -459,7 +459,7 @@ def verify_release_config(executable, folder):
     require(result.returncode != 0 and not result.stdout and peer.read_bytes() == peer_bytes,
             "The token command changed another release's config")
 
-    managed = folder / f"qcopilots-websearch-{version}" / "runtime.json"
+    managed = folder / f"qcopilots-websearch-{version}" / "bin" / "data" / "runtime.json"
     state = folder / "separate-state"
     options = ("--InitializeConfig", "--SelectAvailablePorts", "--StateDirectory", str(state))
     require(command(managed, *options).returncode == 0, "Managed config initialization failed")

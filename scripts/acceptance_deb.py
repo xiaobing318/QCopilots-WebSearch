@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Test a candidate DEB on a fresh disposable Ubuntu systemd runner."""
 import argparse
-from contextlib import closing
+from contextlib import closing, contextmanager
+import fcntl
 import grp
 import hashlib
 import http.client
@@ -225,8 +226,31 @@ def preserved(expected):
             "Configuration, token or retained file changed")
 
 
-def preflight(args, installation):
-    require(args.DisposableMachine and os.geteuid() == 0, "Requires root and disposable VM opt-in")
+@contextmanager
+def fixture_lock(path):
+    flags = os.O_NOFOLLOW | os.O_CLOEXEC
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | flags)
+    try:
+        parent = os.fstat(directory)
+        require(parent.st_uid == os.geteuid() and not parent.st_mode & 0o022, "Unsafe fixture lock directory")
+        fd = os.open(path.name, os.O_RDWR | os.O_CREAT | os.O_NONBLOCK | flags, 0o600, dir_fd=directory)
+    finally:
+        os.close(directory)
+    try:
+        info = os.fstat(fd)
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == os.geteuid()
+                and not info.st_mode & 0o077, "Unsafe fixture lock file")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise BlockingIOError("Another DEB acceptance process holds the host lock") from exc
+        yield
+    finally:
+        # Keep the inode in /run so every process locks the same file.
+        os.close(fd)
+
+
+def preflight(installation):
     release = dict(line.split("=", 1) for line in Path("/etc/os-release").read_text().splitlines() if "=" in line)
     require(release.get("ID", "").strip('"') == "ubuntu"
             and release.get("VERSION_ID", "").strip('"') == "26.04"
@@ -255,7 +279,7 @@ def check_cached_entry(installation, entry):
                 "The package operation changed retained cache data")
 
 
-def check_reinstall(installation, passed):
+def check_reinstall(installation, saved_key_state, passed):
     expected = installation.snapshots()
     settings = installation.state / "settings.json"
     expected[settings] = sha(settings)
@@ -273,7 +297,11 @@ def check_reinstall(installation, passed):
     health(installation)
     preserved(expected)
     check_cached_entry(installation, (key, payload))
-    passed("same-version-reinstall")
+    require(provider_key_snapshot(installation) == saved_key_state, "Reinstall changed provider key data or permissions")
+    with admin_session(installation, []) as (exchange, cookie, _):
+        _, settings = exchange("GET", "/settings", headers=cookie)
+        require(settings["providers"]["brave"] == {"key_set": True}, "Reinstalled service lost its provider key")
+    passed("same-version-reinstall", providerKeyRetained=True)
     return key, payload
 
 
@@ -508,20 +536,13 @@ def leave_crashed_cli_lock(installation):
         os.replace(backup, token)
 
 
-def check_client_registry(installation, passed):
-    """Exercise writes through the actual sandboxed service after root CLI updates."""
-    runtime = installation.read_config()
-    runtime_hash = sha(installation.config)
-    runtime_access = access_rules(installation.config)
-    previous_pid = installation.pid()
-    port = runtime["admin"]["port"]
+@contextmanager
+def admin_session(installation, credentials):
+    port = installation.read_config()["admin"]["port"]
     origin = f"http://127.0.0.1:{port}"
-    # Capture the one-time login link without adding it to the acceptance log.
-    link = subprocess.run([installation.exe, "--SettingsUrl"], env=ENV, capture_output=True, text=True, timeout=8)
-    require(link.returncode == 0 and re.fullmatch(re.escape(origin) + r"/settings/#login=[a-f0-9]{64}",
-                                                  link.stdout.strip()), "Wrong default settings URL")
     base = "/admin/api/v1"
-    credentials = [installation.token(), installation.tokens[1].read_text(encoding="ascii").strip()]
+    admin_token = installation.tokens[1].read_text(encoding="ascii").strip()
+    credentials.extend((installation.token(), admin_token))
 
     def exchange(method, path, body=None, headers=None, *, expected_status=200):
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
@@ -541,6 +562,40 @@ def check_client_registry(installation, passed):
         finally:
             connection.close()
 
+    login = {"Origin": origin, "Content-Type": "application/json"}
+    headers, session = exchange("POST", "/session",
+                                {"token": admin_token}, login)
+    cookie = {"Cookie": headers["Set-Cookie"].split(";", 1)[0]}
+    write = login | cookie | {"X-QCWS-CSRF": session["csrf"]}
+    try:
+        yield exchange, cookie, write
+    finally:
+        exchange("DELETE", "/session", {}, write)
+
+
+def provider_key_snapshot(installation):
+    path = installation.state / "secrets.json"
+    info = path.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+            and (info.st_uid, info.st_gid) == installation.installed_ids
+            and stat.S_IMODE(info.st_mode) == 0o600, "Unsafe provider key storage")
+    return sha(path), access_rules(path)
+
+
+def check_client_registry(installation, passed):
+    """Exercise writes through the actual sandboxed service after root CLI updates."""
+    runtime = installation.read_config()
+    runtime_hash = sha(installation.config)
+    runtime_access = access_rules(installation.config)
+    previous_pid = installation.pid()
+    port = runtime["admin"]["port"]
+    origin = f"http://127.0.0.1:{port}"
+    # Capture the one-time login link without adding it to the acceptance log.
+    link = subprocess.run([installation.exe, "--SettingsUrl"], env=ENV, capture_output=True, text=True, timeout=8)
+    require(link.returncode == 0 and re.fullmatch(re.escape(origin) + r"/settings/#login=[a-f0-9]{64}",
+                                                  link.stdout.strip()), "Wrong default settings URL")
+    credentials = []
+
     def check_view(view):
         require(set(view) == {"revision", "clients", "pending_restart"}
                 and all(set(client) == {"id", "source", "can_reveal"}
@@ -555,12 +610,7 @@ def check_client_registry(installation, passed):
         check_view(view)
         require(view["revision"] == revision, "Viewing a credential changed the client registry")
 
-    login = {"Origin": origin, "Content-Type": "application/json"}
-    headers, session = exchange("POST", "/session",
-                                {"token": installation.tokens[1].read_text(encoding="ascii").strip()}, login)
-    cookie = {"Cookie": headers["Set-Cookie"].split(";", 1)[0]}
-    write = login | cookie | {"X-QCWS-CSRF": session["csrf"]}
-    try:
+    with admin_session(installation, credentials) as (exchange, cookie, write):
         _, view = exchange("GET", "/clients", headers=cookie)
         check_view(view)
         require(any(client["id"] == "local" for client in view["clients"]),
@@ -577,7 +627,8 @@ def check_client_registry(installation, passed):
         require(not (installation.state / "client-registry.json.lock").exists(),
                 "The service could not recover a crashed root CLI transaction")
         body = {"id": "deb-web-acceptance", "revision": view["revision"]}
-        exchange("POST", "/clients/reveal", body, login | cookie, expected_status=403)
+        exchange("POST", "/clients/reveal", body, cookie | {"Origin": origin, "Content-Type": "application/json"},
+                 expected_status=403)
         _, error = exchange("POST", "/clients/reveal", body | {"revision": stale_revision},
                             write, expected_status=409)
         require(error["error"]["code"] == "revision_conflict", "Credential reveal ignored a stale revision")
@@ -608,19 +659,25 @@ def check_client_registry(installation, passed):
         require(installation.pid() == previous_pid and sha(installation.config) == runtime_hash
                 and access_rules(installation.config) == runtime_access,
                 "Web client changes restarted the service or changed deployment configuration or ACL")
+        provider_key = secrets.token_hex(32)
+        credentials.append(provider_key)
+        _, settings = exchange("PUT", "/providers/brave/key", {"key": provider_key}, write)
+        require(settings["providers"]["brave"] == {"key_set": True}
+                and json.loads((installation.state / "secrets.json").read_bytes())["keys"]["brave"] == provider_key,
+                "The installed service did not persist the supplied provider key")
         require(all(token not in "\n".join(LOG) for token in credentials),
                 "Installed client administration exposed a credential in acceptance diagnostics")
-    finally:
-        exchange("DELETE", "/session", {}, write)
     passed("client-registry-service-writes")
+    return provider_key_snapshot(installation)
 
 
-def remove_and_purge(installation, cache_entry, passed):
+def remove_and_purge(installation, cache_entry, saved_key_state, passed):
     expected = installation.snapshots()
     settings = installation.state / "settings.json"
     expected[settings] = sha(settings)
 
     def check_retained():
+        require(provider_key_snapshot(installation) == saved_key_state, "Package removal changed protected provider keys")
         preserved(expected)
         check_cached_entry(installation, cache_entry)
         require(installation.service_ids() == installation.installed_ids
@@ -633,13 +690,13 @@ def remove_and_purge(installation, cache_entry, passed):
             and not installation.exe.exists() and not installation.active()
             and not Path(f"/proc/{old}").exists(), "Removal left service")
     check_retained()
-    passed("uninstall")
+    passed("uninstall", providerKeyRetained=True)
     apt("purge", installation.name)
     require(not installation.package_state() and not installation.config.exists(),
             "Purge did not remove the package and its runtime configuration")
     del expected[installation.config]
     check_retained()
-    passed("purge")
+    passed("purge", providerKeyRetained=True)
 
 
 def cleanup(installation):
@@ -678,11 +735,17 @@ def main():
     parser.add_argument("--OutputPath", type=Path, required=True)
     parser.add_argument("--DisposableMachine", action="store_true", required=True)
     args = parser.parse_args()
+    require(args.DisposableMachine and os.geteuid() == 0, "Requires root and disposable VM opt-in")
+    with fixture_lock(Path("/run/qcopilots-websearch-deb-acceptance.lock")):
+        accept_package(args)
+
+
+def accept_package(args):
     candidate = Installation(args.Package.resolve(strict=True), args.PackageSHA256)
     output = args.OutputPath.resolve()
     require(output not in (Path(__file__).resolve(), candidate.archive), "Output would overwrite input")
     require(not output.is_relative_to(candidate.app), "Output would share a directory owned by the fixture")
-    preflight(args, candidate)
+    preflight(candidate)
     report = {"schemaVersion": 1, "status": "failed", "candidateSha256": args.PackageSHA256, "checks": {}}
 
     def passed(name, **details):
@@ -712,9 +775,9 @@ def main():
         check_invalid_startup(candidate, passed)
         check_token_rotation(candidate, passed)
         leave_crashed_cli_lock(candidate)
-        check_client_registry(candidate, passed)
-        cache_entry = check_reinstall(candidate, passed)
-        remove_and_purge(candidate, cache_entry, passed)
+        saved_key_state = check_client_registry(candidate, passed)
+        cache_entry = check_reinstall(candidate, saved_key_state, passed)
+        remove_and_purge(candidate, cache_entry, saved_key_state, passed)
         require(sha(candidate.archive) == candidate.expected_sha256, "Original package changed during acceptance")
         report["status"] = "passed"
     except Exception as error:

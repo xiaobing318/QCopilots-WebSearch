@@ -346,7 +346,7 @@
         "port": {
           "type": "integer",
           "description": "Administration TCP port. Initialization requests port 3183 by default. Omitting this field selects 8091. Accepts 1–65535, distinct from the other listeners.",
-          "default": 3183,
+          "default": 8091,
           "minimum": 1,
           "maximum": 65535
         },

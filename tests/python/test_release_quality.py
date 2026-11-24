@@ -16,6 +16,34 @@ import quality
 import release_gate
 
 
+@unittest.skipUnless(sys.platform.startswith("linux"), "Requires Linux flock")
+class DebAcceptanceLockTests(unittest.TestCase):
+    def test_concurrent_probe_fails_then_reacquires_the_same_inode_after_release(self):
+        from acceptance_deb import fixture_lock
+
+        script = (
+            "from pathlib import Path\n"
+            "from acceptance_deb import fixture_lock\n"
+            "import sys\n"
+            "try:\n"
+            "    with fixture_lock(Path(sys.argv[1])): pass\n"
+            "except BlockingIOError:\n"
+            "    sys.exit(75)\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "acceptance.lock"
+
+            def probe():
+                return subprocess.run([sys.executable, "-c", script, str(path)],
+                                      cwd=Path(__file__).resolve().parents[2] / "scripts", timeout=10).returncode
+
+            with fixture_lock(path):
+                inode = path.stat().st_ino
+                self.assertEqual(probe(), 75)
+            self.assertEqual(probe(), 0)
+            self.assertEqual(path.stat().st_ino, inode)
+
+
 class ParallelQualityTests(unittest.TestCase):
     def test_parallel_checks_complete_all_items_and_join_workers(self):
         pair = threading.Barrier(2, timeout=5)

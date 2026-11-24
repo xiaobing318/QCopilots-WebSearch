@@ -182,7 +182,7 @@ HTTP 鉴权和请求头错误使用相应的 HTTP 状态码。工具执行失败
 MCP HTTP 先进行初始化，随后在请求头中携带返回的会话 ID 和协商后的协议版本。
 `initialize` 会采用请求中的 `2025-11-25` 或 `2025-06-18`。请求其他版本时，响应使用 `2025-11-25`。
 初始化结果包含 `instructions`，说明搜索、网页读取和文本查找的使用流程。
-`serverInfo.icons` 包含内嵌 SVG data URI。两个 2025 协议版本的 HTTP 和 stdio 客户端均可直接显示该图标。
+协商使用两个 2025 协议版本之一时，服务在 HTTP 和 stdio 的 `serverInfo.icons` 中发送内嵌的 SVG data URI。支持该字段和图像格式的客户端可显示图标。使用 `2024-11-05` 的 stdio 会话不发送该字段。
 如果 `MCP-Protocol-Version` 头的值不受支持，服务会返回 HTTP 400 和 JSON 错误响应体，客户端可通过
 `initialize` 协商协议版本。发送 `notifications/initialized` 后即可调用工具。DELETE 结束会话。
 携带有效会话的 GET 返回 405，失效会话返回 404，不支持的协议头返回 400。取消请求会停止相应操作，并保留其他仍在等待同一次合并执行的请求。
