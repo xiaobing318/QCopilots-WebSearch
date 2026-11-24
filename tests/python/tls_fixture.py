@@ -6,6 +6,7 @@ import datetime as dt
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
+import socket
 import ssl
 import subprocess
 import sys
@@ -19,9 +20,8 @@ class Server(ThreadingHTTPServer):
     daemon_threads = False
     block_on_close = True
 
-    def __init__(self, context=None, stall=False):
+    def __init__(self, context=None):
         self.context = context
-        self.stall = stall
         self.lock = threading.Lock()
         self.accepted = self.posts = self.crl_reads = 0
         self.auxiliary_requests = []
@@ -30,10 +30,7 @@ class Server(ThreadingHTTPServer):
 
     def finish_request(self, request, address):
         try:
-            if not self.stall:
-                return super().finish_request(request, address)
-            while request.recv(4096):
-                pass
+            super().finish_request(request, address)
         except OSError:
             pass
 
@@ -214,6 +211,39 @@ def probe(executable, server, ca, expected, label):
     print("PASS tls", label, flush=True)
 
 
+def probe_stalled(executable, ca, mode):
+    # TCP queues completed connections without answering TLS. Drain this probe's
+    # queue after it exits so the connection count is independent of thread scheduling.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener, tempfile.TemporaryFile() as errors:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        url = f"https://127.0.0.1:{listener.getsockname()[1]}/search"
+        started = time.monotonic()
+        with subprocess.Popen([executable, "--tls-" + mode + "-probe", url, str(ca)],
+                              stdout=subprocess.DEVNULL, stderr=errors) as child:
+            try:
+                child.wait(timeout=4)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=1)
+        elapsed = time.monotonic() - started
+        listener.setblocking(False)
+        connections = 0
+        while True:
+            try:
+                peer, _ = listener.accept()
+            except BlockingIOError:
+                break
+            peer.close()
+            connections += 1
+        if child.returncode or elapsed > 2.5 or connections != 1:
+            errors.seek(0)
+            stderr = errors.read(4096).decode("utf-8", "replace").strip()
+            raise RuntimeError(f"Stalled TLS {mode}: elapsed={elapsed:.3f}s exit={child.returncode} "
+                               f"accepted_connections={connections} stderr={stderr!r}")
+    print("PASS tls stalled handshake " + mode, flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--OpenSSL", required=True)
@@ -246,26 +276,8 @@ def main():
                 if accepted != len(observed) or any(request not in allowed for request in observed):
                     raise RuntimeError(f"Unexpected certificate network requests: {observed}")
                 print(f"PASS tls no implicit OCSP/CRL requests and {len(observed)} AIA retrievals", flush=True)
-            # A real TCP peer accepts TLS ClientHello but never replies. The
-            # library must still obey cancellation and its total deadline.
-            with serving(Server(stall=True)) as stalled:
-                for mode in ("timeout", "cancel"):
-                    before = stalled.counters()[0]
-                    started = time.monotonic()
-                    with subprocess.Popen([executable, "--tls-" + mode + "-probe",
-                            f"https://127.0.0.1:{stalled.server_port}/search", str(ca)],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True) as child:
-                        try:
-                            _, stderr = child.communicate(timeout=4)
-                        except subprocess.TimeoutExpired:
-                            child.kill()
-                            _, stderr = child.communicate()
-                    elapsed = time.monotonic() - started
-                    connections = stalled.counters()[0] - before
-                    if child.returncode or elapsed > 2.5 or connections != 1:
-                        raise RuntimeError(f"Stalled TLS {mode}: elapsed={elapsed:.3f}s exit={child.returncode} "
-                                           f"accepted_connections={connections} stderr={stderr.strip()!r}")
-                    print("PASS tls stalled handshake " + mode, flush=True)
+            for mode in ("timeout", "cancel"):
+                probe_stalled(executable, ca, mode)
 
 
 if __name__ == "__main__":
