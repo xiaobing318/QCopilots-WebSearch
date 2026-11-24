@@ -250,12 +250,21 @@ def main():
             # library must still obey cancellation and its total deadline.
             with serving(Server(stall=True)) as stalled:
                 for mode in ("timeout", "cancel"):
+                    before = stalled.counters()[0]
                     started = time.monotonic()
-                    result = subprocess.run([executable, "--tls-" + mode + "-probe",
-                        f"https://127.0.0.1:{stalled.server_port}/search", str(ca)],
-                        capture_output=True, text=True, timeout=4)
-                    if result.returncode or time.monotonic() - started > 2.5:
-                        raise RuntimeError("Stalled TLS did not honor " + mode)
+                    with subprocess.Popen([executable, "--tls-" + mode + "-probe",
+                            f"https://127.0.0.1:{stalled.server_port}/search", str(ca)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True) as child:
+                        try:
+                            _, stderr = child.communicate(timeout=4)
+                        except subprocess.TimeoutExpired:
+                            child.kill()
+                            _, stderr = child.communicate()
+                    elapsed = time.monotonic() - started
+                    connections = stalled.counters()[0] - before
+                    if child.returncode or elapsed > 2.5 or connections != 1:
+                        raise RuntimeError(f"Stalled TLS {mode}: elapsed={elapsed:.3f}s exit={child.returncode} "
+                                           f"accepted_connections={connections} stderr={stderr.strip()!r}")
                     print("PASS tls stalled handshake " + mode, flush=True)
 
 

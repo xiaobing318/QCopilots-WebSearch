@@ -13,6 +13,7 @@
 #include <qws/windows.hpp>
 #ifdef _WIN32
 #define NOMINMAX
+#include <mutex>
 #include <windows.h>
 #else
 #include <termios.h>
@@ -259,8 +260,12 @@ int serve() {
 #ifdef _WIN32
 SERVICE_STATUS_HANDLE serviceHandle = nullptr;
 SERVICE_STATUS serviceStatus{};
+std::mutex serviceStatusMutex;
 std::atomic_bool serviceFailed = false;
 void report(DWORD state, DWORD error = NO_ERROR) {
+  std::lock_guard guard(serviceStatusMutex);
+  if (serviceStatus.dwCurrentState == SERVICE_STOPPED)
+    return;
   serviceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
   serviceStatus.dwCurrentState = state;
   serviceStatus.dwWin32ExitCode = error;
@@ -299,11 +304,12 @@ void WINAPI serviceMain(DWORD, wchar_t **) {
     report(SERVICE_RUNNING);
     waitForStop(service, server);
     server.stop();
-    report(SERVICE_STOPPED);
   } catch (...) {
     serviceFailed = true;
-    report(SERVICE_STOPPED, ERROR_SERVICE_SPECIFIC_ERROR);
   }
+  // SCM may terminate the process as soon as it receives SERVICE_STOPPED.
+  // The server, service and cache lock must be released before this report.
+  report(SERVICE_STOPPED, serviceFailed.load() ? ERROR_SERVICE_SPECIFIC_ERROR : NO_ERROR);
 }
 #endif
 } // namespace
