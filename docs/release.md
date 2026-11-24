@@ -2,180 +2,164 @@
 
 # 构建与发布
 
-GitHub Actions 在 Windows Server 2025 上构建 Windows x64 便携 ZIP 和 MSI 安装包，在 Ubuntu 26.04 上构建并验证 Ubuntu 26.04 amd64 DEB 安装包。Windows 桌面验收使用 Windows 11 上的便携 ZIP。
+GitHub Actions 在 Windows Server 2025 上生成 Windows x64 便携 ZIP 和 MSI，在 Ubuntu 26.04 上生成 amd64 DEB。Windows 11 桌面验收使用便携 ZIP。
 
 <a name="continuous-integration"></a>
 
 ## 持续集成
 
-- `ci.yml` 在推送、拉取请求和手动触发时运行，并检查文档标点。
-- 可复用工作流 `build.yml` 使用 `.nvmrc` 指定的 Node 版本构建一次 TypeScript 前端。各平台的原生构建任务共用该 `web-dist` 和仓库中的 CI 构建配置，并使用缓存加速构建。
-- 每项原生构建任务都配置、编译、测试、安装并打包服务。SDK 测试及 ZIP 或 DEB 的冒烟测试使用已安装的程序。任务失败时会上传可用的 CTest 结果和诊断信息。
-- 推送主分支或手动运行时，还会在 Ubuntu 26.04 上执行 ASan、UBSan、clang-tidy 和限时模糊测试。
-- 手动运行和发布运行还会验证 MSI 和 DEB 的多版本并装、配置和凭据隔离、卸载及回退。两套基线分别使用按固定 SHA-256 校验的官方 v0.4.0 安装包，以及从提交 `91e528f` 构建的旧系统目录布局 0.2.0 安装包。
+- `ci.yml` 接受分支推送、拉取请求和手动触发，另有一项作业检查文档标点。
+- 可复用的 `build.yml` 使用 `.nvmrc` 指定的 Node 构建一次前端。两个平台使用同一份 `web-dist` 编译、测试、安装和打包原生服务，并运行 MCP SDK 测试。
+- Windows 验证本次构建的 ZIP。手动 CI 和 Release 还会使用同一份 MSI，依次检查默认及自定义安装目录、凭据与配置保留，并分别在初始化后和服务启动后触发故障，验证安装事务回滚。
+- Ubuntu 验证本次构建的 DEB，包括同包重装、服务故障恢复，以及 `remove` 和 `purge` 对运行配置、凭据和数据的处理。
+- main 的 push CI 和手动 CI 还会在 Ubuntu 上执行 ASan、UBSan、clang-tidy 和限时模糊测试。MSI 生命周期测试在具有管理员权限的可丢弃环境中执行。
 
-功能分支可直接运行常规工作流。CI 和本地构建流程的 `publish` 阶段只生成构建产物。MSI 验收需要具备管理员权限且可丢弃的 Windows 运行环境。
+本地构建流程的 `publish` 阶段只生成安装包。[构建说明](build.md)
 
 <a name="publish-from-a-version-tag"></a>
 
 ## 通过版本标签发布
 
-标准路径为：提交并推送 main，等待该提交的 main push CI 成功，再推送对应版本标签。Release 工作流随后执行发布构建、安装包生命周期验收，全部成功后才发布。可以先在功能分支验证后合入 main，也可以按仓库权限直接在 main 提交。下面以直接在 main 发布 `v0.5.0` 为例。
+先在候选分支验证发布提交，再将同一提交推送到 main。`release.yml` 会核对标签与 `QCWS_VERSION`，并通过 `scripts/release_gate.py` 确认标签提交已属于 main 且该 SHA 最新一次 main push CI 成功。发布包由标签工作流重新构建和验收。
 
-`release.yml` 要求标签与根目录 `CMakeLists.txt` 的 `QCWS_VERSION` 一致。`scripts/release_gate.py` 检查标签提交已属于 main，且同一 SHA 最新一次 main push `ci.yml` 运行已成功。缺少记录、仍在运行、失败或取消都会阻止发布。手动 CI 成功不能替代这条 main push 记录，不能把尚未验收的 main 提交和版本标签同时推送。
+以下命令在仓库根目录的同一个 PowerShell 7 终端中执行。准备好已登录的 GitHub CLI 和所需仓库权限。[GitHub CLI](https://cli.github.com/)
 
-### 1. 同步 main 并提交版本改动
+### 1. 验证候选分支
 
-以下 PowerShell 命令在同一终端中依次执行，需要已安装 Git 和 [GitHub CLI](https://cli.github.com/)，并有仓库写入及 Actions 操作权限。先保留和审查已有本地修改。同步失败时先处理分支或文件冲突，不要强制重置。若发布提交已经完成，跳过暂存和提交命令，继续核对版本及工作区。
+在独立分支提交已审查的改动，完成本地验证。确认工作区干净，原生程序和内嵌前端的版本一致。
 
 ```powershell
-Set-Location C:\Dev\github-repos\QCopilots-WebSearch
+$ErrorActionPreference = 'Stop'
 $repo = 'xiaobing318/QCopilots-WebSearch'
-$version = '0.5.0'
+$version = '0.5.1'
 $tag = "v$version"
-gh auth status
-if ($LASTEXITCODE -ne 0) { throw '请先运行 gh auth login 完成登录。' }
-git status --short
-git fetch origin --tags
-if ($LASTEXITCODE -ne 0) { throw '获取远端引用失败。' }
-git switch main
-if ($LASTEXITCODE -ne 0) { throw '切换 main 失败。' }
-git merge --ff-only origin/main
-if ($LASTEXITCODE -ne 0) { throw 'main 无法快进，请先处理分支差异。' }
-```
-
-完成本次功能与版本更新，使 `CMakeLists.txt` 中的 `QCWS_VERSION` 为 `0.5.0`，同步相关版本说明并完成本地验证。确认 `git status` 中的修改都属于本次发布，且没有凭据或临时文件，再暂存和审查提交。
-
-```powershell
-git diff --check
-if ($LASTEXITCODE -ne 0) { throw '请先修复 diff 检查问题。' }
-git add --all
-git diff --cached --stat
-git diff --cached
-```
-
-审查通过后提交。若已完成提交，直接从工作区和版本检查开始。
-
-```powershell
-git commit -m "Prepare release $tag"
-if ($LASTEXITCODE -ne 0) { throw '提交失败，请核对暂存内容。' }
-if (git status --porcelain) { throw '发布前工作区必须干净。' }
-$versionMatch = Select-String -LiteralPath CMakeLists.txt -Pattern '^set\(QCWS_VERSION "([0-9]+\.[0-9]+\.[0-9]+)"'
-if (-not $versionMatch -or $versionMatch.Matches[0].Groups[1].Value -ne $version) {
-    throw 'QCWS_VERSION 与计划标签不一致。'
-}
+$branch = (git branch --show-current).Trim()
+if (!$branch -or $branch -eq 'main') { throw '请在候选分支上执行。' }
+if (git status --porcelain) { throw '请先审查并提交发布改动。' }
 $releaseSha = (git rev-parse HEAD).Trim()
-git push origin main
-if ($LASTEXITCODE -ne 0) { throw '推送 main 失败，不能继续打标签。' }
+$native = Select-String -LiteralPath CMakeLists.txt -Pattern '^set\(QCWS_VERSION "([0-9]+\.[0-9]+\.[0-9]+)"'
+$web = Get-Content -Raw -LiteralPath web/package.json | ConvertFrom-Json
+$npmLock = Get-Content -Raw -LiteralPath web/package-lock.json | ConvertFrom-Json -AsHashtable
+if (!$native -or $native.Matches[0].Groups[1].Value -ne $version -or
+    $web.version -ne $version -or $npmLock.version -ne $version -or $npmLock.packages[''].version -ne $version) {
+    throw 'CMake、前端清单或锁文件中的项目版本与标签不一致。'
+}
+git push --set-upstream origin $branch
+if ($LASTEXITCODE -ne 0) { throw '候选分支推送失败。' }
 ```
 
-### 2. 等待同一 SHA 的 main push CI
-
-推送后等待 Actions 创建运行，再执行下面的查询。如果暂未出现运行记录，稍后重新执行查询，不要改用其他提交的成功结果。查询限定 `ci.yml`、main、push 和发布 SHA，选择最新运行。[运行查询](https://cli.github.com/manual/gh_run_list) · [等待运行结束](https://cli.github.com/manual/gh_run_watch)
+等分支推送触发的 CI 结束，再为该分支手动运行 CI。同一分支的两种 CI 共用并发组。以下函数核对运行名称、触发事件、分支或标签及提交 SHA，然后等待成功。[手动触发](https://cli.github.com/manual/gh_workflow_run) · [跟踪运行](https://cli.github.com/manual/gh_run_watch)
 
 ```powershell
-$pushRuns = @(gh run list --repo $repo --workflow ci.yml --branch main --event push --commit $releaseSha --limit 1 --json databaseId,headSha,status,conclusion | ConvertFrom-Json)
-if ($LASTEXITCODE -ne 0 -or $pushRuns.Count -ne 1) { throw '尚未找到本提交的 main push CI。' }
-$pushRunId = $pushRuns[0].databaseId
-gh run watch $pushRunId --repo $repo --exit-status
-if ($LASTEXITCODE -ne 0) { throw 'main push CI 未成功，不得发布。' }
-$pushResult = gh run view $pushRunId --repo $repo --json headSha,status,conclusion | ConvertFrom-Json
-if ($pushResult.headSha -ne $releaseSha -or $pushResult.status -ne 'completed' -or $pushResult.conclusion -ne 'success') {
-    throw 'main push CI 的提交或结果不符合发布条件。'
+function Watch-CheckedRun($runId, $workflowName, $trigger, $expectedRef) {
+    $run = gh run view $runId --repo $repo --json workflowName,event,headBranch,headSha | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or $run.workflowName -ne $workflowName -or $run.event -ne $trigger -or
+        $run.headBranch -cne $expectedRef -or $run.headSha -ne $releaseSha) {
+        throw '选择的 Actions 运行与工作流、引用或发布提交不一致。'
+    }
+    gh run watch $runId --repo $repo --exit-status
+    if ($LASTEXITCODE -ne 0) { throw 'Actions 运行未成功。' }
 }
+gh workflow run ci.yml --repo $repo --ref $branch
+if ($LASTEXITCODE -ne 0) { throw '候选分支手动 CI 触发失败。' }
+gh run list --repo $repo --workflow ci.yml --branch $branch --event workflow_dispatch --commit $releaseSha --limit 5 --json databaseId,createdAt,url
+$deepRunId = Read-Host '输入刚触发的手动运行 ID，列表未更新时请先重新查询'
+Watch-CheckedRun $deepRunId 'CI' 'workflow_dispatch' $branch
 ```
 
-这次 main push CI 已包含 ASan、UBSan、clang-tidy 和限时模糊测试。通常下一步即可打标签，Release 会自动执行完整的安装和部署验收。
+在 Windows 11 上验收该运行的 `packages-windows-x64`。其中包含 MSI 和便携 ZIP，桌面测试使用内层便携 ZIP。记录包的 SHA-256 和运行 ID，按部署指引验证 MCP 工具发现、搜索、网页打开和查找。验收结束后关闭本次启动的进程。[部署指引](deployment.md)
 
-如需在打标签前提前检查安装生命周期或下载包进行桌面联调，可在上述 push CI 完成后选择运行一次手动 CI。不要并行触发，同一分支的 push 和手动 CI 共用 `cancel-in-progress` 并发组，新运行会取消旧运行。验收期间不要推送新提交。[手动触发](https://cli.github.com/manual/gh_workflow_run)
+### 2. 推送同一提交到 main
+
+以下命令执行快进推送。若远端 main 含有候选提交尚未包含的改动，请整合后重新验证新的发布 SHA。需要通过拉取请求合入时，也应核对最终提交并为该 SHA 完成验证。
 
 ```powershell
 git fetch origin main
 if ($LASTEXITCODE -ne 0) { throw '获取 main 失败。' }
-if ((git rev-parse origin/main).Trim() -ne $releaseSha) { throw '远端 main 已变化，请重新选择发布提交并验收。' }
-gh workflow run ci.yml --repo $repo --ref main
-if ($LASTEXITCODE -ne 0) { throw '手动 CI 触发失败。' }
-gh run list --repo $repo --workflow ci.yml --branch main --event workflow_dispatch --commit $releaseSha --limit 5 --json databaseId,headSha,status,conclusion,url
-$deepRunId = Read-Host '输入本次手动运行的 databaseId，若列表尚未更新则先重新查询'
-$deepRun = gh run view $deepRunId --repo $repo --json workflowName,event,headBranch,headSha | ConvertFrom-Json
-if ($deepRun.workflowName -ne 'CI' -or $deepRun.event -ne 'workflow_dispatch' -or $deepRun.headBranch -ne 'main' -or $deepRun.headSha -ne $releaseSha) {
-    throw '选择的运行不是本提交的 main 手动 CI。'
-}
-gh run watch $deepRunId --repo $repo --exit-status
-if ($LASTEXITCODE -ne 0) { throw '手动验收未成功，请先处理失败。' }
+git merge-base --is-ancestor origin/main $releaseSha
+if ($LASTEXITCODE -ne 0) { throw '候选提交无法快进 main。' }
+git push origin "${releaseSha}:refs/heads/main"
+if ($LASTEXITCODE -ne 0) { throw '推送 main 失败。' }
+gh run list --repo $repo --workflow ci.yml --branch main --event push --commit $releaseSha --limit 1 --json databaseId,headSha,url
+$pushRunId = Read-Host '输入本提交的 main push CI 运行 ID，列表未更新时请先重新查询'
+Watch-CheckedRun $pushRunId 'CI' 'push' 'main'
 ```
 
-需要人工桌面验收时，下载这次运行的 `packages-windows-x64`。网页下载的该 Artifact 是外层 ZIP，其中包含 MSI 和便携 ZIP。在 Windows 11 上验证便携 ZIP，需要 QGIS 联调时使用实际公网 HTTPS 地址完成工具发现、搜索、网页打开和查找。记录提交 SHA、Actions 运行 ID 和包的 SHA-256，结束后关闭本次启动的测试进程。
+### 3. 创建带中文发布说明的注释标签
 
-### 3. 创建并推送带注释的版本标签
-
-推送标签前再次核对 main push CI，避免采用已经被后续失败或取消运行替代的记录。标签固定在 `$releaseSha`，默认不覆盖或移动已有标签，未发布标签的异常处理见下文。
+标签注释将成为 GitHub Release 正文。按本次交付撰写中文说明，核对包名、目标系统和主要功能。推送标签前再次查询该 SHA 最新的 main push CI。
 
 ```powershell
-$gateRuns = @(gh run list --repo $repo --workflow ci.yml --branch main --event push --commit $releaseSha --limit 1 --json status,conclusion | ConvertFrom-Json)
-if ($LASTEXITCODE -ne 0 -or $gateRuns.Count -ne 1 -or $gateRuns[0].status -ne 'completed' -or $gateRuns[0].conclusion -ne 'success') {
-    throw '最新 main push CI 尚未成功。'
+$gate = @(gh run list --repo $repo --workflow ci.yml --branch main --event push --commit $releaseSha --limit 1 --json headSha,status,conclusion | ConvertFrom-Json)
+if ($LASTEXITCODE -ne 0 -or $gate.Count -ne 1 -or $gate[0].headSha -ne $releaseSha -or
+    $gate[0].status -ne 'completed' -or $gate[0].conclusion -ne 'success') {
+    throw '本提交最新的 main push CI 尚未成功。'
 }
-git tag -a $tag $releaseSha -m "QCopilots-WebSearch $version"
-if ($LASTEXITCODE -ne 0) { throw '标签创建失败，检查是否已存在，不要强制覆盖。' }
+$notes = @"
+QCopilots-WebSearch $version
+
+Windows 11 x64 提供便携 ZIP 和 MSI，Ubuntu 26.04 amd64 提供 DEB。通过 MCP HTTP 或 stdio 可调用搜索、网页读取、页内查找和服务状态四项工具。发布资产附有对应的 Qt 源码与 SHA256SUMS 校验清单。
+"@
+git tag -a $tag $releaseSha -m $notes
+if ($LASTEXITCODE -ne 0) { throw '创建注释标签失败，请检查已有标签。' }
 git push origin "refs/tags/$tag"
-if ($LASTEXITCODE -ne 0) { throw '标签推送失败，请检查远端状态，不要强制推送。' }
+if ($LASTEXITCODE -ne 0) { throw '推送标签失败，请检查远端状态。' }
 ```
 
-标签 push 会自动触发 Release，不需要手动创建 GitHub Release 或上传本地构建包。
+标签推送会触发 Release。安装验收成功后，工作流校验锁定的 Qt 源码，生成 `SHA256SUMS`，为三个安装包签发构建来源证明，并用 `gh release create --verify-tag --notes-from-tag` 发布。[GitHub Release 命令](https://cli.github.com/manual/gh_release_create)
 
-### 4. 跟踪 Release 并验证发布资产
-
-等待列表出现本标签的 Release 运行，选择对应 ID 并核对提交。Release 只有在构建和安装部署验收通过后，才会校验并下载锁文件指定的 Qt 源码、生成 `SHA256SUMS`、签发三个安装包的构建来源证明，最后创建正式发布页面。
+### 4. 验证发布页、资产与来源证明
 
 ```powershell
-gh run list --repo $repo --workflow release.yml --event push --commit $releaseSha --limit 5 --json databaseId,headBranch,headSha,status,conclusion,url
-$releaseRunId = Read-Host '输入本标签 Release 运行的 databaseId，若列表尚未更新则先重新查询'
-$releaseRun = gh run view $releaseRunId --repo $repo --json workflowName,headBranch,headSha | ConvertFrom-Json
-if ($releaseRun.workflowName -ne 'Release' -or $releaseRun.headBranch -ne $tag -or $releaseRun.headSha -ne $releaseSha) {
-    throw '选择的运行与发布标签或提交不一致。'
-}
-gh run watch $releaseRunId --repo $repo --exit-status
-if ($LASTEXITCODE -ne 0) { throw 'Release 未成功，请检查失败日志。' }
+gh run list --repo $repo --workflow release.yml --event push --commit $releaseSha --limit 5 --json databaseId,headBranch,headSha,url
+$releaseRunId = Read-Host '输入本标签的 Release 运行 ID，列表未更新时请先重新查询'
+Watch-CheckedRun $releaseRunId 'Release' 'push' $tag
+$remoteTag = git ls-remote --exit-code --tags origin "refs/tags/$tag^{}"
+if ($LASTEXITCODE -ne 0 -or ($remoteTag -split '\s+')[0] -ne $releaseSha) { throw '远端注释标签指向其他提交。' }
+$latest = gh api "repos/$repo/releases/latest" --jq '.tag_name'
+if ($LASTEXITCODE -ne 0 -or $latest -cne $tag) { throw 'Latest 未指向本次正式发布。' }
 gh release view $tag --repo $repo
-$releaseDir = Join-Path (Get-Location) "release-evidence\$tag"
+if ($LASTEXITCODE -ne 0) { throw '读取 Release 失败。' }
+$releaseDir = Join-Path ([IO.Path]::GetTempPath()) "qcopilots-$tag-$([guid]::NewGuid())"
 gh release download $tag --repo $repo --dir $releaseDir
-if ($LASTEXITCODE -ne 0) { throw '下载失败，请检查目录和发布资产。' }
+if ($LASTEXITCODE -ne 0) { throw '下载发布资产失败。' }
 ```
 
-正式发布的 **Assets** 应有一个 Windows 便携 ZIP、一个 Windows MSI、一个 Ubuntu amd64 DEB、锁文件对应的 `qtbase-everywhere-src-*.tar.xz` 和 `SHA256SUMS`。GitHub 自动生成的项目源码 ZIP/TAR.GZ 不能代替 Qt 源码归档。来源证明关联三个安装包，不是必须单独出现在 Assets 中的文件。[发布下载](https://cli.github.com/manual/gh_release_download)
+核对发布页上的中文说明与注释标签。下载目录应包含三个安装包、匹配的 Qt 源码和 `SHA256SUMS`，共五项资产。清单须分别覆盖四个有效载荷。Qt 源码另与发布提交的依赖锁核对，三个安装包的来源证明分别绑定到发布工作流、标签和提交。[下载资产](https://cli.github.com/manual/gh_release_download) · [验证来源证明](https://cli.github.com/manual/gh_attestation_verify)
 
 ```powershell
-$assets = @(Get-ChildItem -LiteralPath $releaseDir -File)
-foreach ($extension in @('.zip', '.msi', '.deb')) {
-    if (@($assets | Where-Object Extension -eq $extension).Count -ne 1) { throw "缺少或重复安装包：$extension" }
-}
+$packages = @("QCopilots-WebSearch-$version-win64.zip", "QCopilots-WebSearch-$version-win64.msi",
+              "qcopilots-websearch-${version}_amd64.deb")
 $lock = git show "${releaseSha}:config/dependencies.lock.json" | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) { throw '读取发布提交的依赖锁失败。' }
 $qtName = [IO.Path]::GetFileName(([uri]$lock.qt_source.url).AbsolutePath)
-$qtPath = Join-Path $releaseDir $qtName
-if ((Get-FileHash -LiteralPath $qtPath -Algorithm SHA256).Hash -ne $lock.qt_source.sha256) { throw 'Qt 源码与发布提交的锁文件不一致。' }
-$checksums = @(Get-Content -LiteralPath (Join-Path $releaseDir 'SHA256SUMS'))
-if ($assets.Count -ne 5 -or $checksums.Count -ne 4) { throw '发布资产或校验清单数量不符合预期。' }
-foreach ($line in $checksums) {
-    if ($line -notmatch '^([0-9a-f]{64})  ([^/\\]+)$') { throw 'SHA256SUMS 条目格式不正确。' }
-    $expectedHash = $Matches[1]
-    $assetPath = Join-Path $releaseDir $Matches[2]
-    if ((Get-FileHash -LiteralPath $assetPath -Algorithm SHA256).Hash -ne $expectedHash) { throw "文件校验失败：$assetPath" }
+$payloads = $packages + $qtName
+$expectedAssets = $payloads + 'SHA256SUMS'
+$assets = @(Get-ChildItem -LiteralPath $releaseDir -File | Select-Object -ExpandProperty Name)
+if ($assets.Count -ne 5 -or (Compare-Object -CaseSensitive $expectedAssets $assets)) { throw '发布资产名称或数量不符。' }
+
+$digests = @{}
+foreach ($line in Get-Content -LiteralPath (Join-Path $releaseDir 'SHA256SUMS')) {
+    if ($line -cnotmatch '^([0-9a-f]{64})  ([^/\\]+)$') { throw '校验清单格式不正确。' }
+    $digest, $name = $Matches[1], $Matches[2]
+    if ($payloads -cnotcontains $name -or $digests.ContainsKey($name)) { throw "意外或重复的清单条目 $name" }
+    $actual = (Get-FileHash -LiteralPath (Join-Path $releaseDir $name) -Algorithm SHA256).Hash
+    if ($actual -ne $digest) { throw "文件校验失败 $name" }
+    $digests[$name] = $digest
 }
-foreach ($package in $assets | Where-Object Extension -in @('.zip', '.msi', '.deb')) {
-    gh attestation verify $package.FullName --repo $repo
-    if ($LASTEXITCODE -ne 0) { throw "构建来源证明验证失败：$($package.Name)" }
+if ($digests.Count -ne 4 -or $digests[$qtName] -ne $lock.qt_source.sha256) { throw '清单不完整或 Qt 源码与锁文件不一致。' }
+foreach ($name in $packages) {
+    gh attestation verify (Join-Path $releaseDir $name) --repo $repo --signer-workflow "$repo/.github/workflows/release.yml" --source-ref "refs/tags/$tag" --source-digest $releaseSha
+    if ($LASTEXITCODE -ne 0) { throw "来源证明验证失败 $name" }
 }
 ```
 
-保留 `$releaseSha`、`$pushRunId`、`$releaseRunId` 和校验结果，打开 [GitHub Releases](https://github.com/xiaobing318/QCopilots-WebSearch/releases) 确认版本及资产。校验通过表示下载文件与清单和构建证明相符，不替代目标机器上的安装及实际连接测试。
+记录 `$releaseSha`、`$deepRunId`、`$pushRunId`、`$releaseRunId`、下载文件及校验结果。[GitHub Releases](https://github.com/xiaobing318/QCopilots-WebSearch/releases)
 
 ### 失败处理
 
-- main push CI 失败或被取消时，先查看该运行的失败日志。若无需改代码，可在 Actions 重跑同一运行，成功后再打标签。若修改了代码，提交新 SHA 并重新等待它的 main push CI，不沿用旧结果。
-- 手动 CI 意外取消 main push CI 时，手动成功仍不能通过发布门禁。等手动运行结束，再重跑对应的 main push CI 并确认成功。
-- Release 因主分支 CI 未完成而被门禁拒绝时，先让同 SHA 的 main push CI 成功，再重跑原 Release。基础设施或下载暂时失败且未创建发布时，也可重跑原运行。查看日志可使用 `gh run view <运行ID> --repo $repo --log-failed`。
-- 标签已推送但尚未创建 Release，而修复需要新提交时，推荐使用新的版本号。只有仓库维护者明确同意，且已确认没有该版本的 Release 或发布资产，才考虑修正尚未发布的标签。新提交仍须先通过对应的 main push CI，再触发新的标签发布运行。重跑旧运行不会自动使用修复后的提交。
-- Release 已创建但后续检查失败时，先核对现有资产和日志，不直接重复创建或覆盖资产。需要代码或版本修复时使用新提交和新版本，例如 `v0.4.1`。不要删除并重建已发布标签，不要移动标签到另一提交。
+- 用 `gh run view <运行ID> --repo $repo --log-failed` 检查失败步骤。临时基础设施或下载故障可重跑同一提交的工作流。需要修改代码时，请对新提交重新执行相应验收。
+- main push CI 失败或被取消时，等待该提交的 main push CI 成功后再打标签。若标签工作流已因门禁失败，待同一 SHA 的 main push CI 成功后重跑该 Release。
+- 已推送的标签固定其发布提交。若修复需要修改已打标签的源码，请发布新的补丁版本。若已创建 Release，先核对该页现有资产、来源证明和工作流日志，保留已发布标签及资产。
 
 参阅[许可声明和 Qt 替换说明](licensing.md)。

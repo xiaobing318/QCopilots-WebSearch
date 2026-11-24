@@ -1,11 +1,12 @@
 """Quality checks must reject incomplete or ineffective execution immediately."""
 import copy
+import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
 import threading
-import types
 import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
@@ -13,41 +14,6 @@ import xml.etree.ElementTree as ET
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts'))
 import quality
 import release_gate
-
-# Only the pure diagnostic check is exercised on Windows. The DEB installer
-# itself remains Linux-only and its account operations are never called here.
-with patch.dict(sys.modules, {"pwd": types.ModuleType("pwd")} if sys.platform == "win32" else {}):
-    import acceptance_deb
-
-
-class DebIsolationDiagnosticTests(unittest.TestCase):
-    version_error = ("invalid_configuration: Runtime configuration belongs to a different project release. "
-                     "This executable expects 0.0.1.\n")
-    schema_error = ("invalid_configuration: Runtime configuration does not match its schema "
-                    "/business: required property 'origins' not found.\n")
-
-    def test_version_rejection_is_required_for_current_layouts(self):
-        for legacy in (False, True):
-            with self.subTest(legacy=legacy):
-                acceptance_deb.require_cross_release_rejection(
-                    subprocess.CompletedProcess([], 1, self.version_error), legacy=legacy)
-        with self.assertRaisesRegex(RuntimeError, 'cross-release configuration error'):
-            acceptance_deb.require_cross_release_rejection(
-                subprocess.CompletedProcess([], 1, self.schema_error), legacy=False)
-
-    def test_immutable_legacy_release_may_reject_new_schema_first(self):
-        acceptance_deb.require_cross_release_rejection(
-            subprocess.CompletedProcess([], 1, self.schema_error), legacy=True)
-
-    def test_success_and_unrelated_failures_cannot_pass_isolation(self):
-        for legacy in (False, True):
-            for code, output in ((0, self.version_error), (0, self.schema_error), (1, ''),
-                                 (1, 'invalid_configuration: Cannot read runtime configuration.\n'),
-                                 (1, 'unexpected prefix: ' + self.schema_error)):
-                with self.subTest(legacy=legacy, code=code, output=output), \
-                     self.assertRaisesRegex(RuntimeError, 'cross-release configuration error'):
-                    acceptance_deb.require_cross_release_rejection(
-                        subprocess.CompletedProcess([], code, output), legacy=legacy)
 
 
 class ParallelQualityTests(unittest.TestCase):
@@ -88,6 +54,42 @@ class ParallelQualityTests(unittest.TestCase):
 
 class ReleaseGateTests(unittest.TestCase):
     commit = 'a' * 40
+
+    def test_project_tag_must_be_annotated_with_notes_for_the_triggering_commit(self):
+        project = (Path(__file__).resolve().parents[2] / 'CMakeLists.txt').read_text(encoding='utf-8')
+        version = re.search(r'^set\(QCWS_VERSION "([^"]+)"', project, re.MULTILINE)[1]
+        tag = f'v{version}'
+        # Git subprocesses, including those inside the gate, must only see the fixture's configuration.
+        environment = {key: value for key, value in os.environ.items() if not key.upper().startswith('GIT_')}
+        environment.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull)
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, environment, clear=True):
+            root = Path(directory)
+            (root / 'CMakeLists.txt').write_text(project, encoding='utf-8')
+
+            def git(*args):
+                return subprocess.check_output(
+                    ['git', '-c', 'user.name=Release Test', '-c', 'user.email=test@example.invalid', *args],
+                    cwd=root, encoding='utf-8',
+                ).strip()
+
+            git('init', '--quiet', '--template=', '--initial-branch=main')
+            git('add', 'CMakeLists.txt')
+            git('commit', '--quiet', '-m', 'Release fixture')
+            commit = git('rev-parse', 'HEAD')
+            git('tag', tag)
+            with self.assertRaisesRegex(RuntimeError, 'must be annotated'):
+                release_gate.verify_tag(tag, commit, root)
+            git('tag', '-d', tag)
+            git('tag', '-a', '--cleanup=verbatim', '-m', '   ', tag)
+            with self.assertRaisesRegex(RuntimeError, 'must contain release notes'):
+                release_gate.verify_tag(tag, commit, root)
+            git('tag', '-d', tag)
+            git('tag', '-a', '--cleanup=verbatim', '-m', '## Release notes\n\nPackage changes.', tag)
+            self.assertEqual(release_gate.verify_tag(tag, commit, root), git('rev-parse', f'refs/tags/{tag}'))
+            with self.assertRaisesRegex(RuntimeError, 'triggering commit'):
+                release_gate.verify_tag(tag, '0' * 40, root)
+            with self.assertRaisesRegex(RuntimeError, 'must match QCWS_VERSION'):
+                release_gate.verify_tag('not-the-project-version', commit, root)
 
     def verify(self, runs, *, ancestor=True):
         responses = iter([

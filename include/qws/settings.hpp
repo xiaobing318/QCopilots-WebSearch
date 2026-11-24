@@ -37,7 +37,7 @@ private:
   Config config_;
   std::string directory_;
   Json defaults_;
-  std::string legacyToken_;
+  std::string runtimeSearxngToken_;
   mutable std::mutex mutex_;
   std::shared_ptr<const SettingsSnapshot> active_;
   QByteArray settingsStamp_, secretsStamp_;

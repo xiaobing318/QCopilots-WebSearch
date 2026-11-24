@@ -190,7 +190,7 @@ def verify_public_url_configuration(base, runtime, config):
         "http://search.example.test/mcp",
         "https://search.example.test/",
         "https://search.example.test/mcp/",
-        "https://search.example.test/v1/status",
+        "https://search.example.test/metrics",
         "https://search.example.test/%6Dcp",
         "https://search.example.test/mc%70",
         "https://user@search.example.test/mcp",
@@ -283,10 +283,10 @@ def verify_http(executable, public_url):
                 finally:
                     assert mcp_request(business, headers, session=session)[0] == 204
 
-                # Probe the actual business listener. A proxy allowlist could hide a surviving REST route.
+                # The business listener serves MCP only. Management and control paths are separate.
                 origin = headers | {"Origin": "https://client.example.test", "Content-Type": "application/json"}
-                for path in ("/v1/status", "/v1/search", "/v1/open", "/v1/find"):
-                    method = "GET" if path == "/v1/status" else "POST"
+                for method, path in (("GET", "/health/ready"), ("GET", "/metrics"),
+                                     ("POST", "/admin/api/v1/session"), ("POST", "/mcp/unregistered")):
                     assert request(business, method, path, origin, {} if method == "POST" else None)[0] == 404
                     assert request(business, "OPTIONS", path, {
                         "Origin": origin["Origin"], "Access-Control-Request-Method": method,

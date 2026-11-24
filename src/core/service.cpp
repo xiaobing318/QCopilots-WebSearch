@@ -294,8 +294,8 @@ Json Service::call(std::string name, const Json &args, std::string principal,
 }
 std::string Service::key(const std::string &type, const std::string &principal,
                          const std::string &value, const std::string &fingerprint) const {
-  // Search format 4 corrects result filtering, URL identities and date notices.
-  // Existing page snapshots continue to use their original identity.
+  // Search keys include the provider fingerprint. Page snapshot keys depend
+  // only on the client and page ID.
   const bool page = type == "page";
   const auto parts = Json::array({page ? 3 : 4, page ? "page" : fingerprint, type, principal, value});
   return QCryptographicHash::hash(

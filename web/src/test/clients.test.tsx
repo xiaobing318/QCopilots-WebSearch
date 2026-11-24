@@ -831,7 +831,7 @@ it.each(["Show saved code", "Copy saved Bearer"])(
   },
 );
 
-it("keeps legacy digest-only credentials unavailable for reveal while allowing replacement", async () => {
+it("allows replacing a digest-only credential without revealing it", async () => {
   const user = userEvent.setup();
   const { fetcher } = service({
     ...initial,

@@ -1,13 +1,15 @@
-# Installs two distinct release instances and removes only the state this run owns.
+# Test the production MSI in the default and a custom directory on a disposable Windows host.
+$required = @('--CandidateMsi', '--CandidateSHA256', '--OutputDir')
 $options = @{}
 for ($n = 0; $n -lt $args.Count; $n += 2) {
     $key = [string]$args[$n]
-    if ($key -notin @('--CandidateMsi','--BaselineMsi','--CandidateSHA256','--BaselineSHA256','--OutputDir') -or $n + 1 -ge $args.Count -or $options.ContainsKey($key)) {
-        throw 'Use --CandidateMsi FILE --CandidateSHA256 HASH --BaselineMsi FILE --BaselineSHA256 HASH --OutputDir DIR.'
+    if ($key -notin $required -or $n + 1 -ge $args.Count -or $options.ContainsKey($key) -or
+        [string]::IsNullOrWhiteSpace($args[$n + 1])) {
+        throw 'Use --CandidateMsi FILE --CandidateSHA256 HASH --OutputDir DIR.'
     }
     $options[$key] = [string]$args[$n + 1]
 }
-foreach ($key in @('--CandidateMsi','--BaselineMsi','--CandidateSHA256','--BaselineSHA256','--OutputDir')) {
+foreach ($key in $required) {
     if (!$options.ContainsKey($key)) { throw "Missing $key" }
 }
 Set-StrictMode -Version Latest
@@ -21,9 +23,8 @@ $osInfo = Get-CimInstance Win32_OperatingSystem
 $supportedDesktop = $osInfo.ProductType -eq 1 -and [int]$osInfo.BuildNumber -ge 22000
 $supportedServer = $osInfo.ProductType -in @(2,3) -and [int]$osInfo.BuildNumber -ge 20348
 Assert ($supportedDesktop -or $supportedServer) 'Use Windows 11 or Windows Server 2022 or newer.'
-$started = Get-Date
-$ownedProducts = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-$trackedRoots = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+$programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+Assert ([IO.Directory]::Exists($programFiles)) 'Cannot locate Program Files.'
 $wi = New-Object -ComObject WindowsInstaller.Installer
 function Read-Msi([string]$path) {
     $full = (Resolve-Path -LiteralPath $path).ProviderPath
@@ -68,7 +69,7 @@ function Read-Msi([string]$path) {
         return $properties
     } finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($db) }
 }
-function Set-ExpectedInstance([hashtable]$metadata, [bool]$overrideInstallRoot, [bool]$legacyLayout = $false) {
+function Set-ExpectedInstance([hashtable]$metadata, [bool]$overrideInstallRoot) {
     $version = $metadata.ProductVersion
     [void][guid]::Parse($metadata.ProductCode)
     [void][guid]::Parse($metadata.UpgradeCode)
@@ -76,34 +77,30 @@ function Set-ExpectedInstance([hashtable]$metadata, [bool]$overrideInstallRoot, 
     Assert ($metadata.ProductName -eq 'QCopilots-WebSearch') 'Expected a production package.'
     $directory = "QCopilots-WebSearch-$version"
     $name = "QCopilotsWebSearch-$version"
-    $configName = if ($legacyLayout) { 'service.json' } else { 'runtime.json' }
-    $arguments = '--WindowsService --ServiceName {0} --ConfigPath "[QcwsDataRoot]{1}"' -f $name, $configName
+    $arguments = '--WindowsService --ServiceName {0} --ConfigPath "[QcwsDataRoot]runtime.json"' -f $name
     Assert ($metadata.ServiceName -ceq $name -and $metadata.ServiceAccount -ceq "NT SERVICE\$name" -and
             $metadata.ServiceArguments -ceq $arguments) 'Unexpected versioned service identity or startup command.'
     Assert ($metadata.INSTALL_ROOTName -ceq $directory -and
             $metadata.INSTALL_ROOTParent -in @('ProgramFiles6432Folder', 'ProgramFiles64Folder') -and
             $metadata.CM_DP_binName -ceq 'bin' -and $metadata.CM_DP_binParent -ceq 'INSTALL_ROOT' -and
+            $metadata.QcwsDataRootName -ceq 'data' -and $metadata.QcwsDataRootParent -ceq 'CM_DP_bin' -and
             $metadata.QcwsStateRootName -ceq 'state' -and $metadata.QcwsStateRootParent -ceq 'QcwsDataRoot') 'Unexpected versioned installation or data directory.'
     $metadata.OverrideInstallRoot = $overrideInstallRoot
-    $metadata.DefaultInstallRoot = [IO.Path]::GetFullPath((Join-Path $env:ProgramFiles $directory))
+    $metadata.DefaultInstallRoot = [IO.Path]::GetFullPath((Join-Path $programFiles $directory))
     $metadata.InstallRoot = $metadata.DefaultInstallRoot
     if ($overrideInstallRoot) {
         $custom = "$directory Acceptance " + [guid]::NewGuid().ToString('N')
-        $metadata.InstallRoot = [IO.Path]::GetFullPath((Join-Path $env:ProgramFiles $custom))
+        $metadata.InstallRoot = [IO.Path]::GetFullPath((Join-Path $programFiles $custom))
     }
     $metadata.BinRoot = Join-Path $metadata.InstallRoot 'bin'
-    if ($legacyLayout) {
-        Assert ($metadata.QcwsDataRootName -ceq $directory -and $metadata.QcwsDataRootParent -ceq 'CommonAppDataFolder') 'Unexpected legacy data directory.'
-        $metadata.DataRoot = [IO.Path]::GetFullPath((Join-Path $env:ProgramData $directory))
-    } else {
-        Assert ($metadata.QcwsDataRootName -ceq 'data' -and $metadata.QcwsDataRootParent -ceq 'CM_DP_bin') 'Unexpected data directory beside the binary.'
-        $metadata.DataRoot = Join-Path $metadata.BinRoot 'data'
-    }
+    $metadata.DataRoot = Join-Path $metadata.BinRoot 'data'
     $metadata.Executable = Join-Path $metadata.BinRoot 'qcopilots-websearch.exe'
-    $metadata.Config = Join-Path $metadata.DataRoot $configName
+    $metadata.Config = Join-Path $metadata.DataRoot 'runtime.json'
     $metadata.Token = Join-Path $metadata.DataRoot 'client.token'
     $metadata.AdminToken = Join-Path $metadata.DataRoot 'admin.token'
     $metadata.AdminEndpoint = Join-Path $metadata.DataRoot 'state\admin-port'
+    $metadata.InstallAttempted = $false
+    $metadata.TrackedRoots = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 }
 function Registered([string]$code) {
     foreach ($product in $wi.ProductsEx($code, 'S-1-1-0', 7)) { return $true }
@@ -116,12 +113,12 @@ function Read-ProductProperty($product, [string]$name, [object[]]$indices = @())
                                            $null, $product, $indices)
 }
 function Owned-Processes([hashtable]$metadata) {
-    Assert ($ownedProducts.Contains($metadata.ProductCode)) 'Unknown product ownership.'
+    Assert $metadata.InstallAttempted 'Unknown product ownership.'
     @(Get-CimInstance Win32_Process -Filter "Name='qcopilots-websearch.exe'" |
-        Where-Object { $_.ExecutablePath -eq $metadata.Executable -and $_.CreationDate -ge $started })
+        Where-Object { $_.ExecutablePath -eq $metadata.Executable -and $_.CreationDate -ge $metadata.Started })
 }
 function Owned-Service([hashtable]$metadata) {
-    Assert ($ownedProducts.Contains($metadata.ProductCode)) 'Unknown product ownership.'
+    Assert $metadata.InstallAttempted 'Unknown product ownership.'
     $service = Get-CimInstance Win32_Service -Filter "Name='$($metadata.ServiceName)'"
     if ($service) {
         $invocation = '^{0}\s+--WindowsService\s+--ServiceName\s+{1}\s+--ConfigPath\s+{2}$' -f
@@ -157,12 +154,12 @@ function Wait-Absent([hashtable]$metadata) {
 }
 function Invoke-Msi([hashtable]$metadata, [string]$mode, [string]$label, [int]$expected = 0, [string]$failpoint = '') {
     Assert ((Get-FileHash -LiteralPath $metadata.Path -Algorithm SHA256).Hash -eq $metadata.Sha256) 'MSI bytes changed.'
-    $log = Join-Path $runDir ($label + '.log')
+    $log = Join-Path $metadata.LogDirectory ($label + '.log')
     $msiArgs = @($mode, ('"' + $metadata.Path + '"'), '/qn', '/norestart', 'REBOOT=ReallySuppress', '/L*v', ('"' + $log + '"'))
     if ($failpoint) { $msiArgs += "QCWS_TEST_FAILPOINT=$failpoint" }
     if ($mode -eq '/i') {
         if ($metadata.OverrideInstallRoot) { $msiArgs += ('INSTALL_ROOT="' + $metadata.InstallRoot + '"') }
-        [void]$ownedProducts.Add($metadata.ProductCode)
+        $metadata.InstallAttempted = $true
     } else { [void](Owned-Service $metadata) }
     Write-Host $label
     $process = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" -ArgumentList $msiArgs -WindowStyle Hidden -PassThru
@@ -174,7 +171,9 @@ function Invoke-Msi([hashtable]$metadata, [string]$mode, [string]$label, [int]$e
         }
         $code = $process.ExitCode
     } finally { $process.Dispose() }
-    foreach ($root in @($metadata.InstallRoot, $metadata.DataRoot)) { if (Test-Path -LiteralPath $root) { [void]$trackedRoots.Add($root) } }
+    foreach ($root in @($metadata.InstallRoot, $metadata.DataRoot)) {
+        if (Test-Path -LiteralPath $root) { [void]$metadata.TrackedRoots.Add($root) }
+    }
     if ($code -ne $expected -and (Test-Path -LiteralPath $log)) {
         $tail = (Get-Content -LiteralPath $log -Tail 120) -join [Environment]::NewLine
         if ($tail.Length -gt 32768) { $tail = $tail.Substring($tail.Length - 32768) }
@@ -197,12 +196,12 @@ function Assert-Running([hashtable]$metadata) {
     $version = & $metadata.Executable --Version 2>&1
     $versionPattern = '^QCopilots-WebSearch ' + [regex]::Escape($metadata.ProductVersion) + ', Qt '
     Assert ($LASTEXITCODE -eq 0 -and "$version" -match $versionPattern) 'Installed binary version mismatch.'
-    if ($metadata.QcwsDataRootParent -ceq 'CM_DP_bin') {
-        $configCheck = & $metadata.Executable --CheckConfig 2>&1
-        Assert ($LASTEXITCODE -eq 0 -and "$configCheck" -ceq 'Configuration valid.') 'Default configuration check failed for the installed binary.'
-    }
+    $configCheck = & $metadata.Executable --CheckConfig 2>&1
+    Assert ($LASTEXITCODE -eq 0 -and "$configCheck" -ceq 'Configuration valid.') 'Default configuration check failed for the installed binary.'
     $settings = [IO.File]::ReadAllText($metadata.Config) | ConvertFrom-Json
     Assert ($settings.project_version -ceq $metadata.ProductVersion) 'Runtime configuration release does not match the MSI.'
+    $template = Join-Path $metadata.InstallRoot 'share\qcopilots-websearch\config\runtime.json'
+    Assert (([IO.File]::ReadAllText($template) | ConvertFrom-Json).project_version -ceq $metadata.ProductVersion) 'Packaged runtime configuration release does not match the MSI.'
     $ports = @($settings.business.port, $settings.control.port, $settings.admin.port)
     Assert (@($ports | Select-Object -Unique).Count -eq 3 -and
             @($ports | Where-Object { $_ -lt 1024 -or $_ -gt 65535 }).Count -eq 0) 'Invalid or duplicate configured ports.'
@@ -235,7 +234,7 @@ function Get-InstalledSettingsLink([hashtable]$metadata, [string]$origin) {
     Assert ($LASTEXITCODE -eq 0 -and $url -cmatch $linkPattern) 'The installed settings CLI did not return a login link for its own port.'
     return $url
 }
-function Assert-Administration([hashtable]$metadata, [bool]$keepProviderKey = $false) {
+function Assert-Administration([hashtable]$metadata) {
     $sidInfo = & "$env:SystemRoot\System32\sc.exe" showsid $metadata.ServiceName | Out-String
     $serviceSid = [regex]::Match($sidInfo, 'S-1-5-80(-[0-9]+)+').Value
     Assert ($LASTEXITCODE -eq 0 -and $serviceSid) 'The service SID was unavailable.'
@@ -270,22 +269,23 @@ function Assert-Administration([hashtable]$metadata, [bool]$keepProviderKey = $f
     $json = @{ ContentType = 'application/json'; TimeoutSec = 4 }
     $state = Invoke-RestMethod -Uri "$origin/admin/api/v1/session" -Method Post -Headers @{ Origin = $origin } -Body (@{ code = $loginCode } | ConvertTo-Json -Compress) -SessionVariable session @json
     $settings = Invoke-RestMethod -Uri "$origin/admin/api/v1/settings" -WebSession $session -TimeoutSec 4
-    $provider = if ('provider' -in $runtime.PSObject.Properties.Name) { 'searxng' } else { 'auto' }
-    Assert ($settings.search.provider -eq $provider) 'The settings response did not load the expected source.'
-    Assert (!$settings.search_without_asking -and !$settings.providers.brave.key_set) 'A new installation read another version''s settings or provider credentials.'
+    Assert ($settings.search.provider -ceq 'auto' -and !$settings.providers.brave.key_set) 'Fresh installation did not start with the default provider and empty credentials.'
     $headers = @{ Origin = $origin; 'X-QCWS-CSRF' = $state.csrf }
-    $patch = @{ revision = $settings.revision; patch = @{ search_without_asking = $true } } | ConvertTo-Json -Compress
+    $patch = @{ revision = $settings.revision; patch = @{ search = @{ provider = 'brave' } } } | ConvertTo-Json -Depth 4 -Compress
     $savedSettings = Invoke-RestMethod -Uri "$origin/admin/api/v1/settings" -Method Put -Headers $headers -WebSession $session -Body $patch @json
-    Assert $savedSettings.search_without_asking 'The settings edit did not persist.'
+    Assert ($savedSettings.search.provider -ceq 'brave') 'The settings edit did not persist.'
     $keyPath = "$origin/admin/api/v1/providers/brave/key"
     $fakeKey = [guid]::NewGuid().ToString('N')
-    $saved = Invoke-RestMethod -Uri $keyPath -Method Put -Headers $headers -WebSession $session -Body (@{ key = $fakeKey } | ConvertTo-Json -Compress) @json
+    $keyBody = @{ key = $fakeKey } | ConvertTo-Json -Compress
+    $saved = Invoke-RestMethod -Uri $keyPath -Method Put -Headers $headers -WebSession $session -Body $keyBody @json
     Assert ($saved.providers.brave.key_set -and ($saved | ConvertTo-Json -Depth 16) -notmatch $fakeKey) 'The settings response exposed or failed to save a key.'
     $secrets = Join-Path $metadata.DataRoot 'state\secrets.json'
     Assert ((Test-Path -LiteralPath $secrets) -and @(Grant-ToInteractive $secrets).Count -eq 0) 'INTERACTIVE can access the provider secret file.'
-    if (!$keepProviderKey) {
-        [void](Invoke-RestMethod -Uri $keyPath -Method Delete -Headers $headers -WebSession $session -Body '{}' @json)
-    }
+    $cleared = Invoke-RestMethod -Uri $keyPath -Method Delete -Headers $headers -WebSession $session -Body '{}' @json
+    Assert (!$cleared.providers.brave.key_set) 'The provider credential was not cleared.'
+    # Keep a populated secret file for the uninstall and reinstall checks.
+    $saved = Invoke-RestMethod -Uri $keyPath -Method Put -Headers $headers -WebSession $session -Body $keyBody @json
+    Assert $saved.providers.brave.key_set 'The provider credential was not restored.'
     [void](Invoke-RestMethod -Uri "$origin/admin/api/v1/session" -Method Delete -Headers $headers -WebSession $session -Body '{}' @json)
 }
 function Invoke-InstalledTokenCli([hashtable]$metadata, [string]$operation, [string[]]$lines) {
@@ -371,10 +371,11 @@ function Send-InstalledMcp($http, [uri]$uri, [string]$bearer, [hashtable]$messag
         } finally { $response.Dispose() }
     } finally { $request.Dispose() }
 }
-function Assert-InstalledMcp($http, [uri]$uri, [string]$bearer, [hashtable]$initialize) {
+function Assert-InstalledMcp($http, [uri]$uri, [string]$bearer, [hashtable]$initialize, [string]$expectedVersion) {
     $result = Send-InstalledMcp $http $uri $bearer $initialize
     $session = $result.Session
     Assert ($result.Status -eq 200 -and $session -and $result.Body.result.protocolVersion -eq '2025-06-18') 'Installed MCP initialize did not accept the expected token.'
+    Assert ($result.Body.result.serverInfo.version -ceq $expectedVersion) 'MCP serverInfo.version does not match the MSI.'
     $result = Send-InstalledMcp $http $uri $bearer @{ jsonrpc = '2.0'; method = 'notifications/initialized' } $session
     Assert ($result.Status -eq 202) 'Installed MCP did not accept the initialized notification.'
     $result = Send-InstalledMcp $http $uri $bearer @{ jsonrpc = '2.0'; id = 2; method = 'tools/list' } $session
@@ -397,38 +398,6 @@ function New-McpInitialize {
         protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'msi-acceptance'; version = '1' }
     } }
 }
-function Assert-SeparatePorts([hashtable]$baseline, [hashtable]$candidate) {
-    $old = [IO.File]::ReadAllText($baseline.Config) | ConvertFrom-Json
-    $new = [IO.File]::ReadAllText($candidate.Config) | ConvertFrom-Json
-    $ports = @($old.business.port, $old.control.port, $old.admin.port, $new.business.port, $new.control.port, $new.admin.port)
-    Assert (@($ports | Select-Object -Unique).Count -eq 6) 'The two installed versions share listener ports.'
-}
-function Assert-SeparateInstances([hashtable]$baseline, [hashtable]$candidate) {
-    $old = [IO.File]::ReadAllText($baseline.Config) | ConvertFrom-Json
-    $new = [IO.File]::ReadAllText($candidate.Config) | ConvertFrom-Json
-    Assert ($old.cache.search_ttl_seconds -ne $new.cache.search_ttl_seconds) 'The candidate copied the baseline deployment configuration.'
-    Assert (!(Test-Path -LiteralPath (Join-Path $candidate.DataRoot 'state\acceptance-baseline.txt'))) 'The candidate copied the baseline state.'
-    foreach ($property in @('Token', 'AdminToken')) {
-        $oldHash = (Get-FileHash -LiteralPath $baseline[$property]).Hash
-        $newHash = (Get-FileHash -LiteralPath $candidate[$property]).Hash
-        Assert ($oldHash -cne $newHash) 'The candidate copied a credential from the baseline.'
-    }
-    [void](Get-InstalledSettingsLink $baseline ('http://127.0.0.1:' + $old.admin.port))
-    [void](Get-InstalledSettingsLink $candidate ('http://127.0.0.1:' + $new.admin.port))
-
-    $oldBearer = [IO.File]::ReadAllText($baseline.Token).Trim()
-    $newBearer = [IO.File]::ReadAllText($candidate.Token).Trim()
-    $http = New-McpClient
-    try {
-        $oldUri = 'http://127.0.0.1:' + $old.business.port + '/mcp'
-        $newUri = 'http://127.0.0.1:' + $new.business.port + '/mcp'
-        $initialize = New-McpInitialize
-        Assert ((Send-InstalledMcp $http $oldUri $newBearer $initialize).Status -eq 401) 'The baseline accepted the candidate credential.'
-        Assert ((Send-InstalledMcp $http $newUri $oldBearer $initialize).Status -eq 401) 'The candidate accepted the baseline credential.'
-        Assert-InstalledMcp $http $oldUri $oldBearer $initialize
-        Assert-InstalledMcp $http $newUri $newBearer $initialize
-    } finally { $http.Dispose() }
-}
 function Assert-InstalledTokenRotation([hashtable]$metadata) {
     Write-Host 'Verify installed token generation, rotation and Bearer MCP access'
     $runtime = [IO.File]::ReadAllText($metadata.Config) | ConvertFrom-Json
@@ -441,23 +410,24 @@ function Assert-InstalledTokenRotation([hashtable]$metadata) {
         $uri = "http://127.0.0.1:$($runtime.business.port)/mcp"
         $initialize = New-McpInitialize
         Assert ((Send-InstalledMcp $http $uri '' $initialize).Status -eq 401) 'Installed MCP accepted an unauthenticated client.'
+        Assert-InstalledMcp $http $uri ([IO.File]::ReadAllText($metadata.Token).Trim()) $initialize $metadata.ProductVersion
         Assert ((Send-InstalledMcp $http $uri $bearer $initialize).Status -eq 401) 'The generated token became active before service restart.'
         [void](Stop-OwnedService $metadata)
         Start-Service -Name $metadata.ServiceName
         Assert-Running $metadata
-        Assert-InstalledMcp $http $uri $bearer $initialize
+        Assert-InstalledMcp $http $uri $bearer $initialize $metadata.ProductVersion
 
         $replacement = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
         [void](Invoke-InstalledTokenCli $metadata '--SetToken' @($replacement, 'yes'))
         Assert-InstalledTokenConfig $metadata $replacement $dacl $runtimeHash
         Assert (![IO.File]::ReadAllText((Join-Path $metadata.DataRoot 'state\client-registry.json')).Contains($bearer)) 'The private registry retained the credential replaced by the CLI.'
         Assert ((Send-InstalledMcp $http $uri $replacement $initialize).Status -eq 401) 'The rotated token became active before service restart.'
-        Assert-InstalledMcp $http $uri $bearer $initialize
+        Assert-InstalledMcp $http $uri $bearer $initialize $metadata.ProductVersion
         [void](Stop-OwnedService $metadata)
         Start-Service -Name $metadata.ServiceName
         Assert-Running $metadata
         Assert ((Send-InstalledMcp $http $uri $bearer $initialize).Status -eq 401) 'The original token remained active after service restart.'
-        Assert-InstalledMcp $http $uri $replacement $initialize
+        Assert-InstalledMcp $http $uri $replacement $initialize $metadata.ProductVersion
     } finally { $http.Dispose() }
 }
 function Send-InstalledClientReveal([string]$origin, $session, [hashtable]$headers, [string]$id, [string]$revision) {
@@ -537,7 +507,7 @@ function Assert-InstalledClientRegistry([hashtable]$metadata) {
         Assert-InstalledClientReveal (Send-InstalledClientReveal $origin $session $headers 'msi-web-acceptance' $view.revision) 'msi-web-acceptance' $view.revision $bearer
         $uri = "http://127.0.0.1:$($runtime.business.port)/mcp"
         $initialize = New-McpInitialize
-        Assert-InstalledMcp $http $uri $bearer $initialize
+        Assert-InstalledMcp $http $uri $bearer $initialize $metadata.ProductVersion
         $replacement = 'web/' + [guid]::NewGuid().ToString('N').Substring(0, 12)
         $body = @{ revision = $view.revision; token = $replacement } | ConvertTo-Json -Compress
         $view = Invoke-RestMethod -Uri "$clientsUri/msi-web-acceptance" -Method Put -Headers $headers -WebSession $session -Body $body @json
@@ -550,7 +520,7 @@ function Assert-InstalledClientRegistry([hashtable]$metadata) {
         Assert-InstalledClientReveal (Send-InstalledClientReveal $origin $session $headers 'msi-web-acceptance' $view.revision) 'msi-web-acceptance' $view.revision $replacement
         Assert-InstalledRegistryValue $metadata 'msi-web-acceptance' $replacement
         Assert (![IO.File]::ReadAllText((Join-Path $metadata.DataRoot 'state\client-registry.json')).Contains($bearer)) 'Web rotation retained the replaced credential in the private registry.'
-        Assert-InstalledMcp $http $uri $replacement $initialize
+        Assert-InstalledMcp $http $uri $replacement $initialize $metadata.ProductVersion
         $body = @{ revision = $view.revision } | ConvertTo-Json -Compress
         $view = Invoke-RestMethod -Uri "$clientsUri/msi-web-acceptance" -Method Delete -Headers $headers -WebSession $session -Body $body @json
         Assert-InstalledClientView $view
@@ -581,7 +551,6 @@ function Assert-Snapshot([hashtable]$snapshot) {
     }
 }
 function Assert-InstalledColdStartValidation([hashtable]$metadata) {
-    $checked = @()
     foreach ($file in @('settings.json', 'secrets.json')) {
         Write-Host "Verify SCM startup rejects invalid $file and recovers after restoration"
         $path = Join-Path (Join-Path $metadata.DataRoot 'state') $file
@@ -605,13 +574,12 @@ function Assert-InstalledColdStartValidation([hashtable]$metadata) {
                 Assert-Running $metadata
             }
         }
-        $checked += $file
     }
-    $metadata.ColdStartChecks = $checked
 }
 function Remove-OwnedTree([hashtable]$metadata, [string]$root) {
     $absolute = [IO.Path]::GetFullPath($root).TrimEnd('\')
-    Assert ($ownedProducts.Contains($metadata.ProductCode) -and $trackedRoots.Contains($absolute) -and
+    Assert ($metadata.InstallAttempted -and $metadata.TrackedRoots.Contains($absolute) -and
+            [IO.Path]::GetDirectoryName($metadata.InstallRoot) -eq $programFiles -and
             (@($metadata.InstallRoot, $metadata.DataRoot) -contains $absolute)) 'Refusing unowned delete.'
     if (!(Test-Path -LiteralPath $absolute)) { return }
     Assert ((Resolve-Path -LiteralPath $absolute).ProviderPath.TrimEnd('\') -eq $absolute) 'Cleanup root changed.'
@@ -631,16 +599,18 @@ function Remove-OwnedTree([hashtable]$metadata, [string]$root) {
     }
     Remove-Item -LiteralPath $absolute -Recurse -Force
 }
-function Assert-BaselineUnchanged([hashtable]$metadata, [uint32]$baselinePid, [hashtable]$files) {
-    Assert-Running $metadata
-    Assert ((Owned-Service $metadata).ProcessId -eq $baselinePid) 'The baseline service restarted during candidate acceptance.'
-    Assert-Snapshot $files
+function Assert-Uninstalled([hashtable]$metadata) {
+    Wait-Absent $metadata
+    Assert (!(Registered $metadata.ProductCode)) 'Product registration remained.'
+    Assert (@(Owned-Processes $metadata).Count -eq 0) 'An installed process remained.'
+    Assert (!(Test-Path -LiteralPath $metadata.Executable)) 'The installed executable remained.'
+    if ($metadata.OverrideInstallRoot) {
+        Assert (!(Test-Path -LiteralPath $metadata.DefaultInstallRoot)) 'Custom installation wrote to the default directory.'
+    }
 }
 function Assert-RolledBack([hashtable]$metadata, [bool]$serviceStarted) {
-    Wait-Absent $metadata
-    Assert (!(Registered $metadata.ProductCode)) 'Rollback left a product registration.'
-    Assert (@(Owned-Processes $metadata).Count -eq 0) 'Rollback left an installed process.'
-    foreach ($path in @($metadata.Executable, $metadata.Config, $metadata.Token, $metadata.AdminToken)) {
+    Assert-Uninstalled $metadata
+    foreach ($path in @($metadata.Config, $metadata.Token, $metadata.AdminToken)) {
         Assert (!(Test-Path -LiteralPath $path)) "Rollback left an installer-created path: $path"
     }
     if ($serviceStarted -and (Test-Path -LiteralPath $metadata.DataRoot)) {
@@ -653,119 +623,140 @@ function Assert-RolledBack([hashtable]$metadata, [bool]$serviceStarted) {
     }
     Assert (!(Test-Path -LiteralPath $metadata.InstallRoot)) 'Rollback left unexpected installed files or deployment data.'
 }
+function Assert-CleanHost([hashtable]$metadata) {
+    Assert (!(Get-CimInstance Win32_Service -Filter "Name='$($metadata.ServiceName)'")) 'The service is already registered.'
+    Assert (!(Registered $metadata.ProductCode)) 'The MSI product is already registered.'
+    Assert (@($wi.RelatedProducts($metadata.UpgradeCode)).Count -eq 0) 'A related product is already registered.'
+    foreach ($root in @($metadata.InstallRoot, $metadata.DefaultInstallRoot) | Select-Object -Unique) {
+        Assert ([IO.Path]::GetDirectoryName($root) -eq $programFiles) 'Unexpected installation root.'
+        # Enumerating the parent also detects dangling links. An inaccessible parent must fail preflight.
+        $existingEntries = [IO.Directory]::GetFileSystemEntries($programFiles, [IO.Path]::GetFileName($root))
+        Assert ($existingEntries.Length -eq 0) "Refusing an existing installation path: $root"
+    }
+}
+function Test-MsiLayout([hashtable]$metadata, $result) {
+    $failure = $null
+    $metadata.Started = Get-Date
+    try {
+        Assert-CleanHost $metadata
+        [void][IO.Directory]::CreateDirectory($metadata.LogDirectory)
+        Invoke-Msi $metadata '/i' '01-fail-after-initialize' 1603 'afterInitialize'
+        Assert-RolledBack $metadata $false
+        $result.Checks.Add('rollback-after-initialize')
+        Invoke-Msi $metadata '/i' '02-fail-after-start-services' 1603 'afterStartServices'
+        Assert-RolledBack $metadata $true
+        $result.Checks.Add('rollback-after-start-services')
+
+        Invoke-Msi $metadata '/i' '03-install'
+        Assert-Running $metadata
+        $result.Checks.Add('fresh-install-and-service')
+        Assert-Administration $metadata
+        $result.Checks.Add('administration-and-acls')
+        Assert-InstalledColdStartValidation $metadata
+        $result.Checks.Add('cold-start-rejection-and-recovery')
+        Assert-InstalledClientRegistry $metadata
+        Assert-InstalledTokenRotation $metadata
+        Assert-InstalledClientRegistry $metadata
+        $result.Checks.Add('client-registry-and-token-rotation')
+
+        $retained = Snapshot @($metadata.Config, $metadata.Token, $metadata.AdminToken,
+            (Join-Path $metadata.DataRoot 'state\settings.json'),
+            (Join-Path $metadata.DataRoot 'state\secrets.json'),
+            (Join-Path $metadata.DataRoot 'state\client-registry.json'))
+        Invoke-Msi $metadata '/x' '04-uninstall'
+        Assert-Uninstalled $metadata
+        Assert-Snapshot $retained
+        $result.Checks.Add('uninstall-retains-data-and-acls')
+
+        Invoke-Msi $metadata '/i' '05-reinstall'
+        Assert-Running $metadata
+        Assert-Snapshot $retained
+        $result.Checks.Add('same-version-reinstall')
+        Invoke-Msi $metadata '/x' '06-uninstall'
+        Assert-Uninstalled $metadata
+        Assert-Snapshot $retained
+        $result.Checks.Add('final-uninstall')
+    } catch {
+        $failure = $_
+        $result.Error = $_.Exception.Message
+    } finally {
+        if ($metadata.InstallAttempted) {
+            try {
+                if (Registered $metadata.ProductCode) { Invoke-Msi $metadata '/x' 'cleanup-uninstall' }
+            } catch { $result.CleanupErrors.Add($_.Exception.Message) }
+            try {
+                $service = Owned-Service $metadata
+                if ($service -and $service.State -ne 'Stopped') {
+                    try { [void](Stop-OwnedService $metadata) }
+                    catch { foreach ($process in Owned-Processes $metadata) { Stop-Process -Id $process.ProcessId -Force } }
+                }
+                foreach ($process in Owned-Processes $metadata) { Stop-Process -Id $process.ProcessId -Force }
+                Assert-Uninstalled $metadata
+                if (Test-Path -LiteralPath $metadata.InstallRoot) { Remove-OwnedTree $metadata $metadata.InstallRoot }
+                Assert-CleanHost $metadata
+                $result.Checks.Add('cleanup')
+            } catch { $result.CleanupErrors.Add($_.Exception.Message) }
+        }
+        $result.Status = if ($failure -or $result.CleanupErrors.Count) { 'failed' } else { 'passed' }
+    }
+    if ($failure) { throw $failure }
+    if ($result.CleanupErrors.Count) { throw ($result.CleanupErrors -join [Environment]::NewLine) }
+}
+
 $candidate = Read-Msi $options['--CandidateMsi']
-$baseline = Read-Msi $options['--BaselineMsi']
-foreach ($pair in @(@{ Key = '--CandidateSHA256'; Msi = $candidate },
-                    @{ Key = '--BaselineSHA256'; Msi = $baseline })) {
-    $expected = $options[$pair.Key]
-    Assert ($expected -match '^[a-fA-F0-9]{64}$' -and $pair.Msi.Sha256 -eq $expected) 'MSI SHA-256 mismatch.'
-}
-$legacyBaseline = $baseline.QcwsDataRootParent -ceq 'CommonAppDataFolder'
-Set-ExpectedInstance $candidate $legacyBaseline
-Set-ExpectedInstance $baseline (!$legacyBaseline) $legacyBaseline
-Assert ($candidate.ProductCode -ne $baseline.ProductCode -and $candidate.UpgradeCode -ne $baseline.UpgradeCode) 'The installed versions require distinct product and upgrade identities.'
-Assert ([version]$candidate.ProductVersion -gt [version]$baseline.ProductVersion) 'Candidate version must increase.'
-$roots = @($candidate.InstallRoot, $candidate.DefaultInstallRoot, $candidate.DataRoot,
-           $baseline.InstallRoot, $baseline.DefaultInstallRoot, $baseline.DataRoot) | Select-Object -Unique
-foreach ($metadata in @($candidate, $baseline)) {
-    Assert (!(Get-CimInstance Win32_Service -Filter "Name='$($metadata.ServiceName)'")) 'Existing service with a test version identity found. No changes made.'
-    Assert (!(Registered $metadata.ProductCode)) 'Test version product already registered.'
-    Assert (@($wi.RelatedProducts($metadata.UpgradeCode)).Count -eq 0) 'Related product already registered.'
-}
-foreach ($root in $roots) { Assert (!(Get-Item -LiteralPath $root -Force -ErrorAction SilentlyContinue)) "Existing user path: $root" }
+$expected = $options['--CandidateSHA256']
+Assert ($expected -match '^[a-fA-F0-9]{64}$' -and $candidate.Sha256 -eq $expected) 'MSI SHA-256 mismatch.'
 $output = [IO.Path]::GetFullPath($options['--OutputDir'])
-foreach ($path in @($candidate.Path, $baseline.Path, $output)) {
-    foreach ($root in $roots) {
-        Assert ($path -ne $root -and !$path.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) 'Artifacts must be outside install/data roots.'
-    }
-}
 $runDir = Join-Path $output ('msi-acceptance-' + [guid]::NewGuid().ToString('N'))
-[void][IO.Directory]::CreateDirectory($runDir)
-$failure = $null
-$cleanupFailures = [Collections.Generic.List[string]]::new()
-try {
-    Invoke-Msi $baseline '/i' '01-install-baseline'
-    Assert-Running $baseline
-    Assert-Administration $baseline $true
-    $baselinePid = (Owned-Service $baseline).ProcessId
-    $json = [IO.File]::ReadAllText($baseline.Config) | ConvertFrom-Json
-    $json.cache.search_ttl_seconds = 317
-    [IO.File]::WriteAllText($baseline.Config, ($json | ConvertTo-Json -Depth 30), [Text.UTF8Encoding]::new($false))
-    $sentinel = Join-Path $baseline.DataRoot 'state\acceptance-baseline.txt'
-    [IO.File]::WriteAllText($sentinel, [guid]::NewGuid().ToString(), [Text.UTF8Encoding]::new($false))
-    $baselineFiles = Snapshot @($baseline.Config, $baseline.Token, $baseline.AdminToken, $baseline.AdminEndpoint,
-        $baseline.Executable, $sentinel, (Join-Path $baseline.DataRoot 'state\settings.json'),
-        (Join-Path $baseline.DataRoot 'state\secrets.json'))
-
-    Invoke-Msi $candidate '/i' '02-fail-after-initialize' 1603 'afterInitialize'
-    Assert-RolledBack $candidate $false
-    Assert-BaselineUnchanged $baseline $baselinePid $baselineFiles
-    Invoke-Msi $candidate '/i' '03-fail-after-start-services' 1603 'afterStartServices'
-    Assert-RolledBack $candidate $true
-    Assert-BaselineUnchanged $baseline $baselinePid $baselineFiles
-
-    [void](Stop-OwnedService $baseline)
-    Invoke-Msi $candidate '/i' '04-install-candidate-with-baseline-stopped'
-    Assert-Running $candidate
-    Assert ((Owned-Service $baseline).State -eq 'Stopped') 'The candidate started the baseline service.'
-    Assert-SeparatePorts $baseline $candidate
-    Start-Service -Name $baseline.ServiceName
-    Wait-Service $baseline 'Running' 30
-    $baselinePid = (Owned-Service $baseline).ProcessId
-    Assert-BaselineUnchanged $baseline $baselinePid $baselineFiles
-    Assert-SeparateInstances $baseline $candidate
-    Assert-Administration $candidate
-    Assert-InstalledColdStartValidation $candidate
-    Assert-InstalledClientRegistry $candidate
-    Assert-InstalledTokenRotation $candidate
-    Assert-InstalledClientRegistry $candidate
-    Assert-BaselineUnchanged $baseline $baselinePid $baselineFiles
-    $candidateFiles = Snapshot @($candidate.Config, $candidate.Token, $candidate.AdminToken,
-        (Join-Path $candidate.DataRoot 'state\settings.json'),
-        (Join-Path $candidate.DataRoot 'state\secrets.json'),
-        (Join-Path $candidate.DataRoot 'state\client-registry.json'))
-
-    Invoke-Msi $candidate '/x' '05-uninstall-candidate'
-    Wait-Absent $candidate
-    Assert (!(Registered $candidate.ProductCode)) 'Uninstall left a candidate product registration.'
-    Assert (@(Owned-Processes $candidate).Count -eq 0) 'Uninstall left a candidate process.'
-    Assert (!(Test-Path -LiteralPath $candidate.Executable)) 'Uninstall left the candidate executable.'
-    Assert-Snapshot $candidateFiles
-    Assert-BaselineUnchanged $baseline $baselinePid $baselineFiles
-
-    Invoke-Msi $candidate '/i' '06-reinstall-candidate'
-    Assert-Running $candidate
-    Assert-Snapshot $candidateFiles
-    Assert-BaselineUnchanged $baseline $baselinePid $baselineFiles
-} catch { $failure = $_ }
-finally {
-    foreach ($metadata in @($candidate, $baseline)) {
-        if (!$ownedProducts.Contains($metadata.ProductCode)) { continue }
-        try { if (Registered $metadata.ProductCode) { Invoke-Msi $metadata '/x' ('cleanup-' + $metadata.ProductVersion) } }
-        catch { $cleanupFailures.Add($_.Exception.Message) }
-        try {
-            $service = Owned-Service $metadata
-            if ($service -and $service.State -ne 'Stopped') {
-                try { [void](Stop-OwnedService $metadata) }
-                catch { foreach ($process in Owned-Processes $metadata) { Stop-Process -Id $process.ProcessId -Force } }
-            }
-            foreach ($process in Owned-Processes $metadata) { Stop-Process -Id $process.ProcessId -Force }
-            Assert (!(Registered $metadata.ProductCode)) 'Cleanup left a test product registered.'
-            Wait-Absent $metadata
-            foreach ($root in @($metadata.InstallRoot, $metadata.DataRoot)) {
-                if (Test-Path -LiteralPath $root) { Remove-OwnedTree $metadata $root }
-            }
-            Assert (@(Owned-Processes $metadata).Count -eq 0) 'Cleanup left a test process.'
-        } catch { $cleanupFailures.Add($_.Exception.Message) }
-    }
-    @{ Passed = (!$failure -and !$cleanupFailures.Count); Candidate = $candidate; Baseline = $baseline;
-       ScriptSha256 = $scriptSha256; PowerShellVersion = $PSVersionTable.PSVersion.ToString();
-       PowerShellEdition = $PSVersionTable.PSEdition;
-       WindowsBuild = $osInfo.BuildNumber; WindowsProductType = $osInfo.ProductType;
-       CleanupErrors = @($cleanupFailures); Error = "$failure" } |
-        ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $runDir 'result.json') -Encoding UTF8
-    [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($wi)
+$layouts = [ordered]@{}
+$report = [ordered]@{
+    Passed = $false
+    Candidate = @{ ProductCode = $candidate.ProductCode; ProductVersion = $candidate.ProductVersion
+                   ServiceName = $candidate.ServiceName; SHA256 = $candidate.Sha256; Path = $candidate.Path }
+    ScriptSha256 = $scriptSha256
+    PowerShellVersion = $PSVersionTable.PSVersion.ToString()
+    PowerShellEdition = $PSVersionTable.PSEdition
+    WindowsBuild = $osInfo.BuildNumber
+    WindowsProductType = $osInfo.ProductType
+    Scenarios = [ordered]@{}
+    Error = $null
 }
-if ($failure) { throw $failure }
-if ($cleanupFailures.Count) { throw ($cleanupFailures -join [Environment]::NewLine) }
+foreach ($name in @('default', 'custom')) {
+    $layout = $candidate.Clone()
+    Set-ExpectedInstance $layout ($name -eq 'custom')
+    foreach ($path in @($candidate.Path, $output)) {
+        Assert ($path -ne $layout.InstallRoot -and !$path.StartsWith($layout.InstallRoot + '\', [StringComparison]::OrdinalIgnoreCase)) 'Artifacts must be outside the installation directory.'
+    }
+    $layout.LogDirectory = Join-Path $runDir $name
+    $layouts[$name] = $layout
+    $report.Scenarios[$name] = [ordered]@{
+        Status = 'not-run'; InstallRoot = $layout.InstallRoot; LogDirectory = $name
+        Checks = [Collections.Generic.List[string]]::new()
+        CleanupErrors = [Collections.Generic.List[string]]::new()
+        Error = $null
+    }
+}
+[void][IO.Directory]::CreateDirectory($runDir)
+# Both layouts use the same product and service. Serialize acceptance runs on this host.
+$mutex = [Threading.Mutex]::new($false, ('Global\QCopilotsWebSearchMsiAcceptance-' + $candidate.ProductCode))
+$locked = $false
+try {
+    try { $locked = $mutex.WaitOne(0) }
+    catch [Threading.AbandonedMutexException] { $locked = $true }
+    Assert $locked 'Another acceptance run owns this MSI product.'
+    foreach ($name in $layouts.Keys) {
+        Write-Host "Testing $name installation directory"
+        Test-MsiLayout $layouts[$name] $report.Scenarios[$name]
+    }
+    Assert ((Get-FileHash -LiteralPath $candidate.Path -Algorithm SHA256).Hash -eq $expected) 'MSI bytes changed during acceptance.'
+    $report.Passed = $true
+} catch {
+    $report.Error = $_.Exception.Message
+    throw
+} finally {
+    if ($locked) { $mutex.ReleaseMutex() }
+    $mutex.Dispose()
+    [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($wi)
+    $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $runDir 'result.json') -Encoding UTF8
+}
 Write-Host "PASS. Temporary test results: $runDir"

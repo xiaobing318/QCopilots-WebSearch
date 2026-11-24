@@ -1,6 +1,7 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
+import packageMetadata from "../../package.json";
 import {
   readLoginCode,
   type ClientRegistryView,
@@ -11,7 +12,7 @@ import fixture from "./settings.fixture.json";
 
 const csrf = "session-csrf";
 const defaultStatus = {
-  version: "0.2.0",
+  version: packageMetadata.version,
   mcp_url: "https://web-search.vastarmorai.com/mcp",
   listeners: {
     business: { host: "127.0.0.1", port: 3181 },
@@ -569,7 +570,7 @@ it("uses structured settings errors on the status tab without exposing raw messa
   mockService({
     status: {
       ...defaultStatus,
-      settings_error: "raw-legacy-error C:\\private\\settings.json",
+      settings_error: "raw-status-error C:\\private\\settings.json",
       settings_error_detail: {
         code: "internal_error",
         reason: "settings_read_failed",
@@ -588,18 +589,18 @@ it("uses structured settings errors on the status tab without exposing raw messa
   expect(alert).not.toHaveTextContent(
     "The last valid settings are still active.",
   );
-  expect(document.body).not.toHaveTextContent("raw-legacy-error");
+  expect(document.body).not.toHaveTextContent("raw-status-error");
   expect(document.body).not.toHaveTextContent("raw-detail-error");
   expect(document.body).not.toHaveTextContent("C:\\private\\settings.json");
   expect(document.body).not.toHaveTextContent("C:\\sensitive\\runtime.json");
 });
 
-it("keeps legacy status errors generic when the server has no structured settings error", async () => {
+it("shows a generic settings error when status has no structured detail", async () => {
   const user = userEvent.setup();
   mockService({
     status: {
       ...defaultStatus,
-      settings_error: "legacy-raw-error C:\\private\\old-settings.json",
+      settings_error: "raw-status-error C:\\private\\settings.json",
     },
   });
   render(<App />);
@@ -607,6 +608,6 @@ it("keeps legacy status errors generic when the server has no structured setting
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "The settings file could not be loaded. The last valid settings are still active.",
   );
-  expect(document.body).not.toHaveTextContent("legacy-raw-error");
-  expect(document.body).not.toHaveTextContent("C:\\private\\old-settings.json");
+  expect(document.body).not.toHaveTextContent("raw-status-error");
+  expect(document.body).not.toHaveTextContent("C:\\private\\settings.json");
 });

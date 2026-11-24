@@ -145,8 +145,8 @@ Config validatedConfiguration(Json value, const QString &path) {
   Config c{std::move(value), QFileInfo(path).absolutePath().toStdString(),
            QFileInfo(path).absoluteFilePath().toStdString()};
   const auto deployment = packageDirectoryRelease(path);
-  // Older releases can have a different schema. Report ownership before
-  // interpreting their fields, while leaving malformed types to the schema.
+  // Check release ownership before interpreting the configuration's fields.
+  // The schema reports malformed version types.
   if (c.value.is_object()) {
     const auto version = c.value.find("project_version");
     if ((!deployment.isEmpty() && (deployment != QLatin1String(QCWS_VERSION) || version == c.value.end())) ||

@@ -8,7 +8,7 @@
 
 ## 安装版本与端口
 
-MSI 和 DEB 安装包会为每个项目版本注册独立服务。新版本首次安装时会创建自己的部署配置、客户端令牌、管理令牌、设置、搜索源密钥和缓存。运行配置和令牌位于该版本的 `bin/data` 目录，设置、搜索源密钥和缓存位于 `bin/data/state`。将同一版本重新安装到原目录时，会继续使用该版本的数据。先前安装的版本继续使用各自的目录和配置。
+MSI 和 DEB 安装包会为每个项目版本注册独立服务。首次安装时，每个版本都会创建自己的部署配置、客户端令牌、管理令牌、设置、搜索源密钥和缓存。运行配置和令牌位于该版本的 `bin/data` 目录，设置、搜索源密钥和缓存位于 `bin/data/state`。将同一版本重新安装到原目录时，会继续使用该版本的数据。
 
 安装程序优先选择业务、控制和管理监听器的默认回环端口，依次为 3181、3182 和 3183。安装程序会跳过已被占用的端口，以及其他已安装版本配置中记录的端口，即使对应服务当前处于停止状态。选定的端口会写入该版本的运行配置，服务重启时继续使用这些端口。MCP 使用 `business.port`，健康检查和指标使用 `control.port`，设置页使用 `admin.port`。连接时请使用同一版本的令牌。
 
@@ -21,7 +21,7 @@ MSI 和 DEB 安装包会为每个项目版本注册独立服务。新版本首�
 | 配置或请求信息 | 作用 |
 | --- | --- |
 | `business.allowed_hosts` | 服务接受的目标地址，对应 HTTP `Host` 请求头。例如客户端访问 `https://web-search.vastarmorai.com/mcp` 时通常发送 `Host: web-search.vastarmorai.com`。这里填写服务自己的地址，不填写调用方网页的地址。 |
-| `Origin` 请求头 | 表示发起请求的网页来源，例如 `https://chat.vastarmorai.com`。业务服务检查它是否是合法的 HTTP(S) 来源，并返回所需 CORS 响应头，不再按网页域名维护允许列表。 |
+| `Origin` 请求头 | 表示发起请求的网页来源，例如 `https://chat.vastarmorai.com`。业务服务检查它是否是合法的 HTTP(S) 来源，并返回所需的 CORS 响应头。 |
 | `business.public_url` | 供设置页展示和复制的公网 MCP 地址。它不控制授权，不建立 Cloudflare 路由，也不证明公网已经连通。 |
 
 新生成的配置默认包含以下业务设置。安装或初始化选择其他端口时，`port` 和回环 Host 使用实际端口。
@@ -37,9 +37,7 @@ MSI 和 DEB 安装包会为每个项目版本注册独立服务。新版本首�
 }
 ```
 
-`business.host` 仍是本机监听地址，Cloudflare 或其他反向代理负责把公网流量送到它。使用自己的公网域名时，更新 `allowed_hosts` 和 `public_url`，同时配置对应的 DNS 与代理路由。Host 按请求中的实际值匹配，带显式端口的 Host 需要有对应条目。
-
-升级旧配置时，删除 `business.origins`，即使它是空数组也需要删除，然后运行 `--CheckConfig` 并重启服务。程序不会自动删除或迁移该字段。仅删除业务配置中的字段，保留控制和管理监听器原有的 Host、Origin、管理会话和 CSRF 限制。
+`business.host` 是本机监听地址，Cloudflare 或其他反向代理负责把公网流量送到它。使用自己的公网域名时，更新 `allowed_hosts` 和 `public_url`，同时配置对应的 DNS 与代理路由。Host 按请求中的实际值匹配，带显式端口的 Host 需要有对应条目。运行 `--CheckConfig` 后重启服务以应用变更。控制和管理监听器分别校验 Host 与 Origin，管理页写操作还要求有效会话和 CSRF 令牌。
 
 ## 通过 stdio 连接 llama-server
 
@@ -69,9 +67,9 @@ llama.cpp WebUI 中添加 Streamable HTTP 服务器，URL 填部署的 `/mcp` �
 使用 apt 安装发布版 DEB，将 `version` 设为安装包文件名中的版本号。每个安装包都会创建该版本专用的非特权服务账号和 systemd 单元。DEB 要求 `/opt` 归 `root` 所有，且仅允许所有者写入。
 
 ```bash
-version=0.5.0
+version=0.5.1
 package=qcopilots-websearch-$version
-sudo apt install "./${package}_${version}_amd64.deb"
+sudo apt install "./${package}_amd64.deb"
 sudo systemctl status "$package.service"
 ```
 
@@ -117,16 +115,16 @@ MSI 安装 `QCopilotsWebSearch-<version>` 系统服务，运行账号为虚拟�
 如需改用其他目录，请在以管理员身份打开的命令提示符中设置 `INSTALL_ROOT`。程序及其 `bin\data` 目录均位于指定位置。请为不同版本选择各自的安装目录。
 
 ```cmd
-msiexec.exe /i "C:\Downloads\QCopilots-WebSearch-0.5.0-win64.msi" INSTALL_ROOT="C:\Program Files\QCopilots-WebSearch-Custom-0.5.0"
+msiexec.exe /i "C:\Downloads\QCopilots-WebSearch-0.5.1-win64.msi" INSTALL_ROOT="C:\Program Files\QCopilots-WebSearch-Custom-0.5.1"
 ```
 
 本机交互式用户可以读取 `admin.token`，用于登录设置页并管理搜索设置。运行配置、客户端令牌和搜索源密钥各自受文件 ACL 保护。在目标版本安装目录的 `bin` 下运行 `qcopilots-websearch.exe --SettingsUrl`，即可为正在运行的服务生成一次性链接。
 
 请以管理员身份运行 MSI，并阅读安装程序显示的 Apache 许可条款和 Microsoft 运行库条款。安装包的签名状态以发布说明为准，未特别说明时为未签名。在 Windows 的“已安装的应用”中按版本选择要卸载的 MSI。卸载会移除该版本的程序文件和服务，并保留配置和数据。
 
-将便携 ZIP 解压到私有可写目录，每个便携实例使用独立的解压目录。例如，将 `QCopilots-WebSearch-0.5.0-win64.zip` 下载到 `C:\Softwares\QCopilots-WebSearch`，解压后确认 `C:\Softwares\QCopilots-WebSearch\QCopilots-WebSearch-0.5.0-win64\bin\qcopilots-websearch.exe` 存在，避免重复嵌套同名目录。在解压目录运行 `.\bin\qcopilots-websearch.exe`，即可在前台启动服务。
+将便携 ZIP 解压到私有可写目录，每个便携实例使用独立的解压目录。例如，将 `QCopilots-WebSearch-0.5.1-win64.zip` 下载到 `C:\Softwares\QCopilots-WebSearch`，解压后确认 `C:\Softwares\QCopilots-WebSearch\QCopilots-WebSearch-0.5.1-win64\bin\qcopilots-websearch.exe` 存在，避免重复嵌套同名目录。在解压目录运行 `.\bin\qcopilots-websearch.exe`，即可在前台启动服务。
 
-首次启动会创建 `bin\data\runtime.json`，并生成客户端令牌和管理令牌。监听器准备就绪后，终端显示实际的业务、MCP、控制、设置地址、配置和数据路径，以及登录方法。默认业务端口为 3181，控制端口为 3182，设置端口为 3183。若首次初始化选用了其他端口，以启动信息和运行配置为准。服务运行期间，从另一个终端执行 `.\bin\qcopilots-websearch.exe --SettingsUrl`，打开该实例的设置页。
+首次启动会创建 `bin\data\runtime.json`，并生成客户端令牌和管理令牌。监听器准备就绪后，终端显示实际的业务、MCP、控制、设置地址、配置和数据路径，以及登录方法。无参数启动全新的便携实例时，业务、控制和设置端口固定为 3181、3182、3183，任一端口已占用时启动会失败。已有配置使用其中记录的端口。服务运行期间，从另一个终端执行 `.\bin\qcopilots-websearch.exe --SettingsUrl`，打开该实例的设置页。
 
 用 `--ConfigPath FILE` 指定其他配置文件。要初始化自定义路径，请使用 `--InitializeConfig --ConfigPath FILE`。可加上 `--SelectAvailablePorts` 为新配置选择可用的回环端口。新配置默认使用自动搜索，因此可以按需接入私有 SearXNG 实例。
 
@@ -139,7 +137,7 @@ msiexec.exe /i "C:\Downloads\QCopilots-WebSearch-0.5.0-win64.msi" INSTALL_ROOT="
 当 `cloudflared` 和 WebSearch 在同一台 Windows 主机上运行时，连接器可通过回环 HTTP 访问 WebSearch，无需配置源站证书。QGIS 和其他远程客户端通过 HTTPS 访问公网域名。以下以便携 ZIP 和 `search.example.org` 为例，请替换成自己的公网域名。
 
 1. 在解压目录运行 `.\bin\qcopilots-websearch.exe` 完成首次启动。按 Ctrl+C 停止程序后，打开 `bin\data\runtime.json`，确认 `business.host` 为 `127.0.0.1` 并记下 `business.port`。下面假定端口是 3181。如果配置中是其他端口，后续步骤使用实际值。
-2. 在 `business.allowed_hosts` 中保留现有的回环地址（如 `127.0.0.1:3181`），追加 `search.example.org` 和 `search.example.org:443`。将 `business.public_url` 设为 `https://search.example.org/mcp`，让设置页的连接步骤显示可复制的公网 MCP 地址。默认 HTTP 配置没有 `business.tls` 字段。从此前的 HTTPS 配置切换时，移除这一字段。保存文件，运行 `.\bin\qcopilots-websearch.exe --CheckConfig`，检查通过后再无参数启动程序。
+2. 在 `business.allowed_hosts` 中保留现有的回环地址（如 `127.0.0.1:3181`），追加 `search.example.org` 和 `search.example.org:443`。将 `business.public_url` 设为 `https://search.example.org/mcp`，让设置页的连接步骤显示可复制的公网 MCP 地址。使用 HTTP 回源时，配置中应省略 `business.tls`。保存文件，运行 `.\bin\qcopilots-websearch.exe --CheckConfig`，检查通过后再无参数启动程序。
 3. 在 Cloudflare 的 **Networking → Tunnels → 目标隧道 → Routes** 编辑或添加 **Published application**。主机名填公网域名，Path 留空。在 **Service** 中选择 **HTTP**，**URL** 填 `127.0.0.1:3181`。若页面只有 **Service URL** 一栏，填写 `http://127.0.0.1:3181`。只发布业务端口，控制和管理端口供本机使用。[Cloudflare 路由设置](https://developers.cloudflare.com/tunnel/get-started/#publish-an-application)
 4. 保持服务运行，在解压目录另开 PowerShell 进行公网验证。下列第一条命令应显示 `401`，随后的初始化请求应显示协商的协议版本。示例使用首次启动生成的业务令牌。如果已通过页面或 CLI 轮换该令牌，请将 `$token` 设为此前保存的新 Bearer。轮换不会更新 `client.token`，新保存的授权码可在本机管理页选择该客户端后按需查看或复制。
 
@@ -161,7 +159,7 @@ Invoke-WebRequest -UseBasicParsing -Method Delete -Uri 'https://search.example.o
 
 #### 可选的 HTTPS 回源
 
-从 0.2.2 起，可按下列步骤在同一回环业务端口启用 HTTPS。示例使用 `https://127.0.0.1:3181`，公网域名仍为 `search.example.org`。
+可在同一回环业务端口启用 HTTPS。示例使用 `https://127.0.0.1:3181` 和公网域名 `search.example.org`。
 
 1. 以目标版本初始化配置。在新解压目录运行 `.\bin\qcopilots-websearch.exe --InitializeConfig --ConfigPath .\bin\data\runtime.json`。确认 3181 可由此实例独占，已有实例保留自己的版本目录和数据。
 2. 准备用于 TLS 服务端身份验证的 PEM 证书链和配套的无口令 PEM 私钥。证书须包含 IP 类型的 SAN `127.0.0.1`。证书链将叶证书放在首位，随后附上中间证书。用 Windows ACL 将私钥读取权限限于运行 WebSearch 的账号和管理人员。为 `cloudflared` 服务账号提供私有根 CA **公钥证书**的可读路径。
@@ -236,7 +234,7 @@ openssl verify -x509_strict -purpose sslserver -verify_ip 127.0.0.1 -CAfile orig
 2. **保存并生效**：核对客户端和变更，点击“保存并生效”。成功后新码立即可用，替换操作的旧码随即不能用于新请求。
 3. **复制连接资料**：复制已生效的 Bearer。其他 MCP 客户端还可复制服务地址，QCopilots 则保留已经登记的服务地址，在 MCP Servers 页面启用 Authorization 并粘贴 Bearer。停留在本步骤时可以重复复制，配置完成后点击“完成”。
 
-客户端 ID 使用 1 至 64 个英文字母、数字、点、下划线或连字符。授权码接受 1 至 8192 个不含空格的可见 ASCII 字符，可以包含 `/`，例如 `xbyang/qcopilots-websearch`。该值是业务 Bearer，与管理页登录使用的 `admin.token` 分开。
+客户端 ID 使用 1 至 64 个英文字母、数字、点、下划线或连字符。授权码接受 1 至 8192 个不含空格的可见 ASCII 字符，可以包含 `/`。该值是业务 Bearer，与管理页登录使用的 `admin.token` 分开。
 
 “随机生成”使用密码学安全随机源生成 64 位小写十六进制授权码。“从字符串生成”将非空输入原文编码为 UTF-8，再计算 SHA-256 并输出 64 位小写十六进制字符。相同输入始终得到相同结果，前后空格、换行、大小写和 Unicode 字符均参与计算，不执行去空格或规范化。源字符串不发送到服务端，也不写入浏览器存储，生成后清空。生成只填写第一步的授权码，必须完成第二步保存才能生效。
 
@@ -244,7 +242,7 @@ openssl verify -x509_strict -purpose sslserver -verify_ip 127.0.0.1 -CAfile orig
 
 新增、更新和删除成功后立即影响后续请求，并在重启后保留。列表仅显示客户端 ID 和凭据来源，不返回授权码原文或摘要。更新已有客户端的授权码会保留其缓存身份，删除后重新创建同名客户端则使用新的身份，不能继承旧网页快照或 MCP 会话。删除最后一个业务客户端后，业务访问会被拒绝，管理员仍可登录设置页恢复授权。
 
-首次持久化授权变更时，程序将运行配置中的客户端完整迁移到 `settings.directory` 下的 `client-registry.json`，默认位置为 `bin/data/state/client-registry.json`。此后该注册表是客户端凭据的唯一来源，修改 `runtime.json` 的 `clients` 不会覆盖它。已有文件和环境变量来源保留。新手动授权将原文和 SHA-256 摘要原子保存到受文件权限保护的注册表，支持管理员按需查看，认证仍使用摘要。注册表容量上限为 2 MiB。备份时保留整个私有数据目录并保护其访问权限，不将原文注册表提交到版本控制或诊断日志。
+`runtime.json` 的 `clients` 提供初始授权列表。第一次持久化授权变更时，程序用完整列表和本次变更创建 `settings.directory/client-registry.json`，默认位于 `bin/data/state/client-registry.json`。此后以注册表为准，文件和环境变量来源均可继续使用。管理页和 CLI 保存手动授权时，将原文和 SHA-256 摘要原子写入受文件权限保护的注册表，供管理员按需查看，认证使用摘要。注册表容量上限为 2 MiB。备份时保留整个私有数据目录并保护其访问权限，不将原文注册表提交到版本控制或诊断日志。
 
 CLI 也可生成或登记令牌。两条命令都会在标准错误输出中请求确认，需要输入 `y` 或 `yes`。设置令牌时，从标准输入读取 1 至 8192 个可见 ASCII 字符，并在交互式终端中隐藏输入，再在下一行确认。`--GenerateToken` 生成 64 个十六进制字符的随机业务令牌，并在保存后将新令牌写入标准输出。CLI 修改保留重启生效的方式。
 
@@ -255,12 +253,12 @@ qcopilots-websearch --ConfigPath FILE --SetToken [--ClientId ID]
 
 CLI 默认客户端 ID 为 `local`。对于新 ID，命令会添加条目。对于已有 ID，命令会替换凭据并保留其缓存身份。运行中的服务不会自动加载 CLI 写入，设置页会提示待重启的变更。重启后新授权生效，被替换的旧令牌失效。也可以在页面重新读取最新授权列表后执行保存，该次网页写入会一起应用此前待加载的 CLI 变更。
 
-通过安全渠道将令牌交给客户端。新网页和 CLI 保存的授权码可在本机管理页重新显示或复制。旧版本只有摘要的记录无法恢复原文，本版本不自动迁移或重置它们。文件或环境变量来源读取失败会明确提示，外部更新尚未进入运行快照时会标记未生效。单独运行 `--GenerateToken` 时，命令只生成并输出令牌。
+通过安全渠道将令牌交给客户端。通过管理页或 CLI 保存的授权码可在本机管理页再次显示或复制。仅配置 SHA-256 摘要的凭据可用于认证，替换授权码后即可查看新码。文件或环境变量来源读取失败会明确提示，外部更新尚未进入运行快照时会标记未生效。单独运行 `--GenerateToken` 时，命令只生成并输出令牌。
 
 对于 DEB 安装，以管理员身份生成凭据，再用该版本的服务账号检查配置并重启服务。
 
 ```bash
-version=0.5.0
+version=0.5.1
 package=qcopilots-websearch-$version
 executable="/opt/$package/bin/qcopilots-websearch"
 config_path="/opt/$package/bin/data/runtime.json"
@@ -273,7 +271,7 @@ sudo systemctl restart "$package.service"
 对于 MSI 安装，将 `installRoot` 设为安装程序实际使用的目录，然后在以管理员身份打开的 PowerShell 中运行以下命令。便携版请指定其运行配置路径，并省略 `--ServiceName`。
 
 ```powershell
-$version = '0.5.0'
+$version = '0.5.1'
 $serviceName = "QCopilotsWebSearch-$version"
 $installRoot = Join-Path $env:ProgramFiles "QCopilots-WebSearch-$version"
 $executable = Join-Path $installRoot 'bin\qcopilots-websearch.exe'
@@ -295,7 +293,9 @@ Restart-Service -Name $serviceName
 
 ## 运行时证书信任与代理
 
-服务访问搜索源和网页时，出站 HTTPS 使用平台信任库。请在 HTTPS 端点配置完整的服务器证书链。Windows 可通过 AIA 获取中间证书，Linux 则使用端点提供的证书链和本机信任库。两种平台均省略在线 CRL 和 OCSP 查询。运行时请求直接连接目标地址，请配置可直接访问的 SearXNG 端点。构建配置中的代理仅用于下载依赖。[运行时架构](architecture.md)
+服务访问搜索源和网页时，出站 HTTPS 默认使用平台信任库。请在 HTTPS 端点配置完整的服务器证书链。Windows 可通过 AIA 获取中间证书，Linux 则使用端点提供的证书链和本机信任库。两种平台均省略在线 CRL 和 OCSP 查询。运行时请求直接连接目标地址，构建配置中的代理仅用于下载依赖。[运行时架构](architecture.md)
+
+部署者可在 `runtime.json` 顶层的 `provider` 对象中指定私有 SearXNG 的 `url`、`ca_file` 及 `token_file` 或 `token_env`。只有“搜索设置”中的 SearXNG 端点与 `provider.url` 完全匹配时，服务才使用该 CA 和部署凭据。若还在管理页为 SearXNG 保存了密钥，则优先使用管理页的密钥。
 
 ## QGIS
 
@@ -316,11 +316,11 @@ Restart-Service -Name $serviceName
 3. 启用 **Authorization**，在 **Bearer** 中填写服务管理员提供的业务授权码并保存。
 4. 连接并确认能发现四个 WebSearch 工具，然后依次调用状态、搜索、网页打开和页内查找。
 
-插件默认将这些请求转发到 `https://web-search.vastarmorai.com/mcp`。初始化、工具列表、工具调用、取消和会话关闭均使用远端 MCP 接口，客户端 Bearer 随请求传递。正常使用不需要 `QCOPILOTS_WEBSEARCH_BACKEND_TOKEN`、令牌文件、额外后端配置文件或搜索审批。客户端应保管授权码，插件不会用本机管理凭据替代它。
+插件默认将这些请求转发到 `https://web-search.vastarmorai.com/mcp`。初始化、工具列表、工具调用、取消和会话关闭均使用远端 MCP 接口，客户端 Bearer 随请求传递。客户端应保管自己的业务授权码。
 
 也可以在页面中新增自定义 Server URL，直接填写公网 `https://web-search.vastarmorai.com/mcp` 并启用业务 Bearer。此时浏览器直接发出请求，由公网服务处理 CORS。使用 Manager 虚拟地址时，请求经 QGIS 原生桥和本机插件转发，插件不把页面的 Origin 发送到公网。两种路径均要求公网 Host 被允许且 Bearer 有效，`business.public_url` 只影响设置页展示，不决定实际请求发往哪里。
 
-部署者使用其他公网域名时，可以通过已有的 `QCOPILOTS_WEBSEARCH_CONFIG` 或 `<QCOPILOTS_HOME>/web_search/config.json` 将 `backend_url` 指向实际的 HTTPS `/mcp` 地址。旧配置中没有路径的 HTTPS 源地址会在内存中补上 `/mcp`，无需修改旧文件。默认公网地址不需要这一额外配置。
+部署者使用其他公网域名时，可通过 `QCOPILOTS_WEBSEARCH_CONFIG` 指定配置文件，或使用 `<QCOPILOTS_HOME>/web_search/config.json`。将 `backend_url` 设为实际的 HTTPS `/mcp` 地址。只填写 HTTPS 源地址时，插件会在请求时补上 `/mcp`。
 
 <a name="start-and-troubleshoot"></a>
 

@@ -99,10 +99,10 @@ int main(int argc, char **argv) {
     require(qws::businessMcpUrl(endpoint) == "https://web-search.vastarmorai.com/mcp",
             "New configurations must advertise the default public MCP endpoint.");
     qws::validateSchema(qws::readSchema("runtime"), config.value);
-    auto removedBusinessOption = config.value;
-    removedBusinessOption["business"]["origins"] = qws::Json::array();
+    auto businessWithOrigins = config.value;
+    businessWithOrigins["business"]["origins"] = qws::Json::array();
     requireError("invalid_argument",
-                 [&] { qws::validateSchema(qws::readSchema("runtime"), removedBusinessOption); });
+                 [&] { qws::validateSchema(qws::readSchema("runtime"), businessWithOrigins); });
     const auto requireConfigurationError = [](const qws::Json &value, const QString &path,
                                              const char *diagnostic) {
       require(QDir().mkpath(QFileInfo(path).absolutePath()), "Cannot create a configuration fixture directory.");
@@ -122,21 +122,25 @@ int main(int argc, char **argv) {
       throw std::runtime_error("Expected a configuration error.");
     };
     const auto runtimePath = QDir(temporary.path()).filePath("runtime.json");
-    auto previousRelease = removedBusinessOption;
-    previousRelease["project_version"] = "0.2.0";
-    requireConfigurationError(previousRelease, runtimePath, "different project release");
-    requireConfigurationError(qws::Json{{"project_version", "0.2.0"}}, runtimePath, "different project release");
-    requireConfigurationError(removedBusinessOption, runtimePath, "does not match its schema");
-    for (const auto *layout : {"qcopilots-websearch-0.2.0/runtime.json", "qcopilots-websearch-0.2.0/service.json",
-                               "QCopilots-WebSearch-0.2.0-win64/bin/data/runtime.json"})
-      requireConfigurationError(removedBusinessOption, QDir(temporary.path()).filePath(layout),
+    const auto version = config.value.at("project_version").get<std::string>();
+    const auto otherVersion = "1" + version;
+    auto foreignConfig = businessWithOrigins;
+    foreignConfig["project_version"] = otherVersion;
+    requireConfigurationError(foreignConfig, runtimePath, "different project release");
+    requireConfigurationError(qws::Json{{"project_version", otherVersion}}, runtimePath,
+                              "different project release");
+    requireConfigurationError(businessWithOrigins, runtimePath, "does not match its schema");
+    for (const auto *layout : {"qcopilots-websearch-%1/runtime.json", "qcopilots-websearch-%1/service.json",
+                               "QCopilots-WebSearch-%1-win64/bin/data/runtime.json"}) {
+      const auto relativePath = QString::fromLatin1(layout).arg(QString::fromStdString(otherVersion));
+      requireConfigurationError(businessWithOrigins, QDir(temporary.path()).filePath(relativePath),
                                 "different project release");
-    auto unversionedPackage = removedBusinessOption;
+    }
+    auto unversionedPackage = businessWithOrigins;
     unversionedPackage.erase("project_version");
     requireConfigurationError(unversionedPackage,
                               QDir(temporary.path()).filePath(
-                                  QString::fromStdString("qcopilots-websearch-" +
-                                      config.value.at("project_version").get<std::string>() + "/runtime.json")),
+                                  QString::fromStdString("qcopilots-websearch-" + version + "/runtime.json")),
                               "different project release");
     for (const auto &invalidType : {qws::Json(), qws::Json::array(), qws::Json("invalid"),
                                     qws::Json(1), qws::Json(false)})
@@ -191,26 +195,41 @@ int main(int argc, char **argv) {
     qws::validateSchema(qws::readSchema("runtime"), assigned);
     require(qws::adminConfiguration(config, false).port == 3183,
             "New configurations must explicitly select administration port 3183.");
-    auto legacy = config;
-    legacy.value.erase("admin");
-    require(qws::adminConfiguration(legacy, false).port == 8091,
-            "Legacy configurations without administration options retain port 8091.");
-    legacy.value["admin"] = {{"port", 8123}};
-    require(qws::adminConfiguration(legacy, false).port == 8123,
-            "An existing explicit administration port must be preserved.");
+    auto custom = config;
+    custom.value.erase("admin");
+    require(qws::adminConfiguration(custom, false).port == 8091,
+            "Omitting the administration options selects port 8091.");
+    custom.value["admin"] = {{"port", 8123}};
+    require(qws::adminConfiguration(custom, false).port == 8123,
+            "An explicit administration port must be used.");
     qws::SettingsStore fresh(config);
     auto initial = fresh.current();
     require(fresh.provider(*initial).id == "auto", "New installs default to auto.");
-    require(!initial->value["search_without_asking"].get<bool>(), "Confirmation defaults to on.");
-    config.value["provider"] = {{"url", "http://127.0.0.1:8818/search"}, {"engines", {"bing"}}};
+    require(!initial->value["search_without_asking"].get<bool>(), "search_without_asking must default to false.");
+    qputenv("QCWS_TEST_SEARXNG_TOKEN", "runtime-search-token");
+    config.value["provider"] = {{"url", "http://127.0.0.1:8818/search"}, {"engines", {"bing"}},
+                                {"token_env", "QCWS_TEST_SEARXNG_TOKEN"}, {"ca_file", "searxng-ca.pem"}};
     qws::SettingsStore settings(config);
-    const auto old = settings.current();
-    require(settings.provider(*old).id == "searxng", "Legacy configuration must select SearXNG.");
-    require(settings.provider(*old).engines == std::vector<std::string>{"bing"}, "Legacy engines must survive.");
-    auto view = settings.update({{"search", {{"provider", "brave"}}}}, old->revision);
-    require(view["revision"] != old->revision, "Changing settings must change the revision.");
-    require(settings.provider(*old).id == "searxng", "Snapshots must remain immutable.");
-    requireError("revision_conflict", [&] { settings.update(qws::Json::object(), old->revision); });
+    const auto initialSearxng = settings.current();
+    const auto source = settings.provider(*initialSearxng);
+    require(source.id == "searxng", "A runtime provider selects SearXNG.");
+    require(source.engines == std::vector<std::string>{"bing"},
+            "SearXNG must use the configured runtime engines.");
+    require(source.key == "runtime-search-token" && source.caFile == config.path("searxng-ca.pem"),
+            "The runtime SearXNG endpoint must use its configured credential and CA.");
+    settings.setKey("searxng", "saved-search-key");
+    require(settings.provider(*settings.current()).key == "saved-search-key",
+            "A saved SearXNG key must take precedence over the runtime credential.");
+    settings.clearKey("searxng");
+    const auto edited = settings.update({{"search", {{"searxng", {{"url", "http://127.0.0.1:8819/search"}}}}}},
+                                        initialSearxng->revision);
+    const auto otherSource = settings.provider(*settings.current());
+    require(otherSource.key.empty() && otherSource.caFile.empty(),
+            "A different SearXNG URL must not inherit the runtime credential or CA.");
+    auto view = settings.update({{"search", {{"provider", "brave"}}}}, edited.at("revision"));
+    require(view["revision"] != initialSearxng->revision, "Changing settings must change the revision.");
+    require(settings.provider(*initialSearxng).id == "searxng", "Snapshots must remain immutable.");
+    requireError("revision_conflict", [&] { settings.update(qws::Json::object(), initialSearxng->revision); });
     requireError("invalid_argument", [&] { settings.update({{"unexpected", true}}, view["revision"]); });
     view = settings.setKey("brave", "example-provider-key");
     require(view["providers"]["brave"]["key_set"] == true, "Key state must be reported.");
@@ -251,17 +270,17 @@ int main(int argc, char **argv) {
     for (const auto *id : {"perplexity", "deepseek"}) {
       const auto key = std::string("example-") + id + "-key";
       view = reopened.update({{"search", {{"provider", id}}}}, reopened.current()->revision);
-      require(view["search"]["provider"] == id, "New providers can be selected.");
-      require(view["providers"][id]["key_set"] == false, "New providers start without a key.");
+      require(view["search"]["provider"] == id, "The configured search provider must be selected.");
+      require(view["providers"][id]["key_set"] == false, "A provider without a saved key must report it.");
       require(reopened.policy(*reopened.current())["provider_ready"] == false, "A key is required.");
       view = reopened.setKey(id, key);
       qws::validateSchema(qws::readSchema("settings-view"), view);
-      require(view["providers"][id]["key_set"] == true, "New provider key state must be reported.");
-      require(view.dump().find(key) == std::string::npos, "Settings must not expose new provider keys.");
+      require(view["providers"][id]["key_set"] == true, "A saved provider key must be reported as present.");
+      require(view.dump().find(key) == std::string::npos, "Settings must not expose provider keys.");
       qws::SettingsStore persisted(config);
-      require(persisted.provider(*persisted.current()).key == key, "The new provider key must persist.");
+      require(persisted.provider(*persisted.current()).key == key, "The provider key must persist.");
       require(persisted.policy(*persisted.current())["provider_ready"] == true, "A keyed provider is ready.");
-      require(reopened.clearKey(id)["providers"][id]["key_set"] == false, "New provider keys can be cleared.");
+      require(reopened.clearKey(id)["providers"][id]["key_set"] == false, "Provider keys can be cleared.");
     }
 
     requireReason("revision_conflict", "settings_revision_conflict", [&] {
@@ -282,7 +301,7 @@ int main(int argc, char **argv) {
     });
     reopened.reloadIfChanged();
     require(reopened.error().empty() && reopened.errorDetails().is_null(),
-            "Valid restored files must clear both legacy and detailed diagnostics.");
+            "Valid restored files must clear the settings error and its structured detail.");
 
     QFile invalidSchema(QDir(temporary.path()).filePath("state/settings.json"));
     const QByteArray invalidSettings = R"({"schema_version":1,"unexpected":"diagnostic-secret-sentinel"})";

@@ -43,7 +43,7 @@ class Fixture:
         for label, port in (("business", self.business), ("control", self.control)):
             config[label].update(port=port, allowed_hosts=[f"127.0.0.1:{port}"])
         config["admin"] = {"enabled": True, "port": self.admin}
-        config["clients"].append({"id": "legacy-env", "token_env": "QCWS_REGISTRY_TEST_TOKEN"})
+        config["clients"].append({"id": "environment-client", "token_env": "QCWS_REGISTRY_TEST_TOKEN"})
         self.runtime.write_text(json.dumps(config), encoding="utf-8")
         self.runtime_bytes = self.runtime.read_bytes()
         self.runtime_mode = stat.S_IMODE(self.runtime.stat().st_mode)
@@ -191,12 +191,12 @@ def verify_body_id_routes(fixture):
 def verify_crud(fixture):
     manual = "xbyang/qcopilots-websearch"
     replacement = "rotated/" + secrets.token_hex(16)
-    initial = {"local": "file", "legacy-env": "environment"}
+    initial = {"local": "file", "environment-client": "environment"}
     with fixture.running():
         view = fixture.view()
         require_sources(view, initial)
         fixture.reveal("local", fixture.file_token)
-        fixture.reveal("legacy-env", fixture.environment_token)
+        fixture.reveal("environment-client", fixture.environment_token)
         require(not view["pending_restart"], "Inherited credentials unexpectedly need a restart")
         require(request(fixture.admin, "GET", API + "/clients")[0] == 401,
                 "Client list did not require an administrator session")
@@ -213,7 +213,7 @@ def verify_crud(fixture):
         require(fixture.probe(manual)[0] == 200, "A short custom token was not immediately usable")
         fixture.reveal("browser", manual)
         for token in (fixture.file_token, fixture.environment_token):
-            require(fixture.probe(token)[0] == 200, "Migration broke an inherited credential")
+            require(fixture.probe(token)[0] == 200, "Creating the registry disabled a configured credential")
         require(fixture.admin_request("POST", body=body)[0] == 409,
                 "A stale revision was allowed to overwrite the registry")
         current = added["revision"]
@@ -232,7 +232,7 @@ def verify_crud(fixture):
                     "An error response exposed a client credential")
         for method, client_id, duplicate_token, owner in (
             ("POST", "duplicate-file", fixture.file_token, "local"),
-            ("POST", "duplicate-env", fixture.environment_token, "legacy-env"),
+            ("POST", "duplicate-env", fixture.environment_token, "environment-client"),
             ("PUT", "browser", fixture.file_token, "local"),
             ("PUT", "local", manual, "browser"),
         ):
@@ -276,7 +276,6 @@ def verify_crud(fixture):
         response = json.dumps(fixture.view())
         require(all(value not in response for value in (manual, replacement, digest(manual), digest(replacement))),
                 "The client view exposed a credential or digest")
-        # Existing path-based PUT and DELETE calls above remain compatibility coverage.
         verify_body_id_routes(fixture)
 
     with fixture.running():
@@ -305,7 +304,7 @@ def verify_cli_pending(fixture):
         with ThreadPoolExecutor(max_workers=2) as pool:
             list(pool.map(enroll, tokens.items()))
         pending = fixture.view()
-        require_sources(pending, {"local": "file", "legacy-env": "environment"} |
+        require_sources(pending, {"local": "file", "environment-client": "environment"} |
                         {name: "manual" for name in tokens})
         require(pending["pending_restart"], "CLI changes were not reported as pending")
         for name, token in tokens.items():
@@ -449,13 +448,14 @@ def verify_reveal(fixture):
         try:
             del stored["token_value"]
             fixture.registry.write_text(json.dumps(document), encoding="utf-8")
-            old = fixture.view()
-            require(not next(item for item in old["clients"] if item["id"] == "visible")["can_reveal"],
+            digest_only = fixture.view()
+            require(not next(item for item in digest_only["clients"] if item["id"] == "visible")["can_reveal"],
                     "A hash-only record was incorrectly described as recoverable")
-            status, _, result = fixture.admin_request("POST", "/reveal", {"id": "visible", "revision": old["revision"]})
+            status, _, result = fixture.admin_request("POST", "/reveal",
+                                                      {"id": "visible", "revision": digest_only["revision"]})
             require(status == 400 and result["error"].get("reason") == "credential_not_recoverable" and
                     fixture.probe(token)[0] == 200, "Hash-only reveal changed authentication or hid its cause")
-            require(fixture.command("--CheckConfig").returncode == 0, "Hash-only credentials no longer authenticate")
+            require(fixture.command("--CheckConfig").returncode == 0, "A valid digest-only record failed validation")
             stored["token_value"] = "incorrect/" + secrets.token_hex(24)
             fixture.registry.write_text(json.dumps(document), encoding="utf-8")
             status, _, result = fixture.admin_request("POST", "/reveal",

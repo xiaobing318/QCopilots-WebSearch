@@ -196,7 +196,7 @@ std::string ProviderConfig::fingerprint() const {
 std::string settingsDirectory(const Config &config) {
   std::string defaultDirectory = "state";
 #ifndef _WIN32
-  // systemd supplies this also for installations retaining their old conffile.
+  // systemd sets STATE_DIRECTORY when the unit declares a state directory.
   const auto stateDirectory = qEnvironmentVariable("STATE_DIRECTORY");
   if (QDir::isAbsolutePath(stateDirectory) && !stateDirectory.contains(':'))
     defaultDirectory = stateDirectory.toStdString();
@@ -206,12 +206,12 @@ std::string settingsDirectory(const Config &config) {
 
 SettingsStore::SettingsStore(Config config) : config_(std::move(config)), directory_(settingsDirectory(config_)) {
   defaults_ = defaultSettings();
-  if (const auto legacy = config_.value.find("provider"); legacy != config_.value.end()) {
+  if (const auto runtimeProvider = config_.value.find("provider"); runtimeProvider != config_.value.end()) {
     defaults_["search"]["provider"] = "searxng";
-    defaults_["search"]["searxng"]["url"] = legacy->at("url");
+    defaults_["search"]["searxng"]["url"] = runtimeProvider->at("url");
     defaults_["search"]["searxng"]["engines"] =
-        legacy->value("engines", defaults_["search"]["searxng"]["engines"]);
-    legacyToken_ = config_.secret(*legacy, false);
+        runtimeProvider->value("engines", defaults_["search"]["searxng"]["engines"]);
+    runtimeSearxngToken_ = config_.secret(*runtimeProvider, false);
   }
   try {
     loadSnapshot();
@@ -235,11 +235,11 @@ ProviderConfig SettingsStore::provider(const SettingsSnapshot &settings, std::st
   if (result.id == "searxng") {
     result.url = search["searxng"]["url"];
     result.engines = search["searxng"]["engines"].get<std::vector<std::string>>();
-    if (const auto legacy = config_.value.find("provider");
-        legacy != config_.value.end() && legacy->at("url") == result.url) {
-      result.caFile = config_.path(legacy->value("ca_file", ""));
+    if (const auto runtimeProvider = config_.value.find("provider");
+        runtimeProvider != config_.value.end() && runtimeProvider->at("url") == result.url) {
+      result.caFile = config_.path(runtimeProvider->value("ca_file", ""));
       if (result.key.empty())
-        result.key = legacyToken_;
+        result.key = runtimeSearxngToken_;
     }
   }
   return result;

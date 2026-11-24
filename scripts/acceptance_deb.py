@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Test release-specific DEB installations on a fresh disposable Ubuntu systemd VM."""
+"""Test a candidate DEB on a fresh disposable Ubuntu systemd runner."""
 import argparse
+from contextlib import closing
+import grp
 import hashlib
 import http.client
-from itertools import combinations
 import json
 import os
 from pathlib import Path
@@ -14,7 +15,6 @@ import shutil
 import sqlite3
 import stat
 import subprocess
-import tarfile
 import tempfile
 import time
 import urllib.error
@@ -55,29 +55,8 @@ def apt(*args, check=True):
     return run("apt-get", "-y", "-o", "DPkg::Lock::Timeout=60", *args, check=check, timeout=600)
 
 
-def package_exec_start(archive, unit):
-    member_name = f"usr/lib/systemd/system/{unit}"
-    content = None
-    with subprocess.Popen(["dpkg-deb", "--fsys-tarfile", str(archive)], env=ENV, stdout=subprocess.PIPE) as process:
-        with tarfile.open(fileobj=process.stdout, mode="r|") as files:
-            for member in files:
-                if member.name.removeprefix("./") != member_name:
-                    continue
-                require(content is None and member.isfile() and member.size <= 16384, "Unsafe package unit")
-                with files.extractfile(member) as source:
-                    content = source.read().decode("utf-8")
-        # tarfile may finish at EOF markers before dpkg closes its output.
-        while process.stdout.read(65536):
-            pass
-        require(process.wait(timeout=30) == 0, "Could not read package unit")
-    require(content is not None, "Expected a packaged service unit")
-    command = [line.removeprefix("ExecStart=") for line in content.splitlines() if line.startswith("ExecStart=")]
-    require(len(command) == 1, "Expected a single package service startup command")
-    return command[0]
-
-
 class Installation:
-    def __init__(self, archive, expected_sha256, *, allow_legacy=False):
+    def __init__(self, archive, expected_sha256):
         require(re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is not None, "Invalid expected SHA-256")
         require(archive.is_file() and sha(archive) == expected_sha256, "Package SHA-256 mismatch")
         self.archive = archive
@@ -85,27 +64,26 @@ class Installation:
         self.version = metadata(archive, "Version")
         require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", self.version) is not None, "Wrong version format")
         self.name = f"{APP_NAME}-{self.version}"
+        require(archive.name == f"{self.name}_amd64.deb", "Unexpected DEB filename")
         require(metadata(archive, "Package") == self.name and metadata(archive, "Architecture") == "amd64",
                 "Wrong package identity")
         self.unit = self.name + ".service"
         self.account = "qcws-" + hashlib.sha256(self.version.encode("ascii")).hexdigest()[:24]
         self.app = Path("/opt") / self.name
         self.exe = self.app / "bin" / APP_NAME
-        self.legacy_roots = (Path("/etc") / self.name, Path("/var/lib") / self.name)
-        adjacent = self.exe.parent / "data"
-        legacy_config, legacy_state = self.legacy_roots
-        exec_start = package_exec_start(archive, self.unit)
-        self.legacy = exec_start == f"{self.exe} --ConfigPath {legacy_config / 'runtime.json'}"
-        if self.legacy:
-            require(allow_legacy, "The candidate must use the executable-adjacent data layout")
-            self.data, self.state = legacy_config, legacy_state
-        else:
-            require(exec_start == f"{self.exe} --ConfigPath {adjacent / 'runtime.json'}",
-                    "The package startup command does not use the expected runtime path")
-            self.data, self.state = adjacent, adjacent / "state"
+        self.data = self.exe.parent / "data"
+        self.state = self.data / "state"
         self.config = self.data / "runtime.json"
         self.tokens = (self.data / "client.token", self.data / "admin.token")
         self.db = self.state / "cache/cache-v1.sqlite"
+        self.installed_ids = None
+
+    def service_ids(self):
+        entry = pwd.getpwnam(self.account)
+        require(entry.pw_uid > 0 and entry.pw_gid > 0 and entry.pw_dir == str(self.state)
+                and grp.getgrnam(self.account).gr_gid == entry.pw_gid,
+                "Unexpected service account, group or home directory")
+        return entry.pw_uid, entry.pw_gid
 
     def package_state(self):
         result = run("dpkg-query", "-W", "-f=${Status}\\n${Version}", self.name, check=False)
@@ -114,9 +92,20 @@ class Installation:
     def install(self, reinstall=False):
         run("systemctl", "reset-failed", self.unit, check=False)
         options = ["--reinstall"] if reinstall else []
-        apt("install", "--no-install-recommends", *options, self.archive)
+        result = apt("install", "--no-install-recommends", *options, self.archive, check=False)
+        if self.installed_ids is None:
+            try:
+                self.installed_ids = self.service_ids()
+            except KeyError:
+                require(result.returncode != 0, "Configured package did not create the service account and group")
+        require(result.returncode == 0, "Package installation failed")
         require(self.package_state() == ["install ok installed", self.version],
                 "Package was not configured at the expected version")
+        require(self.service_ids() == self.installed_ids, "Installation changed the service account identity")
+        unit = (Path("/usr/lib/systemd/system") / self.unit).read_text()
+        require([line for line in unit.splitlines() if line.startswith("ExecStart=")]
+                == [f"ExecStart={self.exe} --ConfigPath {self.config}"],
+                "The installed unit uses an unexpected runtime path")
 
     def active(self):
         return run("systemctl", "is-active", "--quiet", self.unit, check=False).returncode == 0
@@ -160,7 +149,6 @@ class Installation:
                     "Expected an assigned loopback endpoint")
             ports.add(port)
         require(len(ports) == 3, "Version's listener ports overlap")
-        return ports
 
 
 def control_request(installation, token=None):
@@ -196,9 +184,6 @@ def health(installation):
     process = installation.pid()
     require(installation.active() and process > 0, "Health did not come from systemd service")
     account = pwd.getpwnam(installation.account)
-    inactive_roots = (installation.exe.parent / "data",) if installation.legacy else installation.legacy_roots
-    require(all(not path.exists() and not path.is_symlink() for path in inactive_roots),
-            "Installation generated data outside its own expected layout")
     for directory, owner, mode in ((installation.data, 0, 0o750),
                                    (installation.state, account.pw_uid, 0o700)):
         info = directory.lstat()
@@ -211,12 +196,8 @@ def health(installation):
                 "Program files must remain protected from service writes")
     protect = run("systemctl", "show", installation.unit, "-p", "ProtectSystem", "--value").stdout.strip()
     require(protect == "strict", "Service must retain the filesystem sandbox")
-    if installation.legacy:
-        directory = run("systemctl", "show", installation.unit, "-p", "StateDirectory", "--value").stdout.strip()
-        require(directory == installation.name, "Legacy service did not retain its own state directory")
-    else:
-        read_write = run("systemctl", "show", installation.unit, "-p", "ReadWritePaths", "--value").stdout.split()
-        require(read_write == [str(installation.state)], "Service must write only to its own version state")
+    read_write = run("systemctl", "show", installation.unit, "-p", "ReadWritePaths", "--value").stdout.split()
+    require(read_write == [str(installation.state)], "Service must write only to its own state directory")
     for token_path in installation.tokens:
         info = token_path.stat()
         require(not token_path.is_symlink() and stat.S_ISREG(info.st_mode)
@@ -244,7 +225,7 @@ def preserved(expected):
             "Configuration, token or retained file changed")
 
 
-def preflight(args, installations):
+def preflight(args, installation):
     require(args.DisposableMachine and os.geteuid() == 0, "Requires root and disposable VM opt-in")
     release = dict(line.split("=", 1) for line in Path("/etc/os-release").read_text().splitlines() if "=" in line)
     require(release.get("ID", "").strip('"') == "ubuntu"
@@ -253,21 +234,25 @@ def preflight(args, installations):
     require(Path("/run/systemd/system").is_dir()
             and Path("/proc/1/comm").read_text().strip() == "systemd", "Requires systemd as PID 1")
     require(not run("dpkg", "--audit").stdout.strip(), "Another package needs repair")
-    candidate, *baselines = installations
-    require(len({item.version for item in installations}) == len(installations), "Expected distinct package versions")
-    for baseline in baselines:
-        run("dpkg", "--compare-versions", baseline.version, "lt", candidate.version)
-    for installation in installations:
-        unit_paths = [Path(root) / installation.unit for root in ("/etc/systemd/system", "/usr/lib/systemd/system")]
-        for path in (installation.app, *installation.legacy_roots, *unit_paths):
-            require(not path.exists() and not path.is_symlink(), "Pre-existing package state refused")
-        require(not installation.package_state(), "Pre-existing dpkg state refused")
+    for path in (installation.app, Path("/etc/systemd/system") / installation.unit,
+                 Path("/usr/lib/systemd/system") / installation.unit):
+        require(not path.exists() and not path.is_symlink(), "Pre-existing package state refused")
+    require(not installation.package_state(), "Pre-existing dpkg state refused")
+    require(run("systemctl", "show", installation.unit, "-p", "LoadState", "--value", check=False)
+            .stdout.strip() == "not-found", "Pre-existing systemd unit refused")
+    for lookup in (pwd.getpwnam, grp.getgrnam):
         try:
-            pwd.getpwnam(installation.account)
+            lookup(installation.account)
         except KeyError:
-            pass
-        else:
-            raise RuntimeError("Pre-existing service account refused")
+            continue
+        raise RuntimeError("Pre-existing service account or group refused")
+
+
+def check_cached_entry(installation, entry):
+    key, payload = entry
+    with closing(sqlite3.connect(f"file:{installation.db}?mode=ro", uri=True)) as database:
+        require(database.execute("SELECT payload FROM entries WHERE key=?", (key,)).fetchone() == (payload,),
+                "The package operation changed retained cache data")
 
 
 def check_reinstall(installation, passed):
@@ -277,19 +262,19 @@ def check_reinstall(installation, passed):
     elapsed = installation.stop()
     key = os.urandom(32).hex()
     payload = json.dumps({"acceptance": key}).encode()
-    with sqlite3.connect(installation.db) as database:
+    with closing(sqlite3.connect(installation.db)) as database:
         database.execute("INSERT INTO entries VALUES(?,?,?,?,?)",
                          (key, payload, len(payload), int(time.time()) + 86400, 0))
+        database.commit()
     run("systemctl", "start", installation.unit)
     health(installation)
     passed("stop-start", stopSeconds=elapsed)
     installation.install(reinstall=True)
     health(installation)
     preserved(expected)
-    with sqlite3.connect(f"file:{installation.db}?mode=ro", uri=True) as database:
-        require(database.execute("SELECT payload FROM entries WHERE key=?", (key,)).fetchone() == (payload,),
-                "Logical cached data did not survive reinstall")
+    check_cached_entry(installation, (key, payload))
     passed("same-version-reinstall")
+    return key, payload
 
 
 def mcp_request(port, token, payload=None, session=None):
@@ -310,9 +295,10 @@ def mcp_request(port, token, payload=None, session=None):
         connection.close()
 
 
-def verify_mcp(port, token):
+def verify_mcp(port, token, package_version):
     status, session, data = mcp_request(port, token, INITIALIZE)
-    require(status == 200 and session and data["result"]["protocolVersion"] == PROTOCOL,
+    require(status == 200 and session and data["result"]["protocolVersion"] == PROTOCOL
+            and data["result"]["serverInfo"]["version"] == package_version,
             "Installed MCP initialization failed")
     try:
         status, _, _ = mcp_request(port, token, {"jsonrpc": "2.0", "method": "notifications/initialized"}, session)
@@ -354,6 +340,7 @@ def check_stdio_accounts(installation, passed):
         replies = [json.loads(line) for line in result.stdout.splitlines()]
         require(len(replies) == 2 and replies[0].get("id") == 1 and replies[1].get("id") == 2
                 and replies[0]["result"]["protocolVersion"] == version
+                and replies[0]["result"]["serverInfo"]["version"] == installation.version
                 and {tool["name"] for tool in replies[1]["result"]["tools"]}
                 == {"web_search", "web_open", "web_find", "web_search_status"},
                 "Installed stdio process did not negotiate the expected version and four tools")
@@ -424,7 +411,7 @@ def check_token_rotation(installation, passed):
     require(mcp_request(port, token, INITIALIZE)[0] == 401, "Generated token became active without restart")
     run("systemctl", "restart", installation.unit)
     health(installation)
-    verify_mcp(port, token)
+    verify_mcp(port, token, installation.version)
 
     replacement = secrets.token_hex(32)
     rotated = subprocess.run([*args, "--SetToken"], input=replacement + "\nyes\n", capture_output=True,
@@ -436,7 +423,7 @@ def check_token_rotation(installation, passed):
     run("systemctl", "restart", installation.unit)
     health(installation)
     require(mcp_request(port, token, INITIALIZE)[0] == 401, "Previous token still works after rotation")
-    verify_mcp(port, replacement)
+    verify_mcp(port, replacement, installation.version)
 
     check_stored_client(installation, client, replacement, retired=(token,))
     preserved(unchanged_files)
@@ -529,6 +516,10 @@ def check_client_registry(installation, passed):
     previous_pid = installation.pid()
     port = runtime["admin"]["port"]
     origin = f"http://127.0.0.1:{port}"
+    # Capture the one-time login link without adding it to the acceptance log.
+    link = subprocess.run([installation.exe, "--SettingsUrl"], env=ENV, capture_output=True, text=True, timeout=8)
+    require(link.returncode == 0 and re.fullmatch(re.escape(origin) + r"/settings/#login=[a-f0-9]{64}",
+                                                  link.stdout.strip()), "Wrong default settings URL")
     base = "/admin/api/v1"
     credentials = [installation.token(), installation.tokens[1].read_text(encoding="ascii").strip()]
 
@@ -592,7 +583,7 @@ def check_client_registry(installation, passed):
         require(error["error"]["code"] == "revision_conflict", "Credential reveal ignored a stale revision")
         reveal("deb-web-acceptance", bearer, view["revision"])
         business = runtime["business"]["port"]
-        verify_mcp(business, bearer)
+        verify_mcp(business, bearer, installation.version)
         replacement = "web/" + secrets.token_hex(6)
         credentials.append(replacement)
         _, view = exchange("PUT", "/clients/deb-web-acceptance",
@@ -602,7 +593,7 @@ def check_client_registry(installation, passed):
                 "Web rotation did not immediately revoke the previous credential")
         check_stored_client(installation, "deb-web-acceptance", replacement, retired=(bearer,))
         reveal("deb-web-acceptance", replacement, view["revision"])
-        verify_mcp(business, replacement)
+        verify_mcp(business, replacement, installation.version)
         _, view = exchange("DELETE", "/clients/deb-web-acceptance", {"revision": view["revision"]}, write)
         check_view(view)
         require(not view["pending_restart"] and mcp_request(business, replacement, INITIALIZE)[0] == 401,
@@ -624,65 +615,31 @@ def check_client_registry(installation, passed):
     passed("client-registry-service-writes")
 
 
-def require_cross_release_rejection(result, *, legacy):
-    expected = ("invalid_configuration: Runtime configuration belongs to a different project release.",)
-    if legacy:
-        # The immutable system-directory release checks its older schema before
-        # version ownership, so newer configuration fields can reject first.
-        expected += ("invalid_configuration: Runtime configuration does not match its schema ",)
-    require(result.returncode != 0 and any(line.startswith(expected) for line in result.stdout.splitlines()),
-            "The installed executable did not return the expected cross-release configuration error")
-
-
-def check_isolation(candidate, baselines, passed):
-    installations = [candidate, *baselines]
-    for first, second in combinations(installations, 2):
-        require(not first.check_ports().intersection(second.check_ports()),
-                "The new layout did not reserve the stopped versions' listener ports")
-        require(pwd.getpwnam(first.account).pw_uid != pwd.getpwnam(second.account).pw_uid,
-                "Installed versions share a service account")
-    for baseline in baselines:
-        run("systemctl", "start", baseline.unit)
-        health(baseline)
-    require(len({item.pid() for item in installations}) == len(installations), "Installed versions share a process")
-    for own in installations:
-        for other in installations:
-            if other is own:
-                continue
-            reject_token(own, other.token())
-            mismatch = run(own.exe, "--ConfigPath", other.config, "--CheckConfig", check=False)
-            require_cross_release_rejection(mismatch, legacy=own.legacy)
-        # Unlike run(), this call must not put the temporary login link in the log.
-        link = subprocess.run([str(own.exe), "--SettingsUrl"], env=ENV, capture_output=True,
-                              text=True, timeout=8)
-        port = own.read_config()["admin"]["port"]
-        require(link.returncode == 0 and re.fullmatch(
-            rf"http://127\.0\.0\.1:{port}/settings/#login=[a-f0-9]{{64}}", link.stdout.strip()),
-            "Default settings command did not select its own version's listener")
-    passed("side-by-side", candidate=candidate.version, baseline=baselines[0].version,
-           baselines=[{"version": item.version, "legacyLayout": item.legacy} for item in baselines])
-
-
-def remove_and_purge(installation, passed, primary=True):
+def remove_and_purge(installation, cache_entry, passed):
     expected = installation.snapshots()
     settings = installation.state / "settings.json"
-    if settings.is_file():
-        expected[settings] = sha(settings)
+    expected[settings] = sha(settings)
+
+    def check_retained():
+        preserved(expected)
+        check_cached_entry(installation, cache_entry)
+        require(installation.service_ids() == installation.installed_ids
+                and installation.state.stat().st_uid == installation.installed_ids[0],
+                "The retained service account or data owner changed")
+
     old = installation.pid()
     apt("remove", installation.name)
-    require(not installation.exe.exists() and not installation.active()
+    require(installation.package_state() == ["deinstall ok config-files", installation.version]
+            and not installation.exe.exists() and not installation.active()
             and not Path(f"/proc/{old}").exists(), "Removal left service")
-    preserved(expected)
-    require(installation.db.is_file(), "Removal discarded the version's cache")
-    if primary:
-        passed("uninstall")
+    check_retained()
+    passed("uninstall")
     apt("purge", installation.name)
-    require(not installation.config.exists(), "Purge did not remove this version's runtime configuration")
+    require(not installation.package_state() and not installation.config.exists(),
+            "Purge did not remove the package and its runtime configuration")
     del expected[installation.config]
-    preserved(expected)
-    require(installation.db.is_file(), "Purge discarded the version's cache")
-    if primary:
-        passed("purge")
+    check_retained()
+    passed("purge")
 
 
 def cleanup(installation):
@@ -693,47 +650,46 @@ def cleanup(installation):
     if installation.package_state():
         apt("purge", installation.name)
     require(not installation.package_state() and not installation.exe.exists(), "Acceptance left package installed")
-    for directory in (installation.app, *installation.legacy_roots):
-        if not directory.exists() and not directory.is_symlink():
-            continue
-        require(directory.parent in (Path("/opt"), Path("/etc"), Path("/var/lib"))
-                and directory.name == installation.name and directory.resolve(strict=True) == directory
+    directory = installation.app
+    if directory.exists() or directory.is_symlink():
+        require(directory == Path("/opt") / installation.name and directory.resolve(strict=True) == directory
                 and directory.is_dir() and not directory.is_symlink() and shutil.rmtree.avoids_symlink_attacks,
                 f"Refusing to delete unsafe fixture directory: {directory}")
-        # The disposable-host preflight required every one of these roots to be absent.
         shutil.rmtree(directory)
+    # The preflight refused any existing user or group. Remove only the
+    # identity we actually observed during installation on this disposable host.
+    if installation.installed_ids is not None:
+        require(installation.service_ids() == installation.installed_ids,
+                "Refusing cleanup of a changed service identity")
+        run("userdel", installation.account)
+        try:
+            group = grp.getgrnam(installation.account)
+        except KeyError:
+            return
+        require(group.gr_gid == installation.installed_ids[1] and not group.gr_mem,
+                "Refusing cleanup of a changed service group")
+        run("groupdel", installation.account)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--Package", type=Path, required=True)
     parser.add_argument("--PackageSHA256", required=True)
-    parser.add_argument("--BaselinePackage", action="append", type=Path, default=[])
-    parser.add_argument("--BaselineSHA256", action="append", default=[])
     parser.add_argument("--OutputPath", type=Path, required=True)
     parser.add_argument("--DisposableMachine", action="store_true", required=True)
     args = parser.parse_args()
-    if len(args.BaselinePackage) != len(args.BaselineSHA256):
-        parser.error("Provide a --BaselineSHA256 for each --BaselinePackage")
     candidate = Installation(args.Package.resolve(strict=True), args.PackageSHA256)
-    baselines = [Installation(archive.resolve(strict=True), sha256, allow_legacy=True)
-                 for archive, sha256 in zip(args.BaselinePackage, args.BaselineSHA256, strict=True)]
-    installations = [candidate, *baselines]
     output = args.OutputPath.resolve()
-    require(output not in (Path(__file__).resolve(), *(item.archive for item in installations)),
-            "Output would overwrite input")
-    require(all(not output.is_relative_to(root) for item in installations for root in (item.app, *item.legacy_roots)),
-            "Output would share a directory owned by the installation fixture")
-    preflight(args, installations)
-    report = {"schemaVersion": 1, "status": "failed", "candidateSha256": args.PackageSHA256,
-              "baselineSha256": args.BaselineSHA256[0] if baselines else None, "checks": {}}
-    if len(baselines) > 1:
-        report["baselineSha256s"] = args.BaselineSHA256
+    require(output not in (Path(__file__).resolve(), candidate.archive), "Output would overwrite input")
+    require(not output.is_relative_to(candidate.app), "Output would share a directory owned by the fixture")
+    preflight(args, candidate)
+    report = {"schemaVersion": 1, "status": "failed", "candidateSha256": args.PackageSHA256, "checks": {}}
 
     def passed(name, **details):
         report["checks"]["ubuntu26.deb." + name] = {"status": "passed", "exitCode": 0, **details}
 
     failure = None
+    installation_attempted = False
     opt_fd = None
     original_opt_mode = None
     try:
@@ -746,10 +702,7 @@ def main():
             original_opt_mode = stat.S_IMODE(opt_info.st_mode)
             os.fchmod(opt_fd, original_opt_mode & ~0o022)
             LOG.append(f"Protected disposable /opt (original mode {original_opt_mode:o})")
-        for baseline in baselines:
-            baseline.install()
-            health(baseline)
-            baseline.stop()
+        installation_attempted = True
         candidate.install()
         health(candidate)
         passed("install")
@@ -760,31 +713,18 @@ def main():
         check_token_rotation(candidate, passed)
         leave_crashed_cli_lock(candidate)
         check_client_registry(candidate, passed)
-        if baselines:
-            check_isolation(candidate, baselines, passed)
-            peers = [(item, item.snapshots(), item.pid()) for item in baselines]
-            check_reinstall(candidate, passed)
-            remove_and_purge(candidate, passed)
-            for baseline, snapshot, previous_pid in peers:
-                health(baseline)
-                require(baseline.pid() == previous_pid, "Candidate removal or reinstall restarted the other service")
-                preserved(snapshot)
-            passed("uninstall-isolation")
-            for baseline in baselines:
-                remove_and_purge(baseline, passed, primary=False)
-        else:
-            remove_and_purge(candidate, passed)
-        require(all(sha(item.archive) == item.expected_sha256 for item in installations),
-                "Original package changed during acceptance")
+        cache_entry = check_reinstall(candidate, passed)
+        remove_and_purge(candidate, cache_entry, passed)
+        require(sha(candidate.archive) == candidate.expected_sha256, "Original package changed during acceptance")
         report["status"] = "passed"
     except Exception as error:
         failure = error
         report["error"] = f"{type(error).__name__}: {error}"
     finally:
         cleanup_errors = []
-        for installation in installations:
+        if installation_attempted:
             try:
-                cleanup(installation)
+                cleanup(candidate)
             except Exception as error:
                 cleanup_errors.append(str(error))
                 failure = failure or error

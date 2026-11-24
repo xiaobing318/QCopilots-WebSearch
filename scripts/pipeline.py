@@ -439,7 +439,7 @@ class Pipeline:
                 prepared = self.patched_httplib(prepared)
             sources.append(f"-DFETCHCONTENT_SOURCE_DIR_{name.upper()}={prepared}")
         self.run(["cmake", "--preset", self.preset, "-S", ROOT, "-B", self.build, *common, f"-DCMAKE_PREFIX_PATH={self.qt_prefix}",
-                  f"-DCMAKE_INSTALL_PREFIX={self.install}", f"-DQCWS_DEPENDENCY_PREFIX={prefix}", "-UQCWS_VERSION", "-DQCWS_BUILD_TESTING=ON",
+                  f"-DCMAKE_INSTALL_PREFIX={self.install}", f"-DQCWS_DEPENDENCY_PREFIX={prefix}", "-DQCWS_BUILD_TESTING=ON",
                   f"-DPython3_EXECUTABLE={sys.executable}",
                   f"-DQCWS_QT_SOURCE_DIR={qt_source}",
                   f"-DQCWS_ZLIB_SOURCE_DIR={source}",

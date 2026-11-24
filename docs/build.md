@@ -73,4 +73,4 @@ python scripts/test_mcp_sdk.py --Executable <installed-binary> --Output <report.
 
 添加 `--LiveProvider auto` 可访问真实的公共搜索源。此项检查的结果应独立于本地可复现测试结果记录。
 
-CI 使用 Windows ZIP 解压后的可执行文件和 Ubuntu DEB 安装后的可执行文件进行测试。手动运行和发布运行还使用官方 0.4.0 安装包，以及由固定提交 `91e528f` 构建的 0.2.0 系统目录布局基线，验证 MSI 和 DEB 的并装、配置与凭据隔离，以及卸载一个版本后其他版本仍可用。旧布局基线复用本次构建的设置页面，验收对象是旧版服务与安装目录。请在可丢弃的 Windows 环境中以管理员身份运行 `scripts/AcceptWindowsMsi.ps1`。
+CI 使用 Windows ZIP 解压后的程序和 Ubuntu DEB 安装后的程序执行 SDK 与冒烟测试。Ubuntu 使用本次构建的 DEB 检查重装、故障恢复及卸载，分别验证 `remove` 和 `purge` 对运行配置与私有数据的处理。手动 CI 和 Release 还会在 Windows 上使用同一份 MSI，依次检查默认及自定义安装目录、配置和凭据保留，以及初始化后和服务启动后两种安装失败的回滚。各平台在安装验收前核对包的 SHA-256。Windows 本地 MSI 验收需在可丢弃的测试机上以管理员身份运行 `scripts/AcceptWindowsMsi.ps1`。[发布验收](release.md)

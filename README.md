@@ -8,11 +8,13 @@ Search works without an API key through DuckDuckGo HTML, DuckDuckGo Lite and Bin
 
 ## Install and open Settings
 
+Download the package for your platform from the [0.5.1 release](https://github.com/xiaobing318/QCopilots-WebSearch/releases/tag/v0.5.1).
+
 | Platform | Package | Settings command |
 | --- | --- | --- |
 | Windows 11 | MSI. Registers a service for the installed version | Run `qcopilots-websearch.exe --SettingsUrl` from that version's installed `bin` directory |
 | Windows 11 | ZIP. Extract to a private writable directory and start the executable | Run `.\bin\qcopilots-websearch.exe --SettingsUrl` |
-| Ubuntu 26.04 | DEB. Install `qcopilots-websearch-<version>_<version>_amd64.deb` with apt | Run `sudo /opt/qcopilots-websearch-<version>/bin/qcopilots-websearch --SettingsUrl` |
+| Ubuntu 26.04 | DEB. Install `qcopilots-websearch-<version>_amd64.deb` with apt | Run `sudo /opt/qcopilots-websearch-<version>/bin/qcopilots-websearch --SettingsUrl` |
 
 Different MSI or DEB versions can run on the same host. Each version keeps
 its configuration, credentials, settings and cache in its own `bin/data`
@@ -36,17 +38,13 @@ The Settings command prints a one-time link. Open it within two minutes, or appe
 
 Connect to `/mcp` with a client Bearer token. In llama.cpp WebUI, choose Streamable HTTP, enter the URL and set the `Authorization` header to `Bearer <client-token>`. For a subprocess client, set the command to the executable and the arguments to `["--Stdio"]`. Append `--ConfigPath FILE` to choose a configuration. Health and metrics use the control listener. [Deployment and QGIS setup](docs/deployment.md)
 
-Any HTTP(S) web application can call the business API with a valid Bearer token. There is no per-site `business.origins` list. Native and server-side clients can omit `Origin`. New runtime configurations allow `127.0.0.1:3181` and `web-search.vastarmorai.com` as business Hosts and set `business.public_url` to `https://web-search.vastarmorai.com/mcp`. If initialization selects another port, the loopback Host uses that port. The public URL is connection information only and does not create a tunnel or verify reachability. For another deployment, set its actual Hosts and public URL. Existing configurations that contain `business.origins` must have that field removed before they can pass `--CheckConfig`. Control and Settings access remain separately restricted. [Business configuration](docs/deployment.md#business-addresses-and-browser-access)
+Any HTTP(S) web application can call the business API with a valid Bearer token. Native and server-side clients can omit `Origin`. The generated configuration allows `127.0.0.1:3181` and `web-search.vastarmorai.com` as business Hosts. If initialization selects another port, the loopback Host uses that port. Settings displays `business.public_url` as the client connection address, which defaults to `https://web-search.vastarmorai.com/mcp`. For your own domain, configure the public route and set the matching Hosts and public URL. The control and Settings listeners apply their own access restrictions. [Business configuration](docs/deployment.md#business-addresses-and-browser-access)
 
 The management page has **Access authorization**, **Search settings** and **Service status** tabs. In Access authorization, the client list is on the left and the selected client's details are on the right. Add a client or replace its code in three steps: fill in or generate a code, review and choose **Save and activate**, then copy the active Bearer and server URL. Saving takes effect immediately and survives restart. QCopilots uses the Bearer with its existing registered server URL.
 
-You can enter a code containing `/`, generate a random token, or choose **Generate from text**. Text generation produces 64 lowercase hexadecimal characters from SHA-256 of the exact UTF-8 text without trimming spaces or changing case. The source text stays in the page and is cleared after generation. After saving, you can copy the code repeatedly while the connection-details step remains open. Leaving the step clears the displayed code. An authenticated administrator can reveal a saved client's code on demand. Older hash-only entries can still authenticate but cannot be revealed. [Client token management](docs/deployment.md#manage-client-tokens)
+You can enter a code containing `/`, generate a random token, or choose **Generate from text**. Text generation produces 64 lowercase hexadecimal characters from SHA-256 of the exact UTF-8 text without trimming spaces or changing case. The source text stays in the page and is cleared after generation. After saving, you can copy the code repeatedly while the connection-details step remains open. Leaving the step clears the displayed code. An authenticated administrator can reveal a saved client's code on demand. A credential stored only as a digest can authenticate. To get a code you can view and copy, replace that credential. [Client token management](docs/deployment.md#manage-client-tokens)
 
 When Cloudflare Tunnel and WebSearch run on the same Windows host, point the tunnel to the local business listener, normally `http://127.0.0.1:3181`. On QCopilots' MCP Servers page, keep the Web Search server's registered URL, enable Authorization and enter the client Bearer token. The plugin relays MCP to `https://web-search.vastarmorai.com/mcp` without a separate backend configuration file or authorization prompt. Other MCP clients connect directly to that public `/mcp` endpoint. [Windows Tunnel quick setup](docs/deployment.md#windows-cloudflare-tunnel) · [QGIS setup](docs/deployment.md#qgis)
-
-## Upgrading from 0.4
-
-Replace former `/v1/search`, `/v1/open`, `/v1/find` and `/v1/status` requests with the four MCP tools below. Installed versions use separate data directories. Connect to the candidate with its own URL and credential, verify a search, then switch clients. To roll back, reconnect to the previous instance.
 
 ## MCP tools
 
@@ -57,7 +55,7 @@ Replace former `/v1/search`, `/v1/open`, `/v1/find` and `/v1/status` requests wi
 | `web_find` | Finds literal text in a stored page |
 | `web_search_status` | Reads the current tool settings and last known provider state |
 
-Use **Search settings** to enable search and page opening independently. QGIS relays tool calls without adding a search confirmation step. The compatibility setting `search_without_asking` does not change that behavior. **Service status** shows the service version, listening addresses and provider availability. Service health describes process readiness separately from search-provider availability. The [versioned API](docs/api.md) defines cache behavior, provenance and errors.
+Use **Search settings** to enable search and page opening independently. QGIS forwards MCP tool calls directly. **Service status** shows the service version, listening addresses and provider availability. Service health reports process readiness. [API, cache behavior and errors](docs/api.md)
 
 ## Build and test
 

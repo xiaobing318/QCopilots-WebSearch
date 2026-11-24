@@ -111,8 +111,8 @@ Document readDocument(const Config &config) {
     }
     return {value.at("clients"), digest(QByteArray("registry:") + bytes)};
   }
-  // The runtime is only a migration seed. Once a registry exists, even an empty
-  // one, it is authoritative and stale runtime credentials cannot return.
+  // Runtime clients authorize the first requests until a registry exists.
+  // An existing registry supplies the complete client list, even when empty.
   const auto runtime = config.sourcePath.empty() ? config : Config::load(config.sourcePath);
   const auto entries = runtime.value.at("clients");
   validateEntries(entries);

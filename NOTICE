@@ -34,4 +34,4 @@ share/qcopilots-websearch/sources/httplib, with a modification notice under
 share/qcopilots-websearch/licenses/httplib.
 
 The separate QGIS adapter resides in the QGIS repository and is GPL-2.0-or-later.
-SearXNG, Caddy and Valkey remain separate deployed services with their own licenses.
+SearXNG and Caddy are separately deployed services with their own licenses.

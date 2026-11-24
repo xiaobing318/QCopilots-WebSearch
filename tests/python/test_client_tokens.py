@@ -91,7 +91,7 @@ class Fixture:
         config["business"].update(port=self.business, allowed_hosts=[HOST])
         config["control"].update(port=self.control, allowed_hosts=[f"127.0.0.1:{self.control}"])
         config["admin"] = {"enabled": True, "port": admin}
-        config["clients"].append({"id": "legacy-env", "token_env": "QCWS_TEST_ENROLLMENT_TOKEN"})
+        config["clients"].append({"id": "environment-client", "token_env": "QCWS_TEST_ENROLLMENT_TOKEN"})
         self.write(config)
         if os.name != "nt":
             self.runtime.chmod(0o640)
@@ -484,7 +484,8 @@ def verify_release_config(executable, folder):
     require(command(managed, "--CheckConfig").returncode != 0, "Managed config requires a release stamp")
     del value["project_version"]
     seed.write_text(json.dumps(value), encoding="utf-8")
-    require(command(seed, "--CheckConfig").returncode == 0, "An explicit legacy portable config stopped working")
+    require(command(seed, "--CheckConfig").returncode == 0,
+            "An explicitly selected portable configuration may omit project_version")
 
 
 def main():

@@ -755,7 +755,7 @@
       ],
       "put": {
         "summary": "Replace an existing client authorization code",
-        "description": "Save the registry atomically and apply all its clients before returning. Requires an administrator session and same-origin CSRF protection. Existing-client rotation retains its cache and MCP identity. Deleting and recreating an ID starts a new identity. Compatibility route. New clients should use the collection route with an ID in the JSON body because browsers normalize dot path segments.",
+        "description": "Replace the credential for the ID in the path. The client keeps its cache and MCP identity. The registry is saved atomically and applied before returning. Requires an administrator session and same-origin CSRF protection. Use PUT /clients with the ID in the JSON body for dot-segment IDs because browsers normalize those paths.",
         "security": [
           {
             "cookie": []
@@ -847,7 +847,7 @@
       },
       "delete": {
         "summary": "Delete a client authorization code",
-        "description": "Save the registry atomically and apply all its clients before returning. Requires an administrator session and same-origin CSRF protection. Existing-client rotation retains its cache and MCP identity. Deleting and recreating an ID starts a new identity. Compatibility route. New clients should use the collection route with an ID in the JSON body because browsers normalize dot path segments.",
+        "description": "Delete the client identified by the path. Recreating that ID starts a new identity. The registry is saved atomically and applied before returning. Requires an administrator session and same-origin CSRF protection. Use DELETE /clients with the ID in the JSON body for dot-segment IDs because browsers normalize those paths.",
         "security": [
           {
             "cookie": []
@@ -1000,7 +1000,7 @@
             }
           },
           "400": {
-            "description": "Invalid input, unrecoverable old digest, unreadable source or invalid registry."
+            "description": "Invalid input, a credential stored only as a digest, an unreadable credential source or an invalid registry."
           },
           "401": {
             "description": "Missing or expired administration session."

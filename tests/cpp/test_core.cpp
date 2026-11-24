@@ -1201,18 +1201,18 @@ void searchCacheFormatTests() {
   const auto settings = config(dir);
   const Json args = {{"query", "filtered"}, {"limit", 1}, {"language", "all"},
                      {"time_range", "any"}, {"domains", Json::array({"example.com"})}};
-  auto oldKey = [](const Json &parts) {
+  auto cacheKey = [](const Json &parts) {
     return QCryptographicHash::hash(QByteArray::fromStdString(parts.dump()), QCryptographicHash::Sha256)
         .toHex().toStdString();
   };
   {
     SettingsStore providers(settings);
     const auto fingerprint = providers.provider(*providers.current()).fingerprint();
-    Cache old(dir.filePath("cache-v1.sqlite").toStdString(), 16 * 1024 * 1024, 100);
-    old.put(oldKey({3, fingerprint, "search", "alice", args.dump()}),
-            {{"results", Json::array()}, {"cache", {{"hit", false}, {"ttl_seconds", 300}}}}, 300);
-    old.put(oldKey({3, "page", "page", "alice", "existing-page"}),
-            {{"page_id", "existing-page"}, {"text", "snapshot text"}}, 300);
+    Cache cache(dir.filePath("cache-v1.sqlite").toStdString(), 16 * 1024 * 1024, 100);
+    cache.put(cacheKey({3, fingerprint, "search", "alice", args.dump()}),
+              {{"results", Json::array()}, {"cache", {{"hit", false}, {"ttl_seconds", 300}}}}, 300);
+    cache.put(cacheKey({3, "page", "page", "alice", "existing-page"}),
+              {{"page_id", "existing-page"}, {"text", "snapshot text"}}, 300);
   }
   Service s(settings, transport());
   const auto search = s.call("web_search", args, "alice", token());
@@ -1770,16 +1770,18 @@ void httpTests() {
   REQUIRE(r && r->status == 403);
   r = client.Options("/mcp", {{"Host", "test.local"}});
   REQUIRE(r && r->status == 403);
-  auto oldRouteHeaders = headers;
-  oldRouteHeaders.emplace("Origin", "https://client.example");
-  for (const auto *path : {"/v1/search", "/v1/open", "/v1/find", "/v1/status"}) {
-    const bool isGet = std::string_view(path) == "/v1/status";
-    r = isGet ? client.Get(path, oldRouteHeaders) : client.Post(path, oldRouteHeaders, "{}", "application/json");
-    REQUIRE(r && r->status == 404);
-    r = client.Options(path, {{"Host", "test.local"}, {"Origin", "https://client.example"},
-                              {"Access-Control-Request-Method", isGet ? "GET" : "POST"},
-                              {"Access-Control-Request-Headers", "authorization"}});
-    REQUIRE(r && r->status == 404);
+  auto unknownPathHeaders = headers;
+  unknownPathHeaders.emplace("Origin", "https://client.example");
+  const auto *unknownPath = "/mcp/unregistered";
+  r = client.Get(unknownPath, unknownPathHeaders);
+  REQUIRE(r && r->status == 404 && !r->has_header("Access-Control-Allow-Origin"));
+  r = client.Post(unknownPath, unknownPathHeaders, "{}", "application/json");
+  REQUIRE(r && r->status == 404 && !r->has_header("Access-Control-Allow-Origin"));
+  for (const auto *method : {"GET", "POST"}) {
+    r = client.Options(unknownPath, {{"Host", "test.local"}, {"Origin", "https://client.example"},
+                                     {"Access-Control-Request-Method", method},
+                                     {"Access-Control-Request-Headers", "authorization"}});
+    REQUIRE(r && r->status == 404 && !r->has_header("Access-Control-Allow-Origin"));
   }
   r = client.Post("/mcp", session, mcpToolCall(++requestId, "web_search", {{"query", "hello"}}).dump(),
                   "application/json");

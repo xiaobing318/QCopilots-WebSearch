@@ -4,7 +4,7 @@
 
 调用 HTTP `/mcp` 时，客户端通过 `Authorization: Bearer <client-token>` 提供业务凭据。浏览器预检除外。
 `Bearer` 鉴权方案名不区分大小写。每个客户端都有独立身份。请求的 Host 必须与 `business.allowed_hosts` 中的条目匹配。
-任意合法 HTTP(S) 网页均可携带业务 Bearer 接入，不再提供 `business.origins` 配置。带 Origin 的请求必须提供单一合法的 HTTP(S) 来源，不能是 `null`、多值或重复头，也不能包含用户信息、路径、查询或片段。原生和服务端客户端可以省略 Origin。远程客户端使用 HTTPS 并验证服务端证书。
+任意合法 HTTP(S) 网页均可携带业务 Bearer 接入。带 Origin 的请求必须提供单一合法的 HTTP(S) 来源，不能是 `null`、多值或重复头，也不能包含用户信息、路径、查询或片段。原生和服务端客户端可以省略 Origin。远程客户端使用 HTTPS 并验证服务端证书。
 
 浏览器 CORS 预检不要求 Bearer，预检成功不代表取得业务授权。服务为合法网页来源返回对应的 `Access-Control-Allow-Origin` 和 `Vary: Origin`，允许业务接口所需的请求方法和头，并暴露 MCP 会话等响应头。实际业务请求仍验证 Bearer，业务接口不使用 Cookie 凭据，也不返回 `Access-Control-Allow-Credentials`。控制和管理监听器保留各自的 Origin 及鉴权限制。
 
@@ -182,9 +182,9 @@ HTTP 鉴权和请求头错误使用相应的 HTTP 状态码。工具执行失败
 MCP HTTP 先进行初始化，随后在请求头中携带返回的会话 ID 和协商后的协议版本。
 `initialize` 会采用请求中的 `2025-11-25` 或 `2025-06-18`。请求其他版本时，响应使用 `2025-11-25`。
 初始化结果包含 `instructions`，说明搜索、网页读取和文本查找的使用流程。
-`serverInfo.icons` 包含内嵌 SVG data URI，两个 2025 版本的 HTTP 和 stdio 使用相同资源，不依赖管理监听器或额外图片请求。支持图标元数据的客户端可直接显示，不支持该字段的旧客户端可以忽略它。
-如果 `MCP-Protocol-Version` 头的值不受支持，服务会返回 HTTP 400 和 JSON 错误响应体，便于较新的客户端回退到
-`initialize`。发送 `notifications/initialized` 后即可调用工具。DELETE 结束会话。
+`serverInfo.icons` 包含内嵌 SVG data URI。两个 2025 协议版本的 HTTP 和 stdio 客户端均可直接显示该图标。
+如果 `MCP-Protocol-Version` 头的值不受支持，服务会返回 HTTP 400 和 JSON 错误响应体，客户端可通过
+`initialize` 协商协议版本。发送 `notifications/initialized` 后即可调用工具。DELETE 结束会话。
 携带有效会话的 GET 返回 405，失效会话返回 404，不支持的协议头返回 400。取消请求会停止相应操作，并保留其他仍在等待同一次合并执行的请求。
 
 2025 版本的 `tools/list` 按固定顺序返回工具，包含 `name`、`title`、`description`、`annotations` 和
@@ -206,17 +206,18 @@ Invalid Request 后继续处理请求。服务读入工具请求后即可按 ID 
 ## 设置状态
 
 `web_search_status` 返回本地设置及最近一次已知的搜索来源状态。
-为此新增的 `settings` 对象包含 `search_enabled`、`open_enabled`、`search_without_asking`、
+响应中的 `settings` 对象包含 `search_enabled`、`open_enabled`、`search_without_asking`、
 `provider`、`provider_ready` 和 `revision`。搜索和网页读取开关同时适用于 MCP HTTP 和 stdio。
 `web_find` 与状态查询始终可用，切换开关后工具列表保持原样。
-`search_without_asking` 为旧客户端保留。当前 QGIS 插件透明转发 MCP 请求，不读取该字段来增加搜索审批。
+管理 API 可读写布尔字段 `search_without_asking`。QGIS 插件直接转发 MCP 请求，转发行为与该字段的值无关。
 
 <a name="administration"></a>
 
 ## 管理接口
 
-管理界面使用配置的 Origin，路径为 `/settings/`。默认 Origin 为 `http://127.0.0.1:3183`，
-安装版可能使用其部署配置中记录的其他端口。通过该版本的可执行文件运行 `--SettingsUrl`，可获取登录链接。
+管理界面使用配置的 Origin，路径为 `/settings/`。生成的配置通常使用 `http://127.0.0.1:3183`，
+安装版可能选择其他可用端口。自定义配置若启用管理监听器并省略 `admin.port`，则使用 8091。
+通过该版本的可执行文件运行 `--SettingsUrl`，可获取登录链接。
 管理员令牌和业务监听器使用的客户端 Bearer 凭据彼此独立。
 
 管理页分为“访问授权”“搜索设置”“服务状态”。授权的三步流程依次为填写与生成、保存并生效、复制连接资料。只有第二步提交成功后才进入连接资料复制步骤。已保存客户端的详情默认隐藏授权码，管理员可按需显示或复制。切换客户端或标签页、刷新、注销、删除或替换时清空页面原文，之后可通过受保护的单条读取接口再次取得。
@@ -232,7 +233,7 @@ Invalid Request 后继续处理请求。服务读入工具请求后即可按 ID 
 | `POST /clients` | 发送 `revision`、`id` 和 `token`，添加客户端授权，立即生效。 |
 | `PUT /clients` | 发送 `revision`、`id` 和 `token`，替换已有客户端授权码并保留缓存身份。 |
 | `DELETE /clients` | 发送 `revision` 和 `id`，删除该客户端授权。重新创建同名客户端不会继承旧缓存身份。 |
-| `PUT /clients/{id}`、`DELETE /clients/{id}` | 保留旧客户端兼容接口。ID 来自路径，请求体分别包含 `revision` 和 `token`，或仅包含 `revision`。 |
+| `PUT /clients/{id}`、`DELETE /clients/{id}` | OpenAPI 将这两个操作标记为 `deprecated`。ID 来自路径，请求体分别包含 `revision` 和 `token`，或仅包含 `revision`。 |
 | `PUT /providers/{id}/key`、`DELETE /providers/{id}/key` | 保存或删除 `key`。响应通过 `key_set` 表示密钥是否已设置。 |
 | `POST /providers/{id}/test` | 测试所选来源。返回是否成功、实际来源、结果数量、耗时和最多三条示例结果。 |
 | `GET /status` | 返回监听地址、供客户端复制的 `mcp_url`、版本、搜索来源冷却状态和设置错误。 |
@@ -243,13 +244,13 @@ Invalid Request 后继续处理请求。服务读入工具请求后即可按 ID 
 
 客户端授权的写操作使用与设置相同的会话和 CSRF 校验，返回更新后的授权列表。列表的 `source` 为 `manual`、`file` 或 `environment`，不会返回原始令牌、令牌摘要或私有来源路径。手动授权码是 1 至 8192 个可见 ASCII 字符，客户端 ID 是 1 至 64 个英文字母、数字、点、下划线或连字符。修订不匹配时返回 409，避免覆盖并发修改。`pending_restart` 表示磁盘授权尚未加载，读取最新修订后再通过网页保存，会将该完整授权列表立即应用，包括先前 CLI 写入的变更，并清除此标记。网页成功响应表示持久化和运行时授权均已更新。
 
-`can_reveal` 表示记录具有可读取来源，不保证外部文件或环境变量当前可读。`active` 比较取得的授权码及客户端身份与运行快照，防止把 CLI 待重启的值或外部已改文件误认为当前生效值。回显失败使用明确原因，不修改授权状态。旧版本仅保存摘要的记录可继续认证，但没有可还原原文，回显会明确失败，本版本不自动迁移或重置它们。
+`can_reveal` 表示记录具有可读取来源，不保证外部文件或环境变量当前可读。`active` 比较取得的授权码及客户端身份与运行快照，防止把 CLI 待重启的值或外部已改文件误认为当前生效值。仅保存摘要的凭据可用于认证，对它执行回显会返回 `credential_not_recoverable`。回显失败不会修改授权状态。
 
 管理界面按受控原因和操作上下文显示中英文提示，不展示任意后端异常或上游响应正文。重复授权码保留 HTTP 400，原因及安全的冲突客户端标识说明应更换哪个输入。无结构化正文的 HTTP 409 不会被推断为修订冲突。网络连接失败、无效 JSON 和未知服务错误有各自提示，未知错误不推断服务没有运行。
 
 缓存的具体原因包括 `instance_already_running`、`cache_locked`、`cache_lock_permission_denied`、`cache_lock_failed`、`cache_path_unavailable`、`cache_capacity_exceeded`、`cache_database_open_failed`、`cache_database_corrupt`、`cache_database_incompatible`、`cache_database_busy`、`cache_storage_full`、`cache_database_error` 和 `cache_worker_unavailable`。临时锁占用或数据库忙可稍后重试，权限、损坏、容量及格式问题需要先修复。持锁 PID、绝对路径和本机诊断只写启动 stderr，不进入公共 MCP 错误响应。
 
-新的客户端应使用请求体传递 `id` 的 `/clients` 接口，包括合法 ID `.` 和 `..`。浏览器会归一化 URL 中的点路径段，因此不能通过旧路径接口可靠地管理这两个 ID。
+浏览器会归一化 URL 中的点路径段。管理合法 ID `.` 和 `..` 时，请使用 `/clients` 接口，在请求体中传递 `id`。
 
 请求与响应的 JSON Schema 及错误码见 [contracts/admin/v1](../contracts/admin/v1)。
 

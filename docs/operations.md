@@ -4,7 +4,7 @@
 
 为每个调用方分配独立的凭据。网页快照归创建它的客户端身份所有。在管理页添加、轮换或删除授权码立即生效。命令行更新以及已有的私有令牌文件或环境变量更新在重启后生效。普通轮换保留缓存身份，删除后重建同名客户端会生成新的身份。授权注册表位于 `settings.directory/client-registry.json`，默认在 `bin/data/state` 下，应与其他私有数据一起备份，并排除在版本控制和诊断资料之外。[管理客户端令牌](deployment.md#manage-client-tokens)
 
-管理页的“访问授权”采用左侧客户端列表和右侧三步流程。填写或生成授权码后，先确认保存生效，再复制连接资料。已保存的客户端详情默认隐藏 Bearer，点击显示或复制时通过受保护接口读取原文。页面切换、刷新或退出会清空内存中的值，重新登录后仍可按需读取。旧版本仅有摘要的条目没有可还原原文，需要执行正常替换后才能显示新码。QGIS 用户只需在 MCP Servers 页面填写管理员提供的 Bearer。
+管理页的“访问授权”采用左侧客户端列表和右侧三步流程。填写或生成授权码后，先确认保存生效，再复制连接资料。已保存的客户端详情默认隐藏 Bearer，点击显示或复制时通过受保护接口读取原文。页面切换、刷新或退出会清空内存中的值，重新登录后仍可按需读取。若凭据只保存了摘要，可在此替换授权码，然后查看或复制新码。QGIS 用户只需在 MCP Servers 页面填写管理员提供的 Bearer。
 
 <a name="capacity-and-monitoring"></a>
 
@@ -44,11 +44,11 @@
 
 ## 安装、切换和卸载版本
 
-运行时配置使用 `schema_version: 1` 标识 JSON 格式。`project_version` 记录生成配置的确切发布版本，例如 `"0.3.1"`。可执行文件会拒绝加载标记为其他发布版本的配置。请用待检查版本的可执行文件运行 `--CheckConfig`。该命令默认读取可执行文件旁的 `data/runtime.json`。MSI 安装下请以管理员身份运行，DEB 安装下请使用 `sudo`。显式传入 `--ConfigPath` 仍可读取没有 `project_version` 的旧配置。
+运行时配置使用 `schema_version: 1` 标识 JSON 格式。生成的配置通过 `project_version` 记录所属发布版本，例如 `"0.5.1"`。请用该版本的可执行文件运行 `--CheckConfig`。它默认读取可执行文件旁的 `data/runtime.json`，遇到不匹配的项目版本时会报错。MSI 安装下请以管理员身份运行，DEB 安装下请使用 `sudo`。通过 `--ConfigPath FILE` 读取版本化安装目录之外的自定义配置时，`project_version` 可省略。
 
 MSI 和 DEB 为每个版本注册独立的服务并使用单独的程序目录。各服务从自己的安装根目录加载 `bin/data/runtime.json`。每个新版本都拥有新的凭据、后端设置、缓存和回环端口。安装新版本期间，现有服务会继续运行。
 
-切换客户端前，请安装完整的目标软件包。确认版本、服务身份、身份验证和健康状态，并执行一次搜索和网页读取。同步更新客户端的端点和令牌。网页 ID 仅供创建它的服务和客户端使用。切换后请在新版本中重新打开原 URL。若要切回，趁旧服务仍可用时为客户端恢复原端点和凭据。[各版本的安装路径与端口](deployment.md#installed-versions-and-ports)
+切换客户端前，请安装完整的目标软件包。确认版本、服务身份、身份验证和健康状态，并执行一次搜索和网页读取。同步更新客户端的端点和令牌。网页 ID 仅供创建它的服务和客户端使用。切换后请在目标实例中重新打开原 URL。需要切回时，使用原实例的端点和凭据。[各版本的安装路径与端口](deployment.md#installed-versions-and-ports)
 
 Windows 出站 HTTPS 使用系统 Schannel，入站业务 HTTPS 使用随服务分发的 Mbed TLS。Ubuntu 使用发行版提供的 OpenSSL 共享库。升级相应组件后请重启服务。维护适用的 CA 信任库，并在端点配置完整的证书链。
 
@@ -58,11 +58,11 @@ Windows 出站 HTTPS 使用系统 Schannel，入站业务 HTTPS 使用随服务�
 
 Windows 的安装提交清理失败时，会留下私有的 `.qcws-install-*.json` 回滚记录。删除其中引用的文件前，应先检查安装日志及记录的事务。安装正常完成后不会留下该文件。
 
-如果 DEB 的维护脚本执行失败，dpkg 可能将软件包标记为 `half-configured`。排除故障后，请重新配置该软件包。单独安装的旧版本在恢复期间仍可使用。
+如果 DEB 的维护脚本执行失败，dpkg 可能将软件包标记为 `half-configured`。排除故障后，运行 `sudo dpkg --configure qcopilots-websearch-0.5.1` 重新配置该包。
 
 Windows MSI 的 `QCWS_TEST_FAILPOINT` 属性专供测试使用，可以让安装在初始化后或服务启动后主动失败。该属性默认不生效，只有管理员明确传入测试值才会触发。它可使用原样的候选 MSI 文件验证回滚，应始终排除在部署自动化之外。
 
-卸载前，请确认要移除的确切版本。在 Windows 的「已安装的应用」中卸载对应的 MSI 条目。在 Ubuntu 上，请使用包含版本的包名，例如 `sudo apt remove qcopilots-websearch-0.3.1`。这两种卸载方式都会保留该版本的 `bin/data` 目录。对 DEB 执行 purge 会移除该版本的 `bin/data/runtime.json`，其令牌、状态数据和服务账户会保留。仅在有意重置该版本时，才应在备份完成后删除保留的文件。
+卸载前，请确认要移除的确切版本。在 Windows 的「已安装的应用」中卸载对应的 MSI 条目。在 Ubuntu 上，请使用包含版本的包名，例如 `sudo apt remove qcopilots-websearch-0.5.1`。这两种卸载方式都会保留该版本的 `bin/data` 目录。对 DEB 执行 purge 会移除该版本的 `bin/data/runtime.json`，其令牌、状态数据和服务账户会保留。仅在有意重置该版本时，才应在备份完成后删除保留的文件。
 
 <a name="limits-of-public-retrieval"></a>
 

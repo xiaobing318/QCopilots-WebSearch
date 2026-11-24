@@ -195,9 +195,10 @@ def mcp_request(port, token='', payload=None, session=''):
         connection.close()
 
 
-def verify_mcp(port, token):
+def verify_mcp(port, token, version):
     status, session, value = mcp_request(port, token, INITIALIZE)
-    need(status == 200 and session and value['result']['protocolVersion'] == PROTOCOL,
+    need(status == 200 and session and value['result']['protocolVersion'] == PROTOCOL
+         and value['result']['serverInfo']['version'] == version,
          'Portable MCP initialization failed')
     try:
         status, _, _ = mcp_request(port, token, {'jsonrpc': '2.0', 'method': 'notifications/initialized'}, session)
@@ -217,7 +218,7 @@ def snapshot(directory):
     return {path.relative_to(directory): digest(path) if path.is_file() else None for path in directory.rglob('*')}
 
 
-def verify_portable(executable, folder, cwd, env):
+def verify_portable(executable, folder, cwd, env, version):
     data = executable.parent / 'data'
     runtime = data / 'runtime.json'
     decoys = [cwd / 'runtime.json', cwd / 'data' / 'runtime.json']
@@ -230,6 +231,12 @@ def verify_portable(executable, folder, cwd, env):
     env = {key: value for key, value in env.items() if key.lower() != 'programdata'}
     env['ProgramData'] = str(program_data)
     acl = [system_tool('icacls.exe'), str(runtime)]
+    template = executable.parent.parent / 'share/qcopilots-websearch/config/runtime.json'
+    need(json.loads(template.read_bytes())['project_version'] == version,
+         'Packaged runtime configuration version differs from the ZIP filename')
+    reported = cli(executable, cwd, env, '--Version')
+    need(reported.returncode == 0 and reported.stdout.startswith(f'QCopilots-WebSearch {version}, Qt '.encode()),
+         'Packaged executable version differs from the ZIP filename')
 
     generated_token(cli(executable, cwd, env, '--GenerateToken'))
     need(cli(executable, cwd, env, '--SetToken').returncode != 0,
@@ -244,6 +251,7 @@ def verify_portable(executable, folder, cwd, env):
     need(bare.returncode == 0 and not data.exists(), 'Bare stdio failed or initialized HTTP service data')
     replies = [json.loads(line) for line in bare.stdout.splitlines()]
     need(len(replies) == 2 and replies[0]['id'] == 1 and replies[0]['result']['protocolVersion'] == '2024-11-05'
+         and replies[0]['result']['serverInfo']['version'] == version
          and replies[1]['id'] == 2 and {tool['name'] for tool in replies[1]['result']['tools']} ==
          {'web_search', 'web_open', 'web_find', 'web_search_status'}, 'Portable stdio negotiation or listing failed')
     data.mkdir()
@@ -262,6 +270,7 @@ def verify_portable(executable, folder, cwd, env):
         need(blocked.returncode != 0 and b'Cannot bind' in blocked.stderr and b' ready.' not in blocked.stderr,
              'Occupied fixed ports did not fail without a readiness summary')
         config = json.loads(runtime.read_bytes())
+        need(config['project_version'] == version, 'Portable runtime version differs from the ZIP filename')
         need(tuple(config[role]['port'] for role in ('business', 'control', 'admin')) == DEFAULT_PORTS,
              'First portable startup silently selected alternative ports')
 
@@ -291,7 +300,7 @@ def verify_portable(executable, folder, cwd, env):
              'Explicit portable configuration did not take precedence')
         need(digest(runtime) == before and all(digest(path) == value for path, value in token_hashes.items()),
              'Portable discovery or explicit commands changed existing credentials')
-        verify_mcp(config['business']['port'], local)
+        verify_mcp(config['business']['port'], local, version)
         port = config['business']['port']
         need(mcp_request(port, payload=INITIALIZE)[0] == 401, 'Unauthenticated portable MCP was accepted')
         original_acl = subprocess.check_output(acl, env=env, timeout=8)
@@ -301,14 +310,14 @@ def verify_portable(executable, folder, cwd, env):
 
     with running_portable(executable, cwd, env, runtime) as (config, _):
         need(config['business']['port'] == port, 'Portable restart changed the persisted listener')
-        verify_mcp(port, generated)
+        verify_mcp(port, generated, version)
         rotated = secrets.token_hex(32)
         update = cli(executable, cwd, env, '--ConfigPath', str(runtime), '--SetToken', '--ClientId', 'acceptance',
                      reply=(rotated + '\r\nyes\r\n').encode('ascii'))
         need(update.returncode == 0 and not update.stdout and rotated.encode('ascii') not in update.stderr,
              'Portable token update rejected or disclosed the submitted credential')
         need(mcp_request(port, rotated, INITIALIZE)[0] == 401, 'Rotated token became active without restart')
-        verify_mcp(port, generated)
+        verify_mcp(port, generated, version)
 
     with running_portable(executable, cwd, env, runtime) as (config, _):
         registry = data / 'state' / 'client-registry.json'
@@ -318,7 +327,7 @@ def verify_portable(executable, folder, cwd, env):
              'Portable token update did not retain only the current matching credential and digest')
         check_private_registry(registry, env)
         need(mcp_request(port, generated, INITIALIZE)[0] == 401, 'Old portable token survived restart')
-        verify_mcp(port, rotated)
+        verify_mcp(port, rotated, version)
 
     need(subprocess.check_output(acl, env=env, timeout=8) == original_acl,
          'Portable token update changed effective runtime ACLs')
@@ -377,6 +386,8 @@ def main():
     package = args.Package.resolve(strict=True)
     output = args.Output.resolve()
     need(package != output and package.suffix.lower() == '.zip', 'Invalid ZIP or output')
+    package_name = re.fullmatch(r'QCopilots-WebSearch-([0-9]+\.[0-9]+\.[0-9]+)-win64\.zip', package.name)
+    need(package_name, 'Unexpected portable package filename')
     need(digest(package) == args.PackageSHA256.lower(), 'Candidate ZIP hash mismatch')
     inventory = package_files(package)
     need(inventory and all(item.get('hashes') for item in inventory), 'Windows ZIP must contain regular files')
@@ -408,7 +419,8 @@ def main():
                                'qt_qpa_platform_plugin_path','ld_library_path','pythonpath'}:
                 del env[key]
         env['PATH'] = os.pathsep.join(str(path) for path in (system / 'System32', system))
-        portable = verify_portable(found[0], folder, cwd, env)
+        portable = verify_portable(found[0], folder, cwd, env, package_name[1])
+        portable['version'] = package_name[1]
         tls_test = Path(__file__).resolve().parents[1] / 'tests' / 'python' / 'test_business_tls.py'
         tls_code, tls_forced = run_sdk([sys.executable, '-B', str(tls_test), '--Executable', str(found[0]),
                                        '--OpenSSL', str(fixture_openssl())], env, cwd, timeout=90)

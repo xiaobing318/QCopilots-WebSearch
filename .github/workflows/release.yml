@@ -15,6 +15,8 @@ jobs:
   version:
     runs-on: ubuntu-26.04
     timeout-minutes: 5
+    outputs:
+      tag_object: ${{ steps.gate.outputs.tag_object }}
     permissions:
       contents: read
       actions: read
@@ -22,16 +24,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Match the release tag to the project version
-        shell: python
-        run: |
-          import os
-          import re
-          from pathlib import Path
-          version = re.search(r'^set\(QCWS_VERSION "([0-9]+\.[0-9]+\.[0-9]+)"', Path("CMakeLists.txt").read_text(encoding="utf-8"), re.MULTILINE)
-          if version is None or os.environ["GITHUB_REF_NAME"] != f"v{version[1]}":
-              raise RuntimeError("The release tag must match QCWS_VERSION in CMakeLists.txt")
-      - name: Require main CI to pass for this exact commit
+      - name: Verify the annotated release tag and main CI
+        id: gate
         env:
           GH_TOKEN: ${{ github.token }}
         run: python scripts/release_gate.py
@@ -43,7 +37,7 @@ jobs:
       release: true
 
   publish:
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-26.04
     timeout-minutes: 25
     permissions:
@@ -64,6 +58,7 @@ jobs:
         run: |
           import hashlib
           import json
+          import os
           import re
           import shutil
           import urllib.parse
@@ -72,8 +67,14 @@ jobs:
 
           assets = Path("release-assets")
           packages = sorted(assets.iterdir())
-          if any(not item.is_file() for item in packages) or sorted(item.suffix for item in packages) != [".deb", ".msi", ".zip"]:
-              raise RuntimeError("Expected exactly one ZIP, MSI and DEB from this run")
+          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          expected_packages = {
+              f"QCopilots-WebSearch-{version}-win64.zip",
+              f"QCopilots-WebSearch-{version}-win64.msi",
+              f"qcopilots-websearch-{version}_amd64.deb",
+          }
+          if any(not item.is_file() for item in packages) or {item.name for item in packages} != expected_packages:
+              raise RuntimeError(f"Expected the Windows ZIP, MSI and Ubuntu DEB for {version}")
           source = json.loads(Path("config/dependencies.lock.json").read_text())["qt_source"]
           expected = source["sha256"]
           url = urllib.parse.urlsplit(source["url"])
@@ -104,5 +105,12 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          ACCEPTED_TAG_OBJECT: ${{ needs.version.outputs.tag_object }}
         run: |
-          gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --generate-notes
+          local_tag=$(git rev-parse --verify "$GITHUB_REF")
+          remote_tag=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" --jq '.object.sha')
+          if [[ "$local_tag" != "$ACCEPTED_TAG_OBJECT" || "$remote_tag" != "$ACCEPTED_TAG_OBJECT" ]]; then
+            echo "The annotated release tag changed after validation." >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --notes-from-tag

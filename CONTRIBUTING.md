@@ -1,6 +1,6 @@
 # Contributing
 
-Discuss contract or deployment changes before extending the initial scope.
+Discuss proposed changes to public contracts or deployment behavior before implementation.
 Keep implementation and tests portable across Windows 11 amd64 and Ubuntu 26.04
 amd64. Follow the repository's `.clang-format` configuration for C++.
 
@@ -10,9 +10,10 @@ or machine-specific build paths. Keep generated reports and review archives out
 of version control. Keep dependency versions and verification hashes
 together. Changes to dependency versions require both platform builds.
 
-Inputs and outputs shared by the MCP transports and the QGIS adapter are a versioned
-contract. Update canonical schemas, adapter copies, interface documentation and
-contract tests and SHA256SUMS together. Do not add test-only bypasses to public-fetch protections.
+Both MCP transports expose the same versioned tool contract. The QGIS adapter
+relays tool discovery and calls to the service. Keep canonical schemas, interface
+documentation, contract tests and SHA256SUMS in sync when changing the tool contract.
+Do not add test-only bypasses to public-fetch protections.
 Prefer injected transports, temporary directories, dynamic ports and controllable
 clocks for deterministic tests. Keep public-engine checks separate from the
 deterministic suite.

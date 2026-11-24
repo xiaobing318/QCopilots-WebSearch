@@ -8,7 +8,7 @@
     },
     "clients": {
       "type": "array",
-      "description": "Initial client credentials. Accepts 0 to 100 clients. A state client registry takes precedence once created.",
+      "description": "Complete list of authorized clients. Accepts 0 to 100 clients. An empty registry authorizes no clients.",
       "items": {
         "type": "object",
         "properties": {
@@ -31,7 +31,7 @@
           },
           "token_sha256": {
             "type": "string",
-            "description": "Lowercase SHA-256 digest of a client credential. Created by the token configuration commands and read at startup.",
+            "description": "Lowercase SHA-256 digest used to authenticate this client. Revealing a manual credential also requires its matching token_value.",
             "pattern": "^[a-f0-9]{64}$"
           },
           "token_value": {

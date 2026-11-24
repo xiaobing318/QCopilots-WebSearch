@@ -15,6 +15,6 @@ will ignore instructions embedded in that content. Consumers must preserve the
 distinction between source text and trusted instructions.
 
 Dependency and operating-system security updates require rebuilding or updating
-the applicable component and repeating affected tests. Current release support
-and fixed versions are recorded in release notes. Untagged development commits
-have not passed the complete deployment gates.
+the applicable component and repeating affected tests. See the published release
+notes for security fixes. The Release workflow issues build attestations for the
+installers and portable archive after installation checks pass.
