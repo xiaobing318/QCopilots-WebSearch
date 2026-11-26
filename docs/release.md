@@ -8,8 +8,8 @@ GitHub Actions 在 Windows Server 2025 上生成 Windows x64 便携 ZIP 和 MSI�
 
 ## 持续集成
 
-- `ci.yml` 接受分支推送、拉取请求和手动触发，另有一项作业检查文档标点。
-- 可复用的 `build.yml` 使用 `.nvmrc` 指定的 Node 构建一次前端。两个平台使用同一份 `web-dist` 编译、测试、安装和打包原生服务，并运行 MCP SDK 测试。
+- `ci.yml` 接受分支推送、拉取请求和手动触发，并在这些运行中检查文档标点。
+- Release 调用同一个 `ci.yml` 运行构建与验收作业。每次运行使用 `.nvmrc` 指定的 Node 构建一次前端。两个平台使用同一份 `web-dist` 编译、测试、安装和打包原生服务，并运行 MCP SDK 测试。
 - Windows 验证本次构建的 ZIP。手动 CI 和 Release 还会使用同一份 MSI，依次检查默认及自定义安装目录、凭据与配置保留，并分别在初始化后和服务启动后触发故障，验证安装事务回滚。
 - Ubuntu 验证本次构建的 DEB，包括同包重装、服务故障恢复，以及 `remove` 和 `purge` 对运行配置、凭据和数据的处理。
 - main 的 push CI 和手动 CI 还会在 Ubuntu 上执行 ASan、UBSan、clang-tidy 和限时模糊测试。MSI 生命周期测试在具有管理员权限的可丢弃环境中执行。
@@ -85,9 +85,9 @@ $pushRunId = Read-Host '输入本提交的 main push CI 运行 ID，列表未更
 Watch-CheckedRun $pushRunId 'CI' 'push' 'main'
 ```
 
-### 3. 创建带中文发布说明的注释标签
+### 3. 创建带注释的版本标签
 
-标签注释将成为 GitHub Release 正文。按本次交付撰写中文 Markdown 说明，核对包名、目标系统和主要功能。说明文件使用无 BOM 的 UTF-8、LF 换行和一个消息终止换行。推送前核对该 SHA 最新的 main push CI、标签对象、目标提交和正文。
+使用版本号作为标签注释。GitHub Release 标题使用版本号，正文留空。推送前核对该 SHA 最新的 main push CI、标签类型和目标提交。
 
 ```powershell
 $gate = @(gh run list --repo $repo --workflow ci.yml --branch main --event push --commit $releaseSha --limit 1 --json headSha,status,conclusion | ConvertFrom-Json)
@@ -95,42 +95,18 @@ if ($LASTEXITCODE -ne 0 -or $gate.Count -ne 1 -or $gate[0].headSha -ne $releaseS
     $gate[0].status -ne 'completed' -or $gate[0].conclusion -ne 'success') {
     throw '本提交最新的 main push CI 尚未成功。'
 }
-$utf8 = [Text.UTF8Encoding]::new($false)
-[Console]::OutputEncoding = $utf8
-$notes = @'
-## 安装包
-
-- Windows 11 x64 提供便携 ZIP 和 MSI。
-- Ubuntu 26.04 amd64 提供 DEB。
-
-通过 MCP HTTP 或 stdio 可调用搜索、网页读取、页内查找和服务状态四项工具。发布资产附有对应的 Qt 源码与 `SHA256SUMS` 校验清单。
-'@
-$notes = $notes -replace '\r\n?', "`n"
-$tagMessage = $notes + "`n"
-$notesFile = [IO.Path]::GetTempFileName()
-try {
-    [IO.File]::WriteAllText($notesFile, $tagMessage, $utf8)
-    git tag -a --cleanup=verbatim -F $notesFile $tag $releaseSha
-    if ($LASTEXITCODE -ne 0) { throw '创建注释标签失败，请检查已有标签。' }
-} finally {
-    Remove-Item -LiteralPath $notesFile
-}
+git tag -a -m $tag $tag $releaseSha
+if ($LASTEXITCODE -ne 0) { throw '创建注释标签失败，请检查已有标签。' }
 $tagRef = "refs/tags/$tag"
 $tagType = git cat-file -t $tagRef
 if ($LASTEXITCODE -ne 0 -or $tagType -cne 'tag') { throw '需要带注释的标签。' }
 $tagCommit = git rev-parse --verify "$tagRef^{commit}"
 if ($LASTEXITCODE -ne 0 -or $tagCommit -cne $releaseSha) { throw '标签指向的提交与发布 SHA 不一致。' }
-$contents = (git tag --list $tag '--format=%(contents)') -join "`n"
-if ($LASTEXITCODE -ne 0) { throw '读取标签正文失败。' }
-$signature = (git tag --list $tag '--format=%(contents:signature)') -join "`n"
-if ($LASTEXITCODE -ne 0 -or ![string]::Equals($contents, $tagMessage + $signature, [StringComparison]::Ordinal)) {
-    throw '本地标签正文与发布说明不一致。'
-}
 git push origin "refs/tags/$tag"
 if ($LASTEXITCODE -ne 0) { throw '推送标签失败，请检查远端状态。' }
 ```
 
-标签推送会触发 Release。安装验收成功后，工作流校验锁定的 Qt 源码，生成 `SHA256SUMS`，为三个安装包签发构建来源证明，并用 `gh release create --verify-tag --notes-from-tag` 发布。[GitHub Release 命令](https://cli.github.com/manual/gh_release_create)
+标签推送会触发 Release。安装验收成功后，工作流校验锁定的 Qt 源码，生成 `SHA256SUMS`，为三个安装包签发构建来源证明，并用 `gh release create --verify-tag --title "$GITHUB_REF_NAME" --notes ""` 发布。[GitHub Release 命令](https://cli.github.com/manual/gh_release_create)
 
 ### 4. 验证发布页、资产与来源证明
 
@@ -140,12 +116,11 @@ $releaseRunId = Read-Host '输入本标签的 Release 运行 ID，列表未更�
 Watch-CheckedRun $releaseRunId 'Release' 'push' $tag
 $remoteTag = git ls-remote --exit-code --tags origin "refs/tags/$tag^{}"
 if ($LASTEXITCODE -ne 0 -or ($remoteTag -split '\s+')[0] -ne $releaseSha) { throw '远端注释标签指向其他提交。' }
-$release = gh release view $tag --repo $repo --json tagName,body,isDraft,isPrerelease | ConvertFrom-Json
+$release = gh release view $tag --repo $repo --json tagName,name,body,isDraft,isPrerelease | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0 -or $release.tagName -cne $tag -or $release.isDraft -or $release.isPrerelease) {
     throw '发布页的标签或正式发布状态不符。'
 }
-$publishedNotes = $release.body -replace '\r\n?', "`n"
-if (![string]::Equals($publishedNotes, $notes, [StringComparison]::Ordinal)) { throw 'Release 正文与已核对的中文说明不一致。' }
+if ($release.name -cne $tag -or $release.body) { throw 'Release 标题必须为版本号，正文必须为空。' }
 $latest = gh api "repos/$repo/releases/latest" --jq '.tag_name'
 if ($LASTEXITCODE -ne 0 -or $latest -cne $tag) { throw 'Latest 未指向本次正式发布。' }
 $releaseDir = Join-Path ([IO.Path]::GetTempPath()) "qcopilots-$tag-$([guid]::NewGuid())"

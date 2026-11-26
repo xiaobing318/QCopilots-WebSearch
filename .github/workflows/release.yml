@@ -32,7 +32,7 @@ jobs:
 
   build:
     needs: version
-    uses: ./.github/workflows/build.yml
+    uses: ./.github/workflows/ci.yml
     with:
       release: true
 
@@ -116,5 +116,5 @@ jobs:
             fi
           }
           verify_release_tag
-          gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --notes-from-tag
+          gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --title "$GITHUB_REF_NAME" --notes ""
           verify_release_tag

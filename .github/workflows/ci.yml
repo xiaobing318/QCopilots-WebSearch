@@ -5,21 +5,259 @@ on:
     branches: ['**']
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      release:
+        description: Require the release acceptance suite
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ${{ inputs.release && format('ci-release-call-{0}', github.run_id) || format('ci-{0}', github.event.pull_request.number || github.ref) }}
+  cancel-in-progress: ${{ !inputs.release }}
+
+env:
+  PYTHONUTF8: '1'
+  PYTHONUNBUFFERED: '1'
+  DEBIAN_FRONTEND: noninteractive
 
 jobs:
-  build:
-    uses: ./.github/workflows/build.yml
-    with:
-      deep: ${{ github.event_name == 'workflow_dispatch' }}
+  web:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Check and build the settings UI
+        working-directory: web
+        run: |
+          npm ci --ignore-scripts
+          npm run lint
+          npm run format:check
+          npm run typecheck
+          npm run test:ci
+          npm run build
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: web-dist
+          path: web/dist/
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
+
+  native:
+    name: ${{ matrix.platform }}
+    needs: web
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            platform: windows-x64
+          - os: ubuntu-26.04
+            platform: ubuntu-x64
+    env:
+      QCWS_PROFILE: ci-${{ matrix.platform }}
+      QCWS_WEB_DIST_DIR: ${{ github.workspace }}/build/ci-web-dist
+      QCWS_ACCEPTANCE_DIR: ${{ github.workspace }}/build/ci-acceptance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13.17'
+          architecture: x64
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .cache/downloads
+            .cache/sources
+            .cache/qt
+          key: qcws-deps-${{ matrix.os }}-${{ hashFiles('config/dependencies.lock.json') }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: web-dist
+          path: ${{ env.QCWS_WEB_DIST_DIR }}
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        if: runner.os == 'Windows'
+        with:
+          dotnet-version: '10.0.404'
+      - name: Install pinned WiX tooling
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+          DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE: 'true'
+        run: |
+          $wixToolDir = Join-Path $env:RUNNER_TEMP qcws-wix
+          $env:WIX_EXTENSIONS = Join-Path $env:RUNNER_TEMP qcws-wix-extensions
+          dotnet tool install wix --version 7.0.1 --tool-path $wixToolDir --allow-roll-forward
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $wix = Join-Path $wixToolDir wix.exe
+          & $wix extension add --global WixToolset.UI.wixext/7.0.1 -acceptEula wix7
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value $wixToolDir
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "WIX_EXTENSIONS=$env:WIX_EXTENSIONS"
+      - name: Bootstrap, build, test and package
+        shell: python
+        run: |
+          import os, subprocess, sys
+          subprocess.run([
+              sys.executable, "scripts/pipeline.py", "--ConfigPath", "config/BuildPipeline.json",
+              "--Profile", os.environ["QCWS_PROFILE"],
+              "--Stages", "bootstrap,doctor,configure,build,test,install,publish",
+          ], check=True)
+      - name: Locate the staged service executable
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+
+          install = Path("install", os.environ["QCWS_PROFILE"])
+          pattern = "bin/qcopilots-websearch.exe" if os.name == "nt" else "opt/qcopilots-websearch-*/bin/qcopilots-websearch"
+          matches = [path.resolve() for path in install.glob(pattern) if path.is_file()]
+          if len(matches) != 1:
+              raise RuntimeError(f"Expected one staged service executable under {install}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(f"QCWS_EXECUTABLE={matches[0]}\n")
+      - name: Check the installed service with the MCP SDK
+        shell: python
+        run: |
+          import os, subprocess, sys
+          from pathlib import Path
+          output = Path(os.environ["QCWS_ACCEPTANCE_DIR"])
+          output.mkdir(parents=True, exist_ok=True)
+          subprocess.run([sys.executable, "-m", "pip", "install", "--require-hashes", "-r", "tests/requirements.lock"], check=True)
+          fixture = Path("build", os.environ["QCWS_PROFILE"], "tests", "qcws_sdk_page_fixture")
+          env = os.environ.copy()
+          if os.name == "nt":
+              fixture = fixture.with_suffix(".exe")
+              env["PATH"] = str(Path(env["QCWS_EXECUTABLE"]).parent) + os.pathsep + env["PATH"]
+          subprocess.run([
+              sys.executable, "scripts/test_mcp_sdk.py",
+              "--Executable", env["QCWS_EXECUTABLE"], "--PageFixture", str(fixture),
+              "--Output", str(output / "mcp-sdk.json"),
+          ], env=env, check=True)
+      - name: Verify the packaged service
+        shell: python
+        env:
+          QCWS_FULL_ACCEPTANCE: ${{ (inputs.release || github.event_name == 'workflow_dispatch') && 'true' || 'false' }}
+        run: |
+          import hashlib, json, os, shutil, subprocess, sys
+          from pathlib import Path
+
+          def package(build, suffix):
+              candidates = list(Path(build, "packages").glob(f"*/*{suffix}"))
+              if len(candidates) != 1:
+                  raise RuntimeError(f"Expected one {suffix} package in {build}")
+              return candidates[0].resolve()
+
+          def digest(path):
+              with path.open("rb") as stream:
+                  return hashlib.file_digest(stream, "sha256").hexdigest()
+
+          build = Path("build", os.environ["QCWS_PROFILE"])
+          output = Path(os.environ["QCWS_ACCEPTANCE_DIR"])
+          if os.name == "nt":
+              zip_file = package(build, ".zip")
+              subprocess.run([
+                  sys.executable, "scripts/acceptance_windows_zip.py", "--Package", str(zip_file),
+                  "--PackageSHA256", digest(zip_file), "--Output", str(output / "zip.json"),
+              ], check=True)
+              if os.environ["QCWS_FULL_ACCEPTANCE"] == "true":
+                  candidate = package(build, ".msi")
+                  subprocess.run([
+                      "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                      "scripts/AcceptWindowsMsi.ps1", "--CandidateMsi", str(candidate),
+                      "--CandidateSHA256", digest(candidate), "--OutputDir", str(output / "msi"),
+                  ], check=True)
+          else:
+              candidate = package(build, ".deb")
+              report_path = output / "deb.json"
+              subprocess.run([
+                  "sudo", "/usr/bin/python3", "scripts/acceptance_deb.py", "--Package", str(candidate),
+                  "--PackageSHA256", digest(candidate), "--OutputPath", str(report_path),
+                  "--DisposableMachine",
+              ], check=True)
+              report = json.loads(report_path.read_text(encoding="utf-8"))
+              print(f"Candidate DEB SHA-256: {report['candidateSha256']}")
+              for name, check in report["checks"].items():
+                  print(f"{name}: {check['status']}")
+          distribution = build / "release-packages"
+          distribution.mkdir()
+          suffixes = (".zip", ".msi") if os.name == "nt" else (".deb",)
+          for suffix in suffixes:
+              shutil.copy2(package(build, suffix), distribution)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: packages-${{ matrix.platform }}
+          path: build/ci-${{ matrix.platform }}/release-packages/
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: native-failure-${{ matrix.platform }}
+          path: |
+            build/ci-${{ matrix.platform }}/test-results.xml
+            ${{ env.QCWS_ACCEPTANCE_DIR }}
+          if-no-files-found: ignore
+          retention-days: 7
+          overwrite: true
+
+  quality:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    needs: web
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    env:
+      QCWS_WEB_DIST_DIR: ${{ github.workspace }}/build/ci-web-dist
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13.17'
+          architecture: x64
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .cache/downloads
+            .cache/sources
+            .cache/qt
+          key: qcws-deps-ubuntu-26.04-${{ hashFiles('config/dependencies.lock.json') }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: web-dist
+          path: ${{ env.QCWS_WEB_DIST_DIR }}
+      - name: Run sanitizers, clang-tidy and fuzzing
+        run: |
+          python scripts/quality.py --ConfigPath config/BuildPipeline.json --Profile ci-ubuntu-x64 --Seconds 60 --OutputDir build/quality-report
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: quality-failure
+          path: build/quality-report/
+          if-no-files-found: ignore
+          retention-days: 7
+          overwrite: true
 
   documentation:
+    if: ${{ !inputs.release }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
