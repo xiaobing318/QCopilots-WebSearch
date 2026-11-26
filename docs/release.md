@@ -87,7 +87,7 @@ Watch-CheckedRun $pushRunId 'CI' 'push' 'main'
 
 ### 3. 创建带注释的版本标签
 
-使用版本号作为标签注释。GitHub Release 标题使用版本号，正文留空。推送前核对该 SHA 最新的 main push CI、标签类型和目标提交。
+使用版本号作为标签注释。GitHub Release 标题使用版本号，页面正文留空。发布命令写入不可见的空 HTML 注释，避免 GitHub 在正文为空时显示标签注释。推送前核对该 SHA 最新的 main push CI、标签类型和目标提交。
 
 ```powershell
 $gate = @(gh run list --repo $repo --workflow ci.yml --branch main --event push --commit $releaseSha --limit 1 --json headSha,status,conclusion | ConvertFrom-Json)
@@ -106,7 +106,7 @@ git push origin "refs/tags/$tag"
 if ($LASTEXITCODE -ne 0) { throw '推送标签失败，请检查远端状态。' }
 ```
 
-标签推送会触发 Release。安装验收成功后，工作流校验锁定的 Qt 源码，生成 `SHA256SUMS`，为三个安装包签发构建来源证明，并用 `gh release create --verify-tag --title "$GITHUB_REF_NAME" --notes ""` 发布。[GitHub Release 命令](https://cli.github.com/manual/gh_release_create)
+标签推送会触发 Release。安装验收成功后，工作流校验锁定的 Qt 源码，生成 `SHA256SUMS`，为三个安装包签发构建来源证明，并用 `gh release create --verify-tag --title "$GITHUB_REF_NAME" --notes '<!-- -->'` 发布。[GitHub Release 命令](https://cli.github.com/manual/gh_release_create)
 
 ### 4. 验证发布页、资产与来源证明
 
@@ -120,7 +120,7 @@ $release = gh release view $tag --repo $repo --json tagName,name,body,isDraft,is
 if ($LASTEXITCODE -ne 0 -or $release.tagName -cne $tag -or $release.isDraft -or $release.isPrerelease) {
     throw '发布页的标签或正式发布状态不符。'
 }
-if ($release.name -cne $tag -or $release.body) { throw 'Release 标题必须为版本号，正文必须为空。' }
+if ($release.name -cne $tag -or $release.body -cne '<!-- -->') { throw 'Release 应显示版本号标题和空白正文。' }
 $latest = gh api "repos/$repo/releases/latest" --jq '.tag_name'
 if ($LASTEXITCODE -ne 0 -or $latest -cne $tag) { throw 'Latest 未指向本次正式发布。' }
 $releaseDir = Join-Path ([IO.Path]::GetTempPath()) "qcopilots-$tag-$([guid]::NewGuid())"
