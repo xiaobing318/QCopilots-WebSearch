@@ -120,7 +120,7 @@ msiexec.exe /i "C:\Downloads\QCopilots-WebSearch-0.5.1-win64.msi" INSTALL_ROOT="
 
 本机交互式用户可以读取 `admin.token`，用于登录设置页并管理搜索设置。运行配置、客户端令牌和搜索源密钥各自受文件 ACL 保护。在目标版本安装目录的 `bin` 下运行 `qcopilots-websearch.exe --SettingsUrl`，即可为正在运行的服务生成一次性链接。
 
-请以管理员身份运行 MSI，并阅读安装程序显示的 Apache 许可条款和 Microsoft 运行库条款。安装包的签名状态以发布说明为准，未特别说明时为未签名。在 Windows 的“已安装的应用”中按版本选择要卸载的 MSI。卸载会移除该版本的程序文件和服务，并保留配置和数据。
+请以管理员身份运行 MSI，并阅读安装程序显示的 Apache 许可条款和 Microsoft 运行库条款。可在 PowerShell 中用 `Get-AuthenticodeSignature -LiteralPath <MSI 文件路径>` 查看所下载 MSI 的签名状态。在 Windows 的“已安装的应用”中按版本选择要卸载的 MSI。卸载会移除该版本的程序文件和服务，并保留配置和数据。
 
 将便携 ZIP 解压到私有可写目录，每个便携实例使用独立的解压目录。例如，将 `QCopilots-WebSearch-0.5.1-win64.zip` 下载到 `C:\Softwares\QCopilots-WebSearch`，解压后确认 `C:\Softwares\QCopilots-WebSearch\QCopilots-WebSearch-0.5.1-win64\bin\qcopilots-websearch.exe` 存在，避免重复嵌套同名目录。在解压目录运行 `.\bin\qcopilots-websearch.exe`，即可在前台启动服务。
 

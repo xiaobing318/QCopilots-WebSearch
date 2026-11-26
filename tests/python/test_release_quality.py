@@ -83,7 +83,7 @@ class ParallelQualityTests(unittest.TestCase):
 class ReleaseGateTests(unittest.TestCase):
     commit = 'a' * 40
 
-    def test_project_tag_must_be_annotated_with_notes_for_the_triggering_commit(self):
+    def test_project_tag_requires_a_nonempty_annotation_for_the_triggering_commit(self):
         project = (Path(__file__).resolve().parents[2] / 'CMakeLists.txt').read_text(encoding='utf-8')
         version = re.search(r'^set\(QCWS_VERSION "([^"]+)"', project, re.MULTILINE)[1]
         tag = f'v{version}'
@@ -109,10 +109,10 @@ class ReleaseGateTests(unittest.TestCase):
                 release_gate.verify_tag(tag, commit, root)
             git('tag', '-d', tag)
             git('tag', '-a', '--cleanup=verbatim', '-m', '   ', tag)
-            with self.assertRaisesRegex(RuntimeError, 'must contain release notes'):
+            with self.assertRaisesRegex(RuntimeError, 'annotation must not be empty'):
                 release_gate.verify_tag(tag, commit, root)
             git('tag', '-d', tag)
-            git('tag', '-a', '--cleanup=verbatim', '-m', '## Release notes\n\nPackage changes.', tag)
+            git('tag', '-a', '--cleanup=verbatim', '-m', tag, tag)
             self.assertEqual(release_gate.verify_tag(tag, commit, root), git('rev-parse', f'refs/tags/{tag}'))
             with self.assertRaisesRegex(RuntimeError, 'triggering commit'):
                 release_gate.verify_tag(tag, '0' * 40, root)

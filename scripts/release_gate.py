@@ -23,7 +23,7 @@ def verify_tag(tag, commit, root=Path('.')):
     if git('rev-parse', f'{ref}^{{commit}}') != commit:
         raise RuntimeError('The release tag must point to the triggering commit')
     if not git('for-each-ref', '--format=%(contents:subject)%0a%(contents:body)', ref):
-        raise RuntimeError('The tag annotation must contain release notes')
+        raise RuntimeError('The release tag annotation must not be empty')
     return git('rev-parse', ref)
 
 
