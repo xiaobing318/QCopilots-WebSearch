@@ -69,9 +69,9 @@ jobs:
           packages = sorted(assets.iterdir())
           version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
           expected_packages = {
-              f"QCopilots-WebSearch-{version}-win64.zip",
-              f"QCopilots-WebSearch-{version}-win64.msi",
-              f"qcopilots-websearch-{version}_amd64.deb",
+              f"QCopilots-WebSearch-{version}-win-amd64.zip",
+              f"QCopilots-WebSearch-{version}-win-amd64.msi",
+              f"QCopilots-WebSearch-{version}-linux-amd64.deb",
           }
           if any(not item.is_file() for item in packages) or {item.name for item in packages} != expected_packages:
               raise RuntimeError(f"Expected the Windows ZIP, MSI and Ubuntu DEB for {version}")
