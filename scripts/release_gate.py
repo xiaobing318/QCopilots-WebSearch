@@ -1,6 +1,7 @@
 """Prepare an annotated release tag and verify its main CI and workflow identity."""
 import argparse
 from functools import partial
+from http.client import HTTPException
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ from urllib.request import Request, urlopen
 
 TAG_PATTERN = r'v[0-9]+\.[0-9]+\.[0-9]+'
 SHA_PATTERN = r'[a-f0-9]{40}'
+UNCERTAIN_RESPONSE = (URLError, ConnectionError, TimeoutError, HTTPException, json.JSONDecodeError, UnicodeError)
 
 
 def repository_path(repository):
@@ -130,11 +132,22 @@ def create_release_ref(request, api_root, ref, tag_object):
             raise
         error.close()
         observed = git_ref(request, api_root, ref)
-    except (URLError, TimeoutError, ConnectionError):
+    except UNCERTAIN_RESPONSE:
         observed = git_ref(request, api_root, ref)
     if (observed is None or observed.get('ref') != ref
             or observed['object']['type'] != 'tag' or observed['object']['sha'] != tag_object):
         raise RuntimeError(f'Could not confirm creation of {ref} with tag object {tag_object}')
+
+
+def active_release_run(request, api_root, tag, commit):
+    query = urlencode({'branch': tag, 'head_sha': commit, 'per_page': 100})
+    runs = request(api_root + '/actions/workflows/release.yml/runs?' + query)['workflow_runs']
+    return max((run['id'] for run in runs
+                if run['head_branch'] == tag and run['head_sha'] == commit
+                and run['path'] == '.github/workflows/release.yml'
+                and run['event'] in ('push', 'workflow_dispatch')
+                and run['status'] in ('requested', 'queued', 'pending', 'waiting', 'in_progress')),
+               default=None)
 
 
 def prepare_release(repository, commit, tag, request, report, root=Path('.')):
@@ -158,15 +171,21 @@ def prepare_release(repository, commit, tag, request, report, root=Path('.')):
         tag_object = annotation['sha']
         if not re.fullmatch(SHA_PATTERN, tag_object):
             raise RuntimeError('GitHub returned an invalid annotated tag object SHA')
-        if request(api_root + '/branches/main')['commit']['sha'] != commit:
-            raise RuntimeError('main advanced before the tag reference could be created')
-        create_release_ref(request, api_root, ref, tag_object)
     else:
         tag_object = compatible_tag_object(request, api_root, existing, tag, commit)
 
     actions_url = f'https://github.com/{repository}/actions'
-    report(f'Confirmed {ref} at commit {commit}, annotated object {tag_object}.')
+    report(f'Release target {ref}, commit {commit}, annotated object {tag_object}.')
     report(f'Check [Release runs]({actions_url}/workflows/release.yml) for this tag and commit before retrying.')
+    if existing is None:
+        if request(api_root + '/branches/main')['commit']['sha'] != commit:
+            raise RuntimeError('main advanced before the tag reference could be created')
+        create_release_ref(request, api_root, ref, tag_object)
+    else:
+        pending = active_release_run(request, api_root, tag, commit)
+        if pending is not None:
+            report(f'Release is already queued or running: [Release run]({actions_url}/runs/{pending}).')
+            return pending
     retry_message = 'Could not confirm Release dispatch. Check the tag and commit above before retrying.'
     try:
         dispatched = request(api_root + '/actions/workflows/release.yml/dispatches', {
@@ -174,7 +193,7 @@ def prepare_release(repository, commit, tag, request, report, root=Path('.')):
             'inputs': {'tag': tag, 'expected_tag_object': tag_object},
             'return_run_details': True,
         })
-    except (URLError, TimeoutError, ConnectionError) as error:
+    except UNCERTAIN_RESPONSE as error:
         raise RuntimeError(retry_message) from error
     run_id = (dispatched or {}).get('workflow_run_id')
     if type(run_id) is not int or run_id <= 0:
@@ -186,8 +205,8 @@ def prepare_release(repository, commit, tag, request, report, root=Path('.')):
 def verify_dispatch_tag(ref, tag, expected_tag_object):
     if not re.fullmatch(TAG_PATTERN, tag) or ref != f'refs/tags/{tag}':
         raise RuntimeError('Use the main branch to prepare a release or dispatch its matching version tag')
-    if expected_tag_object and not re.fullmatch(SHA_PATTERN, expected_tag_object):
-        raise RuntimeError('Invalid expected annotated tag object SHA')
+    if not re.fullmatch(SHA_PATTERN, expected_tag_object):
+        raise RuntimeError('A tagged manual release requires the full expected annotated tag object SHA')
 
 
 def main():

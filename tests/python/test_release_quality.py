@@ -1,5 +1,6 @@
 """Quality checks must reject incomplete or ineffective execution immediately."""
 import copy
+from http.client import IncompleteRead
 import os
 from pathlib import Path
 import re
@@ -192,6 +193,7 @@ class ManualReleaseTests(unittest.TestCase):
         self.ref_result = self.tag_ref(self.object_sha)
         self.ref_error = None
         self.dispatch_error = None
+        self.release_runs = []
         self.writes = []
         self.messages = []
 
@@ -213,6 +215,8 @@ class ManualReleaseTests(unittest.TestCase):
                 'path': '.github/workflows/ci.yml', 'status': 'completed',
                 'conclusion': self.ci_conclusion,
             }]}
+        if path.startswith('/actions/workflows/release.yml/runs?'):
+            return {'workflow_runs': self.release_runs}
         if path == '/releases?per_page=100&page=1':
             return self.releases
         if path == f'/git/ref/heads/{self.tag}' and self.branch_collision:
@@ -298,6 +302,19 @@ class ManualReleaseTests(unittest.TestCase):
             self.launch()
         self.assertEqual(self.writes, [])
 
+    def test_retry_links_an_active_matching_run_without_dispatching(self):
+        self.existing_ref = self.tag_ref(self.object_sha)
+        active = {'id': 10, 'head_sha': self.commit, 'head_branch': self.tag,
+                  'event': 'workflow_dispatch', 'path': '.github/workflows/release.yml', 'status': 'queued'}
+        self.release_runs = [
+            active, active | {'id': 11, 'event': 'pull_request'},
+            active | {'id': 12, 'head_sha': 'e' * 40}, active | {'id': 13, 'status': 'completed'},
+            active | {'id': 14, 'head_branch': 'main'}, active | {'id': 15, 'path': '.github/workflows/ci.yml'},
+        ]
+        self.assertEqual(self.launch(), 10)
+        self.assertIn('/actions/runs/10', self.messages[-1])
+        self.assertEqual(self.writes, [])
+
     def test_ref_conflict_reconciles_only_the_same_raw_object(self):
         self.ref_error = HTTPError('/git/refs', 422, 'Reference exists', None, None)
         self.ref_result = self.tag_ref('e' * 40)
@@ -307,6 +324,17 @@ class ManualReleaseTests(unittest.TestCase):
         self.existing_ref = None
         self.ref_result = self.tag_ref(self.object_sha)
         self.assertEqual(self.launch(), 27)
+
+    def test_truncated_ref_response_preserves_evidence_and_recovers_exact_ref(self):
+        self.ref_error = IncompleteRead(b'{"ref":')
+
+        def request(path, body=None):
+            if path == self.api_root + '/git/refs':
+                self.assertIn(self.object_sha, self.messages[0])
+            return self.request(path, body)
+
+        self.assertEqual(self.launch(request), 27)
+        self.assertEqual(len(self.writes), 3)
 
     def test_dispatch_with_unknown_outcome_reports_recovery_and_does_not_retry(self):
         self.dispatch_error = URLError('connection lost')
@@ -318,10 +346,9 @@ class ManualReleaseTests(unittest.TestCase):
 
     def test_worker_rejects_branch_mismatched_tag_invalid_sha_or_moved_object(self):
         release_gate.verify_dispatch_tag(self.ref, self.tag, self.object_sha)
-        release_gate.verify_dispatch_tag(self.ref, self.tag, '')
         for ref, tag, sha in [('refs/heads/topic', self.tag, ''),
                               (self.ref, 'v1.2.3' if self.tag != 'v1.2.3' else 'v1.2.4', ''),
-                              (self.ref, self.tag, 'x' * 40)]:
+                              (self.ref, self.tag, 'x' * 40), (self.ref, self.tag, '')]:
             with self.subTest(ref=ref, tag=tag, sha=sha), self.assertRaises(RuntimeError):
                 release_gate.verify_dispatch_tag(ref, tag, sha)
         environment = {

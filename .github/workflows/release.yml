@@ -10,7 +10,7 @@ on:
         required: true
         type: string
       expected_tag_object:
-        description: Internal tag object check. Leave blank when running from main.
+        description: Approved tag object SHA. Leave blank when running from main.
         required: false
         type: string
 
