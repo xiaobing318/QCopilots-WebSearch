@@ -8,7 +8,7 @@ Search works without an API key through DuckDuckGo HTML, DuckDuckGo Lite and Bin
 
 ## Install and open Settings
 
-Download the package for your platform from the [0.5.1 release](https://github.com/xiaobing318/QCopilots-WebSearch/releases/tag/v0.5.1).
+Download the package for your platform from the [0.5.2 release](https://github.com/xiaobing318/QCopilots-WebSearch/releases/tag/v0.5.2).
 
 | Platform | Package | Settings command |
 | --- | --- | --- |

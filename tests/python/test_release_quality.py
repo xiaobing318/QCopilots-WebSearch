@@ -347,6 +347,21 @@ class ManualReleaseTests(unittest.TestCase):
         self.assertIn(self.object_sha, self.messages[0])
         self.assertIn('/actions/workflows/release.yml', self.messages[1])
 
+    def test_prepare_ignores_tagged_retry_field_on_main(self):
+        environment = {
+            'GITHUB_REPOSITORY': self.repo, 'GITHUB_REF': 'refs/heads/main',
+            'GITHUB_SHA': self.commit, 'GITHUB_EVENT_NAME': 'workflow_dispatch',
+            'GH_TOKEN': 'test-token', 'REQUESTED_TAG': self.tag,
+        }
+        for optional_value in ('', self.commit):
+            with (self.subTest(optional_value=optional_value),
+                  patch.dict(os.environ, environment | {'EXPECTED_TAG_OBJECT': optional_value}, clear=True),
+                  patch.object(sys, 'argv', ['release_gate.py', '--prepare']),
+                  patch.object(release_gate, 'prepare_release') as prepare):
+                release_gate.main()
+                prepare.assert_called_once()
+                self.assertEqual(prepare.call_args.args[:3], (self.repo, self.commit, self.tag))
+
     def test_worker_rejects_branch_mismatched_tag_invalid_sha_or_moved_object(self):
         release_gate.verify_dispatch_tag(self.ref, self.tag, self.object_sha)
         for ref, tag, sha in [('refs/heads/topic', self.tag, ''),

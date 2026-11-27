@@ -223,9 +223,8 @@ def main():
     request = partial(github_json, os.environ['GH_TOKEN'])
 
     if args.prepare:
-        if (os.environ['GITHUB_EVENT_NAME'] != 'workflow_dispatch' or ref != 'refs/heads/main'
-                or os.environ.get('EXPECTED_TAG_OBJECT')):
-            raise RuntimeError('Prepare from main and leave expected_tag_object empty')
+        if os.environ['GITHUB_EVENT_NAME'] != 'workflow_dispatch' or ref != 'refs/heads/main':
+            raise RuntimeError('Prepare a release with a manual run from main')
 
         def report(message):
             print(message, flush=True)
