@@ -43,8 +43,11 @@ function Read-Msi([string]$path, [string]$expectedSha256) {
         [void]$view.Close()
         [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($view)
         Assert ($properties.ProductVersion -match '^[0-9]+\.[0-9]+\.[0-9]+$') 'Require a three-field MSI version.'
-        $expectedName = 'QCopilots-WebSearch-{0}-win64.msi' -f $properties.ProductVersion
-        Assert ([string]::Equals([IO.Path]::GetFileName($full), $expectedName, [StringComparison]::Ordinal)) "MSI filename must match ProductVersion ($expectedName)."
+        $expectedName = 'QCopilots-WebSearch-{0}-win-amd64.msi' -f $properties.ProductVersion
+        $legacyName = 'QCopilots-WebSearch-{0}-win64.msi' -f $properties.ProductVersion
+        $packageName = [IO.Path]::GetFileName($full)
+        Assert ([string]::Equals($packageName, $expectedName, [StringComparison]::Ordinal) -or
+                [string]::Equals($packageName, $legacyName, [StringComparison]::Ordinal)) "MSI filename must match ProductVersion ($expectedName or $legacyName)."
         $view = $db.OpenView(('SELECT {0}Name{0}, {0}StartName{0}, {0}Arguments{0} FROM {0}ServiceInstall{0}' -f [char]96))
         [void]$view.Execute()
         $record = $view.Fetch()

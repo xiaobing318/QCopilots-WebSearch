@@ -118,7 +118,7 @@ void validateCredential(const QByteArray &token, bool required, const char *erro
 
 const QRegularExpression &packageDirectoryPattern() {
   static const QRegularExpression pattern(
-      "\\Aqcopilots-websearch(?:-poc)?-([0-9]+\\.[0-9]+\\.[0-9]+)(?:-win64)?\\z",
+      "\\Aqcopilots-websearch(?:-poc)?-([0-9]+\\.[0-9]+\\.[0-9]+)(?:-win64|-win-amd64)?\\z",
       QRegularExpression::CaseInsensitiveOption);
   return pattern;
 }

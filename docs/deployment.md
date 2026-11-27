@@ -64,12 +64,13 @@ llama.cpp WebUI 中添加 Streamable HTTP 服务器，URL 填部署的 `/mcp` �
 
 ## Ubuntu 主机
 
-使用 apt 安装发布版 DEB，将 `version` 设为安装包文件名中的版本号。每个安装包都会创建该版本专用的非特权服务账号和 systemd 单元。DEB 要求 `/opt` 归 `root` 所有，且仅允许所有者写入。
+使用 apt 安装下载的 DEB。以下以 `v0.5.1` 为例。安装新版本时，将 `version` 和 `deb` 替换为实际版本号和文件名。新包文件名格式为 `QCopilots-WebSearch-<版本>-linux-amd64.deb`，systemd 单元名使用 `qcopilots-websearch-<版本>.service`。每个安装包都会创建该版本专用的非特权服务账号和 systemd 单元。DEB 要求 `/opt` 归 `root` 所有，且仅允许所有者写入。
 
 ```bash
 version=0.5.1
 package=qcopilots-websearch-$version
-sudo apt install "./${package}_amd64.deb"
+deb=qcopilots-websearch-0.5.1_amd64.deb
+sudo apt install "./$deb"
 sudo systemctl status "$package.service"
 ```
 
@@ -112,7 +113,7 @@ sudo systemctl restart "$package.service"
 
 MSI 安装 `QCopilotsWebSearch-<version>` 系统服务，运行账号为虚拟账号 `NT SERVICE\QCopilotsWebSearch-<version>`。默认程序目录是 `%ProgramFiles%\QCopilots-WebSearch-<version>`。服务读取该目录中的 `bin\data\runtime.json`。
 
-如需改用其他目录，请在以管理员身份打开的命令提示符中设置 `INSTALL_ROOT`。程序及其 `bin\data` 目录均位于指定位置。请为不同版本选择各自的安装目录。
+如需改用其他目录，请在以管理员身份打开的命令提示符中设置 `INSTALL_ROOT`。程序及其 `bin\data` 目录均位于指定位置。请为不同版本选择各自的安装目录。以下命令使用 `v0.5.1` 的 MSI。安装新版本时，使用下载的 `QCopilots-WebSearch-<版本>-win-amd64.msi`。
 
 ```cmd
 msiexec.exe /i "C:\Downloads\QCopilots-WebSearch-0.5.1-win64.msi" INSTALL_ROOT="C:\Program Files\QCopilots-WebSearch-Custom-0.5.1"
@@ -122,7 +123,7 @@ msiexec.exe /i "C:\Downloads\QCopilots-WebSearch-0.5.1-win64.msi" INSTALL_ROOT="
 
 请以管理员身份运行 MSI，并阅读安装程序显示的 Apache 许可条款和 Microsoft 运行库条款。可在 PowerShell 中用 `Get-AuthenticodeSignature -LiteralPath <MSI 文件路径>` 查看所下载 MSI 的签名状态。在 Windows 的“已安装的应用”中按版本选择要卸载的 MSI。卸载会移除该版本的程序文件和服务，并保留配置和数据。
 
-将便携 ZIP 解压到私有可写目录，每个便携实例使用独立的解压目录。例如，将 `QCopilots-WebSearch-0.5.1-win64.zip` 下载到 `C:\Softwares\QCopilots-WebSearch`，解压后确认 `C:\Softwares\QCopilots-WebSearch\QCopilots-WebSearch-0.5.1-win64\bin\qcopilots-websearch.exe` 存在，避免重复嵌套同名目录。在解压目录运行 `.\bin\qcopilots-websearch.exe`，即可在前台启动服务。
+将便携 ZIP 解压到私有可写目录，每个便携实例使用独立的解压目录。例如，将 `QCopilots-WebSearch-0.5.1-win64.zip` 下载到 `C:\Softwares\QCopilots-WebSearch`，解压后确认 `C:\Softwares\QCopilots-WebSearch\QCopilots-WebSearch-0.5.1-win64\bin\qcopilots-websearch.exe` 存在，避免重复嵌套同名目录。新版本的 `QCopilots-WebSearch-<版本>-win-amd64.zip` 内含与文件主体同名的顶层目录。在含有 `bin` 的目录运行 `.\bin\qcopilots-websearch.exe`，即可在前台启动服务。
 
 首次启动会创建 `bin\data\runtime.json`，并生成客户端令牌和管理令牌。监听器准备就绪后，终端显示实际的业务、MCP、控制、设置地址、配置和数据路径，以及登录方法。无参数启动全新的便携实例时，业务、控制和设置端口固定为 3181、3182、3183，任一端口已占用时启动会失败。已有配置使用其中记录的端口。服务运行期间，从另一个终端执行 `.\bin\qcopilots-websearch.exe --SettingsUrl`，打开该实例的设置页。
 

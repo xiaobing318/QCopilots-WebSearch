@@ -1,5 +1,6 @@
 """Quality checks must reject incomplete or ineffective execution immediately."""
 import copy
+from http.client import IncompleteRead
 import os
 from pathlib import Path
 import re
@@ -9,6 +10,7 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 import xml.etree.ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts'))
@@ -168,6 +170,199 @@ class ReleaseGateTests(unittest.TestCase):
         for repository, commit in [('bad/repo/path', self.commit), ('example/project', '../main')]:
             with self.subTest(repository=repository, commit=commit), self.assertRaises(RuntimeError):
                 release_gate.verify(repository, commit, lambda _: self.fail('Unexpected request'))
+
+
+class ManualReleaseTests(unittest.TestCase):
+    repo = 'example/project'
+    api_root = '/repos/' + repo
+    commit = 'a' * 40
+    object_sha = 'b' * 40
+
+    def setUp(self):
+        self.project = Path(__file__).resolve().parents[2]
+        cmake = (self.project / 'CMakeLists.txt').read_text(encoding='utf-8')
+        version = re.search(r'^set\(QCWS_VERSION "([0-9]+\.[0-9]+\.[0-9]+)"', cmake, re.MULTILINE)[1]
+        self.tag = f'v{version}'
+        self.ref = f'refs/tags/{self.tag}'
+        self.head = self.commit
+        self.ci_conclusion = 'success'
+        self.branch_collision = False
+        self.releases = []
+        self.existing_ref = None
+        self.annotation_commit = self.commit
+        self.ref_result = self.tag_ref(self.object_sha)
+        self.ref_error = None
+        self.dispatch_error = None
+        self.release_runs = []
+        self.writes = []
+        self.messages = []
+
+    def tag_ref(self, object_sha):
+        return {'ref': self.ref, 'object': {'type': 'tag', 'sha': object_sha}}
+
+    def request(self, path, body=None):
+        self.assertTrue(path.startswith(self.api_root + '/'))
+        path = path.removeprefix(self.api_root)
+        if body is not None:
+            self.writes.append((path, body))
+        if path == '/branches/main':
+            return {'commit': {'sha': self.head}}
+        if path.startswith('/compare/'):
+            return {'merge_base_commit': {'sha': self.commit}}
+        if path.startswith('/actions/workflows/ci.yml/runs?'):
+            return {'workflow_runs': [{
+                'id': 10, 'head_sha': self.commit, 'head_branch': 'main', 'event': 'push',
+                'path': '.github/workflows/ci.yml', 'status': 'completed',
+                'conclusion': self.ci_conclusion,
+            }]}
+        if path.startswith('/actions/workflows/release.yml/runs?'):
+            return {'workflow_runs': self.release_runs}
+        if path == '/releases?per_page=100&page=1':
+            return self.releases
+        if path == f'/git/ref/heads/{self.tag}' and self.branch_collision:
+            return {'ref': f'refs/heads/{self.tag}'}
+        if path == f'/git/ref/tags/{self.tag}' and self.existing_ref is not None:
+            return self.existing_ref
+        if path.startswith('/git/ref/'):
+            raise HTTPError(path, 404, 'Not found', None, None)
+        if path == '/git/tags':
+            return {'sha': self.object_sha}
+        if path == '/git/tags/' + self.object_sha:
+            return {'tag': self.tag, 'message': self.tag,
+                    'object': {'sha': self.annotation_commit, 'type': 'commit'}}
+        if path == '/git/refs':
+            if self.ref_error is not None:
+                self.existing_ref = self.ref_result
+                raise self.ref_error
+            return self.ref_result
+        if path == '/actions/workflows/release.yml/dispatches':
+            if self.dispatch_error is not None:
+                raise self.dispatch_error
+            return {'workflow_run_id': 27}
+        self.fail(f'Unexpected GitHub request: {path}')
+
+    def launch(self, request=None, tag=None):
+        with patch.object(release_gate, 'git', return_value=self.commit):
+            return release_gate.prepare_release(
+                self.repo, self.commit, self.tag if tag is None else tag,
+                request or self.request, self.messages.append, self.project,
+            )
+
+    def test_preparation_creates_and_dispatches_an_exact_annotated_tag(self):
+        self.assertEqual(self.launch(), 27)
+        self.assertEqual(self.writes, [
+            ('/git/tags', {'tag': self.tag, 'message': self.tag, 'object': self.commit, 'type': 'commit'}),
+            ('/git/refs', {'ref': self.ref, 'sha': self.object_sha}),
+            ('/actions/workflows/release.yml/dispatches', {
+                'ref': self.tag, 'inputs': {'tag': self.tag, 'expected_tag_object': self.object_sha},
+                'return_run_details': True,
+            }),
+        ])
+        self.assertIn('https://github.com/example/project/actions/runs/27', self.messages[-1])
+
+    def test_invalid_input_ci_failure_and_branch_collision_never_write(self):
+        with self.assertRaisesRegex(RuntimeError, 'vX.Y.Z'):
+            self.launch(tag='unusable version')
+        self.ci_conclusion = 'failure'
+        with self.assertRaisesRegex(RuntimeError, 'latest main push CI'):
+            self.launch()
+        self.ci_conclusion = 'success'
+        self.branch_collision = True
+        with self.assertRaisesRegex(RuntimeError, 'A branch'):
+            self.launch()
+        self.assertEqual(self.writes, [])
+
+    def test_existing_published_release_or_draft_never_writes(self):
+        for draft in (False, True):
+            with self.subTest(draft=draft):
+                self.releases = [{'tag_name': self.tag, 'draft': draft, 'html_url': 'https://example.test/release'}]
+                state = 'draft' if draft else 'published'
+                with self.assertRaisesRegex(RuntimeError, f'{state} release already exists'):
+                    self.launch()
+        self.assertEqual(self.writes, [])
+
+    def test_main_advancing_after_preflight_prevents_ref_creation(self):
+        def request(path, body=None):
+            result = self.request(path, body)
+            if path == self.api_root + '/git/tags':
+                self.head = 'd' * 40
+            return result
+
+        with self.assertRaisesRegex(RuntimeError, 'main advanced before the tag reference'):
+            self.launch(request)
+        self.assertEqual([path for path, _ in self.writes], ['/git/tags'])
+
+    def test_retry_reuses_same_commit_and_rejects_other_commit(self):
+        self.existing_ref = self.tag_ref(self.object_sha)
+        self.assertEqual(self.launch(), 27)
+        self.assertEqual(len(self.writes), 1)
+        self.writes.clear()
+        self.annotation_commit = 'e' * 40
+        with self.assertRaisesRegex(RuntimeError, 'different commit'):
+            self.launch()
+        self.assertEqual(self.writes, [])
+
+    def test_retry_links_an_active_matching_run_without_dispatching(self):
+        self.existing_ref = self.tag_ref(self.object_sha)
+        active = {'id': 10, 'head_sha': self.commit, 'head_branch': self.tag,
+                  'display_title': f'Release {self.tag} ({self.object_sha})',
+                  'event': 'workflow_dispatch', 'path': '.github/workflows/release.yml', 'status': 'queued'}
+        self.release_runs = [
+            active, active | {'id': 11, 'event': 'pull_request'},
+            active | {'id': 12, 'head_sha': 'e' * 40}, active | {'id': 13, 'status': 'completed'},
+            active | {'id': 14, 'head_branch': 'main'}, active | {'id': 15, 'path': '.github/workflows/ci.yml'},
+            active | {'id': 16, 'display_title': f'Release {self.tag} ()'},
+            active | {'id': 17, 'display_title': f'Release {self.tag} ({"e" * 40})'},
+        ]
+        self.assertEqual(self.launch(), 10)
+        self.assertIn('/actions/runs/10', self.messages[-1])
+        self.assertEqual(self.writes, [])
+
+    def test_ref_conflict_reconciles_only_the_same_raw_object(self):
+        self.ref_error = HTTPError('/git/refs', 422, 'Reference exists', None, None)
+        self.ref_result = self.tag_ref('e' * 40)
+        with self.assertRaisesRegex(RuntimeError, 'Could not confirm creation'):
+            self.launch()
+        self.assertEqual(len(self.writes), 2)
+        self.existing_ref = None
+        self.ref_result = self.tag_ref(self.object_sha)
+        self.assertEqual(self.launch(), 27)
+
+    def test_truncated_ref_response_preserves_evidence_and_recovers_exact_ref(self):
+        self.ref_error = IncompleteRead(b'{"ref":')
+
+        def request(path, body=None):
+            if path == self.api_root + '/git/refs':
+                self.assertIn(self.object_sha, self.messages[0])
+            return self.request(path, body)
+
+        self.assertEqual(self.launch(request), 27)
+        self.assertEqual(len(self.writes), 3)
+
+    def test_dispatch_with_unknown_outcome_reports_recovery_and_does_not_retry(self):
+        self.dispatch_error = URLError('connection lost')
+        with self.assertRaisesRegex(RuntimeError, 'Could not confirm Release dispatch'):
+            self.launch()
+        self.assertEqual(len(self.writes), 3)
+        self.assertIn(self.object_sha, self.messages[0])
+        self.assertIn('/actions/workflows/release.yml', self.messages[1])
+
+    def test_worker_rejects_branch_mismatched_tag_invalid_sha_or_moved_object(self):
+        release_gate.verify_dispatch_tag(self.ref, self.tag, self.object_sha)
+        for ref, tag, sha in [('refs/heads/topic', self.tag, ''),
+                              (self.ref, 'v1.2.3' if self.tag != 'v1.2.3' else 'v1.2.4', ''),
+                              (self.ref, self.tag, 'x' * 40), (self.ref, self.tag, '')]:
+            with self.subTest(ref=ref, tag=tag, sha=sha), self.assertRaises(RuntimeError):
+                release_gate.verify_dispatch_tag(ref, tag, sha)
+        environment = {
+            'GITHUB_REPOSITORY': self.repo, 'GITHUB_REF': self.ref, 'GITHUB_REF_NAME': self.tag,
+            'GITHUB_SHA': self.commit, 'GITHUB_EVENT_NAME': 'workflow_dispatch',
+            'GH_TOKEN': 'test-token', 'REQUESTED_TAG': self.tag, 'EXPECTED_TAG_OBJECT': self.object_sha,
+        }
+        with (patch.dict(os.environ, environment, clear=True), patch.object(sys, 'argv', ['release_gate.py']),
+              patch.object(release_gate, 'verify_tag', return_value='e' * 40),
+              self.assertRaisesRegex(RuntimeError, 'changed before the tagged run began')):
+            release_gate.main()
 
 
 class QualityExecutionTests(unittest.TestCase):
