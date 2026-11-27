@@ -90,7 +90,7 @@ Watch-CheckedRun $pushRunId 'CI' 'push' 'main'
 
 #### 在 GitHub 网页启动
 
-使用有仓库写权限的账号打开 **Actions → Release → Run workflow**，选择 `main`，在 `tag` 中输入 `v` 加项目版本号，例如 `v0.5.2`，将 `expected_tag_object` 留空。[Release 工作流](https://github.com/xiaobing318/QCopilots-WebSearch/actions/workflows/release.yml)
+使用有仓库写权限的账号打开 **Actions → Release → Run workflow**，选择 `main`，在 `tag` 中输入尚未发布的项目版本标签，例如 `v0.5.2`。`expected_tag_object` 只用于从标签重试，`main` 上的准备作业会忽略它。[Release 工作流](https://github.com/xiaobing318/QCopilots-WebSearch/actions/workflows/release.yml)
 
 准备作业核对 `main` 上的项目版本和 CI 结果，创建带注释的标签，并以该标签调度实际发布运行。从准备作业摘要查看标签、提交 SHA、标签对象 SHA 和实际发布运行链接。确认摘要中的提交是已验收的提交，再通过链接核对构建、验收和上传结果。
 

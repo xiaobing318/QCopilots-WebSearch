@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-set(QCWS_VERSION "0.5.1")
+set(QCWS_VERSION "0.5.2")
 if(NOT QCWS_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
   message(FATAL_ERROR "QCWS_VERSION must contain three numeric components")
 endif()

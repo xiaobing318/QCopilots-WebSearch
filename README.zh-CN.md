@@ -8,7 +8,7 @@ QCopilots-WebSearch 是一个使用 C++20 和 Qt 6.12 的独立服务，提供�
 
 ## 安装与打开设置
 
-从发布页下载适合本机的安装包。[0.5.1 发布页](https://github.com/xiaobing318/QCopilots-WebSearch/releases/tag/v0.5.1)
+从发布页下载适合本机的安装包。[0.5.2 发布页](https://github.com/xiaobing318/QCopilots-WebSearch/releases/tag/v0.5.2)
 
 | 平台 | 安装包 | 设置命令 |
 | --- | --- | --- |
