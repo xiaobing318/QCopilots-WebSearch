@@ -139,13 +139,15 @@ def create_release_ref(request, api_root, ref, tag_object):
         raise RuntimeError(f'Could not confirm creation of {ref} with tag object {tag_object}')
 
 
-def active_release_run(request, api_root, tag, commit):
+def active_release_run(request, api_root, tag, commit, tag_object):
     query = urlencode({'branch': tag, 'head_sha': commit, 'per_page': 100})
     runs = request(api_root + '/actions/workflows/release.yml/runs?' + query)['workflow_runs']
+    dispatch_title = f'Release {tag} ({tag_object})'
     return max((run['id'] for run in runs
                 if run['head_branch'] == tag and run['head_sha'] == commit
                 and run['path'] == '.github/workflows/release.yml'
-                and run['event'] in ('push', 'workflow_dispatch')
+                and (run['event'] == 'push' or
+                     (run['event'] == 'workflow_dispatch' and run.get('display_title') == dispatch_title))
                 and run['status'] in ('requested', 'queued', 'pending', 'waiting', 'in_progress')),
                default=None)
 
@@ -182,7 +184,7 @@ def prepare_release(repository, commit, tag, request, report, root=Path('.')):
             raise RuntimeError('main advanced before the tag reference could be created')
         create_release_ref(request, api_root, ref, tag_object)
     else:
-        pending = active_release_run(request, api_root, tag, commit)
+        pending = active_release_run(request, api_root, tag, commit, tag_object)
         if pending is not None:
             report(f'Release is already queued or running: [Release run]({actions_url}/runs/{pending}).')
             return pending

@@ -305,11 +305,14 @@ class ManualReleaseTests(unittest.TestCase):
     def test_retry_links_an_active_matching_run_without_dispatching(self):
         self.existing_ref = self.tag_ref(self.object_sha)
         active = {'id': 10, 'head_sha': self.commit, 'head_branch': self.tag,
+                  'display_title': f'Release {self.tag} ({self.object_sha})',
                   'event': 'workflow_dispatch', 'path': '.github/workflows/release.yml', 'status': 'queued'}
         self.release_runs = [
             active, active | {'id': 11, 'event': 'pull_request'},
             active | {'id': 12, 'head_sha': 'e' * 40}, active | {'id': 13, 'status': 'completed'},
             active | {'id': 14, 'head_branch': 'main'}, active | {'id': 15, 'path': '.github/workflows/ci.yml'},
+            active | {'id': 16, 'display_title': f'Release {self.tag} ()'},
+            active | {'id': 17, 'display_title': f'Release {self.tag} ({"e" * 40})'},
         ]
         self.assertEqual(self.launch(), 10)
         self.assertIn('/actions/runs/10', self.messages[-1])

@@ -1,4 +1,5 @@
 name: Release
+run-name: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && format('Release {0} ({1})', inputs.tag, inputs.expected_tag_object) || format('Release {0}', github.ref_name) }}
 
 on:
   push:
