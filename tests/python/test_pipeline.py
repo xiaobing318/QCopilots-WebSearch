@@ -1,4 +1,4 @@
-"""Bootstrap decision parsing and privileged APT argument boundaries."""
+"""Build pipeline, package selection and privileged APT argument boundaries."""
 import hashlib
 import io
 import json
@@ -16,6 +16,58 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 import pipeline
+import ci_packages
+
+
+class CiPackageTests(unittest.TestCase):
+    def test_ci_does_not_use_a_package_from_a_previous_build(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            project = workspace / "CMakeLists.txt"
+            project.write_text('set(QCWS_VERSION "1.2.3")\n', encoding="utf-8")
+            root = workspace / "packages"
+            previous = root / "20261126T010203"
+            previous.mkdir(parents=True)
+            zip_name = "QCopilots-WebSearch-1.2.3-win-amd64.zip"
+            msi_name = "QCopilots-WebSearch-1.2.3-win-amd64.msi"
+            (previous / msi_name).write_bytes(b"previous")
+            current = root / "20261126T010204"
+
+            def publish(_command, *, check):
+                self.assertTrue(check)
+                current.mkdir()
+                (current / zip_name).write_bytes(b"current ZIP")
+
+            with patch.object(ci_packages.subprocess, "run", side_effect=publish):
+                directory = ci_packages.run_packaging(root, ["pipeline"])
+            self.assertEqual(directory, current.resolve())
+            with self.assertRaisesRegex(RuntimeError, "Expected package files"):
+                ci_packages.select_packages(directory, windows=True, project=project)
+
+            (current / msi_name).write_bytes(b"current MSI")
+            (current / f"{zip_name}.sha256").write_bytes(b"checksum")
+            selected = ci_packages.select_packages(directory, windows=True, project=project)
+            self.assertEqual(selected, {".zip": directory / zip_name, ".msi": directory / msi_name})
+            self.assertEqual(selected[".msi"].read_bytes(), b"current MSI")
+
+    def test_ci_checks_actual_filename_case(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            project = directory / "CMakeLists.txt"
+            project.write_text('set(QCWS_VERSION "1.2.3")\n', encoding="utf-8")
+            (directory / "qcopilots-websearch-1.2.3-linux-amd64.deb").write_bytes(b"DEB")
+            with self.assertRaisesRegex(RuntimeError, "Expected package files"):
+                ci_packages.select_packages(directory, windows=False, project=project)
+
+    def test_ci_requires_one_new_package_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            def publish(_command, *, check):
+                (root / "20261126T010203").mkdir()
+                (root / "20261126T010204").mkdir()
+            with patch.object(ci_packages.subprocess, "run", side_effect=publish):
+                with self.assertRaisesRegex(RuntimeError, "Expected one new package directory"):
+                    ci_packages.run_packaging(root, ["pipeline"])
 
 
 class PipelineTests(unittest.TestCase):

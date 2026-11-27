@@ -14,7 +14,7 @@ QCopilots-WebSearch 是一个使用 C++20 和 Qt 6.12 的独立服务，提供�
 | --- | --- | --- |
 | Windows 11 | MSI，为安装版本注册系统服务 | 在该版本安装目录的 `bin` 下运行 `qcopilots-websearch.exe --SettingsUrl` |
 | Windows 11 | ZIP，解压到私有可写目录后启动可执行文件 | 运行 `.\bin\qcopilots-websearch.exe --SettingsUrl` |
-| Ubuntu 26.04 | DEB，用 apt 安装 `qcopilots-websearch-<版本>_amd64.deb` | 运行 `sudo /opt/qcopilots-websearch-<版本>/bin/qcopilots-websearch --SettingsUrl` |
+| Ubuntu 26.04 | DEB，用 apt 安装下载的 `.deb` 文件 | 运行 `sudo /opt/qcopilots-websearch-<版本>/bin/qcopilots-websearch --SettingsUrl` |
 
 不同版本的 MSI 或 DEB 可在同一台机器上同时运行。每个版本的配置、令牌、设置和缓存均保存在自己的 `bin/data` 目录。安装程序首次安装时选用可用的回环端口。连接时使用对应版本记录的端口和凭据。
 

@@ -65,7 +65,8 @@ class Installation:
         self.version = metadata(archive, "Version")
         require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", self.version) is not None, "Wrong version format")
         self.name = f"{APP_NAME}-{self.version}"
-        require(archive.name == f"{self.name}_amd64.deb", "Unexpected DEB filename")
+        require(archive.name in (f"QCopilots-WebSearch-{self.version}-linux-amd64.deb", f"{self.name}_amd64.deb"),
+                "Unexpected DEB filename")
         require(metadata(archive, "Package") == self.name and metadata(archive, "Architecture") == "amd64",
                 "Wrong package identity")
         self.unit = self.name + ".service"

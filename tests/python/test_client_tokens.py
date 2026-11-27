@@ -448,7 +448,7 @@ def verify_release_config(executable, folder):
     }, "Portable initialization did not generate the public business defaults")
 
     peer_version = "999.999.999" if version != "999.999.999" else "1.2.3"
-    peer = folder / f"qcopilots-websearch-{peer_version}" / "bin" / "data" / "runtime.json"
+    peer = folder / f"QCopilots-WebSearch-{peer_version}-win-amd64" / "bin" / "data" / "runtime.json"
     peer.parent.mkdir(parents=True)
     peer.write_text(json.dumps(value | {"project_version": peer_version}), encoding="utf-8")
     peer_bytes = peer.read_bytes()

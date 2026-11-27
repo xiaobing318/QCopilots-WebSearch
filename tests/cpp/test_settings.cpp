@@ -131,7 +131,8 @@ int main(int argc, char **argv) {
                               "different project release");
     requireConfigurationError(businessWithOrigins, runtimePath, "does not match its schema");
     for (const auto *layout : {"qcopilots-websearch-%1/runtime.json", "qcopilots-websearch-%1/service.json",
-                               "QCopilots-WebSearch-%1-win64/bin/data/runtime.json"}) {
+                               "QCopilots-WebSearch-%1-win64/bin/data/runtime.json",
+                               "QCopilots-WebSearch-%1-win-amd64/bin/data/runtime.json"}) {
       const auto relativePath = QString::fromLatin1(layout).arg(QString::fromStdString(otherVersion));
       requireConfigurationError(businessWithOrigins, QDir(temporary.path()).filePath(relativePath),
                                 "different project release");

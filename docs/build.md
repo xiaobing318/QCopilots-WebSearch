@@ -45,7 +45,7 @@ wix extension add -g WixToolset.UI.wixext/7.0.1 -acceptEula wix7
 
 将工具目录加入 PATH，或在本地配置方案中设置 `tools.wix`。CPack 通过 `CPACK_WIX_VERSION=4` 使用 WiX .NET 驱动。WiX 条款见[许可证与可替换库](licensing.md)。
 
-`publish` 阶段将软件包输出到所选配置方案的 `buildDir/packages/<timestamp>`。安装 MSI 需要提升权限才能注册系统服务。推送版本标签后，GitHub 会构建和测试该版本，通过后再发布软件包。详见 [GitHub 发布流程](release.md)。
+`publish` 阶段将软件包输出到所选配置方案的 `buildDir/packages/<timestamp>`。CPack 直接生成 `QCopilots-WebSearch-<版本>-win-amd64.zip`、`QCopilots-WebSearch-<版本>-win-amd64.msi` 和 `QCopilots-WebSearch-<版本>-linux-amd64.deb`。沿用旧构建目录时，先重新运行 `configure` 更新 CPack 配置，再运行 `publish`。安装 MSI 需要提升权限才能注册系统服务。[GitHub 发布流程](release.md)
 
 <a name="test"></a>
 

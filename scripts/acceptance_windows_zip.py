@@ -386,12 +386,15 @@ def main():
     package = args.Package.resolve(strict=True)
     output = args.Output.resolve()
     need(package != output and package.suffix.lower() == '.zip', 'Invalid ZIP or output')
-    package_name = re.fullmatch(r'QCopilots-WebSearch-([0-9]+\.[0-9]+\.[0-9]+)-win64\.zip', package.name)
+    package_name = re.fullmatch(r'QCopilots-WebSearch-([0-9]+\.[0-9]+\.[0-9]+)-(?:win-amd64|win64)\.zip', package.name)
     need(package_name, 'Unexpected portable package filename')
     need(digest(package) == args.PackageSHA256.lower(), 'Candidate ZIP hash mismatch')
     inventory = package_files(package)
     need(inventory and all(item.get('hashes') for item in inventory), 'Windows ZIP must contain regular files')
-    names = {item["name"].casefold() for item in inventory}
+    member_paths = {item['name'] for item in inventory}
+    executable_path = f'{package.stem}/bin/qcopilots-websearch.exe'
+    need(executable_path in member_paths, 'Windows ZIP is missing the expected executable path')
+    names = {path.casefold() for path in member_paths}
     for required in ("licenses/strata/license", "licenses/web/third_party_notices.txt", "config/settings.schema.json"):
         need(any(name.endswith("/" + required) for name in names), f"Missing portable asset: {required}")
     need(not any(name.endswith(("/libssl-3-x64.dll", "/libcrypto-3-x64.dll", "/qopensslbackend.dll")) for name in names),
@@ -407,8 +410,10 @@ def main():
         moved = folder / 'relocated package 中文'
         need(original.resolve(strict=True).parent == moved.resolve().parent == folder, 'Unsafe ZIP relocation path')
         shutil.move(str(original), str(moved))
+        need({entry.name for entry in moved.iterdir()} == {package.stem}, 'Unexpected ZIP extraction root')
         found = list(moved.rglob('qcopilots-websearch.exe'))
-        need(len(found) == 1 and ' ' in str(found[0]) and '中文' in str(found[0]), 'Ambiguous relocated executable')
+        need(found == [moved / executable_path] and ' ' in str(found[0]) and '中文' in str(found[0]),
+             'Ambiguous relocated executable')
         cwd = folder / 'unrelated working directory'
         cwd.mkdir()
         env = os.environ.copy()

@@ -14,7 +14,7 @@ Download the package for your platform from the [0.5.1 release](https://github.c
 | --- | --- | --- |
 | Windows 11 | MSI. Registers a service for the installed version | Run `qcopilots-websearch.exe --SettingsUrl` from that version's installed `bin` directory |
 | Windows 11 | ZIP. Extract to a private writable directory and start the executable | Run `.\bin\qcopilots-websearch.exe --SettingsUrl` |
-| Ubuntu 26.04 | DEB. Install `qcopilots-websearch-<version>_amd64.deb` with apt | Run `sudo /opt/qcopilots-websearch-<version>/bin/qcopilots-websearch --SettingsUrl` |
+| Ubuntu 26.04 | DEB. Install the downloaded `.deb` file with apt | Run `sudo /opt/qcopilots-websearch-<version>/bin/qcopilots-websearch --SettingsUrl` |
 
 Different MSI or DEB versions can run on the same host. Each version keeps
 its configuration, credentials, settings and cache in its own `bin/data`

@@ -111,14 +111,23 @@ jobs:
           Add-Content -LiteralPath $env:GITHUB_PATH -Value $wixToolDir
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "WIX_EXTENSIONS=$env:WIX_EXTENSIONS"
       - name: Bootstrap, build, test and package
+        id: package
         shell: python
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         run: |
-          import os, subprocess, sys
-          subprocess.run([
+          import os, sys
+          from pathlib import Path
+          from scripts.ci_packages import run_packaging
+
+          profile = os.environ["QCWS_PROFILE"]
+          directory = run_packaging(Path("build", profile, "packages"), [
               sys.executable, "scripts/pipeline.py", "--ConfigPath", "config/BuildPipeline.json",
-              "--Profile", os.environ["QCWS_PROFILE"],
+              "--Profile", profile,
               "--Stages", "bootstrap,doctor,configure,build,test,install,publish",
-          ], check=True)
+          ])
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"directory={directory.as_posix()}\n")
       - name: Locate the staged service executable
         shell: python
         run: |
@@ -153,38 +162,38 @@ jobs:
       - name: Verify the packaged service
         shell: python
         env:
+          PYTHONPATH: ${{ github.workspace }}
+          QCWS_PACKAGE_DIR: ${{ steps.package.outputs.directory }}
           QCWS_FULL_ACCEPTANCE: ${{ (inputs.release || github.event_name == 'workflow_dispatch') && 'true' || 'false' }}
         run: |
           import hashlib, json, os, shutil, subprocess, sys
           from pathlib import Path
-
-          def package(build, suffix):
-              candidates = list(Path(build, "packages").glob(f"*/*{suffix}"))
-              if len(candidates) != 1:
-                  raise RuntimeError(f"Expected one {suffix} package in {build}")
-              return candidates[0].resolve()
+          from scripts.ci_packages import select_packages
 
           def digest(path):
               with path.open("rb") as stream:
                   return hashlib.file_digest(stream, "sha256").hexdigest()
 
-          build = Path("build", os.environ["QCWS_PROFILE"])
+          if not os.environ["QCWS_PACKAGE_DIR"]:
+              raise RuntimeError("The package build did not provide its output directory")
+          directory = Path(os.environ["QCWS_PACKAGE_DIR"])
+          packages = select_packages(directory, windows=os.name == "nt")
           output = Path(os.environ["QCWS_ACCEPTANCE_DIR"])
           if os.name == "nt":
-              zip_file = package(build, ".zip")
+              zip_file = packages[".zip"]
               subprocess.run([
                   sys.executable, "scripts/acceptance_windows_zip.py", "--Package", str(zip_file),
                   "--PackageSHA256", digest(zip_file), "--Output", str(output / "zip.json"),
               ], check=True)
               if os.environ["QCWS_FULL_ACCEPTANCE"] == "true":
-                  candidate = package(build, ".msi")
+                  candidate = packages[".msi"]
                   subprocess.run([
                       "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                       "scripts/AcceptWindowsMsi.ps1", "--CandidateMsi", str(candidate),
                       "--CandidateSHA256", digest(candidate), "--OutputDir", str(output / "msi"),
                   ], check=True)
           else:
-              candidate = package(build, ".deb")
+              candidate = packages[".deb"]
               report_path = output / "deb.json"
               subprocess.run([
                   "sudo", "/usr/bin/python3", "scripts/acceptance_deb.py", "--Package", str(candidate),
@@ -195,15 +204,14 @@ jobs:
               print(f"Candidate DEB SHA-256: {report['candidateSha256']}")
               for name, check in report["checks"].items():
                   print(f"{name}: {check['status']}")
-          distribution = build / "release-packages"
+          distribution = directory / "release-packages"
           distribution.mkdir()
-          suffixes = (".zip", ".msi") if os.name == "nt" else (".deb",)
-          for suffix in suffixes:
-              shutil.copy2(package(build, suffix), distribution)
+          for package in packages.values():
+              shutil.copy2(package, distribution)
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: packages-${{ matrix.platform }}
-          path: build/ci-${{ matrix.platform }}/release-packages/
+          path: ${{ steps.package.outputs.directory }}/release-packages/
           if-no-files-found: error
           retention-days: 14
           overwrite: true
@@ -219,7 +227,7 @@ jobs:
           overwrite: true
 
   quality:
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: ${{ !inputs.release && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     needs: web
     runs-on: ubuntu-26.04
     timeout-minutes: 120
