@@ -56,7 +56,7 @@ MSI 和 DEB 安装包会为每个项目版本注册独立服务。首次安装�
 
 `--Stdio` 使用同版本可执行文件旁的 `data/runtime.json`。仅在确认该配置不存在时，才采用内置的自动搜索及进程私有的临时设置与缓存。共享部署配置的 stdio 进程使用后台管理的设置，页面快照始终归当前子进程所有。配置不兼容或不可读时，启动诊断写入 stderr，进程以非零状态退出。
 
-需要自己的配置时，向 `args` 追加 `["--ConfigPath", "/absolute/path/to/runtime.json"]`。从安装或解压根目录的 `share/qcopilots-websearch/config/runtime.json` 将模板复制到用户自有目录，按需指定 `settings.directory`。DEB 的安装根目录为 `/opt/qcopilots-websearch-0.5.1`。安装服务的数据目录受限时，可以使用自己的配置或通过 HTTPS 与 Bearer 连接服务。
+需要自己的配置时，向 `args` 追加 `["--ConfigPath", "/absolute/path/to/runtime.json"]`。从安装或解压根目录的 `share/qcopilots-websearch/config/runtime.json` 将模板复制到用户自有目录，按需指定 `settings.directory`。DEB 的安装根目录为 `/opt/qcopilots-websearch-<已安装版本>`。安装服务的数据目录受限时，可以使用自己的配置或通过 HTTPS 与 Bearer 连接服务。
 
 llama.cpp WebUI 中添加 Streamable HTTP 服务器，URL 填部署的 `/mcp` 地址，自定义请求头 `Authorization` 填 `Bearer <业务授权码>`。直接连接时关闭 WebUI 的 CORS 代理。发现工具后先调用 `web_search_status`，再用 `web_search` 验证选定的搜索后端。
 
@@ -259,7 +259,7 @@ CLI 默认客户端 ID 为 `local`。对于新 ID，命令会添加条目。对�
 对于 DEB 安装，以管理员身份生成凭据，再用该版本的服务账号检查配置并重启服务。
 
 ```bash
-version=0.5.1
+read -r -p '输入要管理的已安装版本号: ' version
 package=qcopilots-websearch-$version
 executable="/opt/$package/bin/qcopilots-websearch"
 config_path="/opt/$package/bin/data/runtime.json"
@@ -272,7 +272,7 @@ sudo systemctl restart "$package.service"
 对于 MSI 安装，将 `installRoot` 设为安装程序实际使用的目录，然后在以管理员身份打开的 PowerShell 中运行以下命令。便携版请指定其运行配置路径，并省略 `--ServiceName`。
 
 ```powershell
-$version = '0.5.1'
+$version = Read-Host '输入要管理的已安装版本号'
 $serviceName = "QCopilotsWebSearch-$version"
 $installRoot = Join-Path $env:ProgramFiles "QCopilots-WebSearch-$version"
 $executable = Join-Path $installRoot 'bin\qcopilots-websearch.exe'

@@ -58,11 +58,11 @@ Windows 出站 HTTPS 使用系统 Schannel，入站业务 HTTPS 使用随服务�
 
 Windows 的安装提交清理失败时，会留下私有的 `.qcws-install-*.json` 回滚记录。删除其中引用的文件前，应先检查安装日志及记录的事务。安装正常完成后不会留下该文件。
 
-如果 DEB 的维护脚本执行失败，dpkg 可能将软件包标记为 `half-configured`。排除故障后，运行 `sudo dpkg --configure qcopilots-websearch-0.5.1` 重新配置该包。
+如果 DEB 的维护脚本执行失败，dpkg 可能将软件包标记为 `half-configured`。排除故障后，将 `version` 设为受影响的版本号，运行 `sudo dpkg --configure "qcopilots-websearch-$version"` 重新配置该包。
 
 Windows MSI 的 `QCWS_TEST_FAILPOINT` 属性专供测试使用，可以让安装在初始化后或服务启动后主动失败。该属性默认不生效，只有管理员明确传入测试值才会触发。它可使用原样的候选 MSI 文件验证回滚，应始终排除在部署自动化之外。
 
-卸载前，请确认要移除的确切版本。在 Windows 的「已安装的应用」中卸载对应的 MSI 条目。在 Ubuntu 上，请使用包含版本的包名，例如 `sudo apt remove qcopilots-websearch-0.5.1`。这两种卸载方式都会保留该版本的 `bin/data` 目录。对 DEB 执行 purge 会移除该版本的 `bin/data/runtime.json`，其令牌、状态数据和服务账户会保留。仅在有意重置该版本时，才应在备份完成后删除保留的文件。
+卸载前，请确认要移除的确切版本。在 Windows 的「已安装的应用」中卸载对应的 MSI 条目。在 Ubuntu 上，将 `version` 设为要移除的版本号，运行 `sudo apt remove "qcopilots-websearch-$version"`。这两种卸载方式都会保留该版本的 `bin/data` 目录。对 DEB 执行 purge 会移除该版本的 `bin/data/runtime.json`，其令牌、状态数据和服务账户会保留。仅在有意重置该版本时，才应在备份完成后删除保留的文件。
 
 <a name="limits-of-public-retrieval"></a>
 
